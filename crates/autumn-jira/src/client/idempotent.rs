@@ -115,6 +115,14 @@ impl JiraClient {
     /// finds the issue. The client never sends the POST a second time in
     /// one call.
     ///
+    /// A 2xx that does not decode, or that is not 201, also goes to the
+    /// lookups.
+    ///
+    /// After `OutcomeUnknown` with the marker (`outcome_pending`), do not
+    /// call this function again for the key. The pre-lookup reads a search
+    /// index that can lag, so it can miss the first issue. Retry with
+    /// [`Self::find_by_idempotency_key`] only (plan 7.2).
+    ///
     /// # Errors
     ///
     /// `OutcomeUnknown` with the marker when the lookups find nothing.
@@ -209,6 +217,10 @@ impl JiraClient {
 
     /// Adds a comment at most once for a key. The last paragraph of the
     /// body is the marker `autumn-ref: <26 chars>`.
+    ///
+    /// After `OutcomeUnknown` with the marker, retry with
+    /// [`Self::find_comment_by_idempotency_key`] only, as for
+    /// [`Self::create_issue_idempotent`].
     ///
     /// # Errors
     ///

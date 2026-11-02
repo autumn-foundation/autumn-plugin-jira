@@ -288,6 +288,13 @@ pub enum JiraError {
         status: u16,
     },
     /// The write can have reached Jira. The client did not send it again.
+    ///
+    /// With a marker, the code is `outcome_pending` and the error is
+    /// retryable. The retry must be a lookup only:
+    /// `find_by_idempotency_key` or `find_comment_by_idempotency_key`. Do
+    /// not call the idempotent write again. The search index can lag, so a
+    /// new pre-lookup can miss the first write, and the write then goes
+    /// out a second time.
     #[error("jira {op}: outcome unknown ({cause:?}); not sent again")]
     OutcomeUnknown {
         /// The operation.
@@ -466,6 +473,9 @@ impl JiraError {
     }
 
     /// Returns `true` when a later retry can help: `class().retryable`.
+    ///
+    /// For `outcome_pending` (an `OutcomeUnknown` with a marker), the retry
+    /// is a marker lookup only, never the same write again.
     #[must_use]
     pub const fn is_retryable(&self) -> bool {
         self.class().retryable
