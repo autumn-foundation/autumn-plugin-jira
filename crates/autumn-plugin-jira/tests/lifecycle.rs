@@ -427,3 +427,21 @@ async fn the_configured_cloud_id_is_for_the_default_connection_only() {
         .unwrap();
     assert_eq!(acme.count(FakeOp::Myself), 2);
 }
+
+/// R7-api-docs-6: a prebuilt client keeps its own settings. So a
+/// `[jira.http]` that is not the default fails the start, and the setting
+/// is never ignored without a sign.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_prebuilt_client_with_a_jira_http_table_conflicts() {
+    let mut config = autumn_plugin_jira::JiraConfig::default();
+    config.http.max_attempts = 2;
+    let e = start_err(JiraPlugin::with_config(config).client(client_on(Arc::new(FakeJira::new()))));
+    assert!(
+        matches!(e, PluginError::Conflict("client(..)", "[jira.http]")),
+        "{e:?}"
+    );
+    // The default table passes.
+    plugin(&FakeJira::new())
+        .start(&AppState::for_test())
+        .unwrap();
+}
