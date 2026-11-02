@@ -142,3 +142,37 @@ async fn details_have_no_pii() {
         assert!(!text.contains(secret), "{secret} in {text}");
     }
 }
+
+/// R10-plugin-ecosystem-2, R7-api-docs-1: with no `connection_id`, the
+/// plugin serves the tenants through `for_connection` only. The indicator
+/// does not probe, and it does not fail `/actuator/health`.
+#[tokio::test(flavor = "multi_thread")]
+async fn no_default_connection_is_not_down() {
+    use autumn_plugin_san_mateo::{SanMateoConfig, SanMateoPlugin};
+    let fake = FakeJira::new();
+    let counting = Counting::new(Arc::new(fake.clone()));
+    let client = autumn_web::test::TestApp::new()
+        .config(autumn_config())
+        .plugin(
+            SanMateoPlugin::with_config(SanMateoConfig::default())
+                .service(san_mateo(Arc::new(counting.clone())))
+                .background(false),
+        )
+        .plugin(JiraPlugin::with_config(san_mateo_config(None)))
+        .build();
+    let r = client.get("/actuator/health").send().await;
+    let body = json_of(&r);
+    let jira = &body["components"]["jira"];
+    assert_eq!(jira["status"], json!("UNKNOWN"), "{body}");
+    assert_eq!(jira["details"]["mode"], json!("san_mateo"), "{body}");
+    assert!(
+        jira["details"]["reason"]
+            .as_str()
+            .is_some_and(|r| r.contains("for_connection")),
+        "{body}"
+    );
+    assert!(jira["details"].get("error").is_none(), "{body}");
+    assert!(jira["details"]["webhook"].is_object(), "{body}");
+    assert_eq!(r.status.as_u16(), 200, "{body}");
+    assert_eq!(counting.count(), 0, "no probe goes to Jira");
+}
