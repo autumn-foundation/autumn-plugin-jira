@@ -104,8 +104,9 @@ pub enum StatusWait {
 /// 2. One read with `jira_get_issue`. At the target, the wait ends with
 ///    [`WaitSource::Initial`].
 /// 3. `deadline = ctx.system_now() + timeout`. The history records each
-///    `system_now()`, so a replay sees the same times. `ctx.now()` stays at
-///    the start time in production, so the wait never uses it.
+///    `system_now()`, so a replay sees the same times. The workflow clock
+///    `now` of the context stays at the start time in production, so the
+///    wait never reads it (W2, B1).
 /// 4. Each round races the signal [`SIGNAL`] against a fresh timer of
 ///    `min(remaining, poll_every)`. A signal of another issue, or with a
 ///    timestamp older than the newest one seen, is skipped. A skipped signal
@@ -288,5 +289,49 @@ pub(crate) fn harvest_failure(error: &HarvestError) -> WorkflowFailure {
     match error.activity_details() {
         Some(details) => failure.with_details(details.clone()),
         None => failure,
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "tests")]
+mod tests {
+    use super::*;
+
+    /// Guard (W2, M8): no workflow code of this crate reads the clock that
+    /// stays at the start time in production.
+    #[test]
+    fn no_ctx_now_in_src() {
+        let banned = ["ctx", ".now("].concat();
+        for (name, text) in [
+            ("lib.rs", include_str!("lib.rs")),
+            ("activities.rs", include_str!("activities.rs")),
+            ("bridge.rs", include_str!("bridge.rs")),
+            ("clients.rs", include_str!("clients.rs")),
+            ("failure.rs", include_str!("failure.rs")),
+            ("route.rs", include_str!("route.rs")),
+            ("wait.rs", include_str!("wait.rs")),
+        ] {
+            assert!(!text.contains(&banned), "{name} reads the start-time clock");
+        }
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+        let files = std::fs::read_dir(dir).unwrap().count();
+        assert_eq!(files, 7, "a new file in src/ needs a line in this guard");
+    }
+
+    #[test]
+    fn helpers() {
+        assert!(is_older(Some(1), Some(2)));
+        assert!(!is_older(Some(2), Some(2)));
+        assert!(!is_older(None, Some(2)));
+        assert!(!is_older(Some(1), None));
+        let options = WaitOptions::new(Duration::from_secs(60));
+        assert_eq!(options.poll_every, Some(DEFAULT_POLL_EVERY));
+        assert_eq!(options.client, ClientRef::Default);
+        let failure = invalid_timeout();
+        assert_eq!(failure.error_type, INVALID_INPUT_ERROR);
+        assert!(failure.non_retryable);
+        let plain = harvest_failure(&HarvestError::Config("no branch".into()));
+        assert_eq!(plain.error_type, WORKFLOW_ERROR);
+        assert_eq!(plain.details, None);
     }
 }
