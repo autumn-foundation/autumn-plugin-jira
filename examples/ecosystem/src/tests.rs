@@ -286,6 +286,34 @@ async fn webhook_negatives() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_delivery_of_another_site_is_refused() {
+    let Some(url) = database_url() else { return };
+    let scenario = Scenario {
+        other_site_copy: true,
+        ..Scenario::happy()
+    };
+    let (report, _sites) = Box::pin(run_scenario(&url, &scenario)).await;
+    let report = report.expect("the run ends");
+    // The copy of another site comes first. autumn verifies it, so it gets
+    // 200. The bridge knows the host of its site (R2F-fixcheck-a-2): it
+    // refuses the copy, makes no call and counts it in `other_site`.
+    assert_eq!(report.webhook_statuses, vec![200, 200]);
+    assert_eq!(report.bridge.deliveries, 2, "{:?}", report.bridge);
+    assert_eq!(report.bridge.other_site, 1, "{:?}", report.bridge);
+    // Only the delivery of the own site signals the run.
+    assert_eq!(report.bridge.signalled, 1, "{:?}", report.bridge);
+    assert_eq!(report.bridge.finished, 0, "{:?}", report.bridge);
+    assert_eq!(
+        report.summary.lines[6],
+        "[7] autumn   POST /jira/webhook -> 200, 200; bridge signalled 1 run"
+    );
+    assert_eq!(
+        report.summary.lines[7],
+        "[8] harvest  OPS-1 Done (source signal) -> comment (created) -> chat message 201"
+    );
+}
+
 /// The second tenant: its own site, cloud id and tokens.
 const GLOBEX_CLOUD_ID: &str = "99999999-8888-4777-8666-555555555555";
 

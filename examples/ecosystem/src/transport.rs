@@ -36,6 +36,9 @@ pub const CHAT_INTEGRATION: &str = "team-chat";
 pub const CHAT_CONNECTION: &str = "team";
 /// The chat endpoint that the `notify` route calls.
 pub const CHAT_MESSAGES_URL: &str = "https://chat.example/v1/messages";
+/// The URL of the Jira site of the example. It is the `url` of the site in
+/// `accessible-resources`, and each delivery names it in `issue.self`.
+pub const SITE_URL: &str = "https://acme.atlassian.net";
 /// The project of the incidents.
 pub const PROJECT: &str = "OPS";
 /// The account id of the project lead. The escape hatch reads it.

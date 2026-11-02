@@ -70,12 +70,14 @@ use autumn_harvest_plugin::{
 use autumn_jira::JiraClient;
 use autumn_jira::san_mateo::clock::{Entropy, OsEntropy};
 use autumn_jira::san_mateo::{SanMateo, Secret};
+use autumn_jira::webhook::{DELIVERY_HEADER, SIGNATURE_HEADER};
 use autumn_jira_camel::JiraComponent;
-use autumn_jira_fake::{ANN, BOT, FakeOp, Fault};
+use autumn_jira_fake::{ANN, BOT, FakeDelivery, FakeOp, Fault};
 use autumn_jira_harvest::{
     BridgeCounters, HarvestSignalBridge, JiraClients, RouteKey, StatusWait, WaitSource,
 };
 use autumn_plugin_jira::testing::DeliverExt;
+use autumn_web::webhook::hmac_sha256_hex;
 use camel_component_direct::DirectComponent;
 use camel_core::CamelContext;
 use harvest_camel::{CamelHandle, HarvestBridge, call_route, check_route};
@@ -85,7 +87,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::routes::{ALERT_ID, ALERTS, NOTIFY, STREAM, routes};
 use crate::summary::{Summary, check};
-use crate::transport::{CHAT_MESSAGES_URL, ENV, PROJECT, Sites, TICK};
+use crate::transport::{CHAT_MESSAGES_URL, ENV, PROJECT, SITE_URL, Sites, TICK};
 use crate::workflow::{
     AlertInput, AttemptLog, INCIDENT_FLOW, IncidentOutput, WorkerName, incident_flow_info,
     notify_chat_info,
@@ -128,6 +130,10 @@ fn run_timeout() -> Duration {
 
 /// The knobs of one run. [`Scenario::happy`] is the run of `main`.
 #[derive(Debug, Clone)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each bool is one knob of a test scenario, not a state"
+)]
 pub struct Scenario {
     /// The webhook secret of the autumn app. The happy path uses the secret
     /// of the Jira site.
@@ -139,6 +145,10 @@ pub struct Scenario {
     /// After each delivery, the driver also posts the same delivery again,
     /// a tampered copy and a copy from the bot.
     pub webhook_negatives: bool,
+    /// Before each delivery, the driver posts a copy whose `issue.self`
+    /// names another site. The copy has its own delivery id and a good
+    /// signature, as when one webhook secret serves two sites by mistake.
+    pub other_site_copy: bool,
     /// The search index lag of the fake.
     pub index_lag: Duration,
     /// The wait before the attempt after a lost create reply.
@@ -158,6 +168,7 @@ impl Scenario {
             person_resolves: true,
             deliver: true,
             webhook_negatives: false,
+            other_site_copy: false,
             index_lag: Duration::from_secs(2),
             settle_secs: 3,
             wait_secs: 60 * u64::from(time_factor()),
@@ -759,6 +770,10 @@ async fn person_resolves(d: &Drive<'_>) -> Result<Vec<u16>, BoxError> {
         return Ok(statuses);
     }
     for delivery in d.sites.jira.take_deliveries() {
+        if d.scenario.other_site_copy {
+            let copy = other_site_copy(&delivery, &d.scenario.app_secret);
+            statuses.push(d.app.deliver(&copy).await.status.as_u16());
+        }
         statuses.push(d.app.deliver(&delivery).await.status.as_u16());
         if d.scenario.webhook_negatives {
             // Webhooks are at least once: the same delivery again. Then a
@@ -773,6 +788,31 @@ async fn person_resolves(d: &Drive<'_>) -> Result<Vec<u16>, BoxError> {
         }
     }
     Ok(statuses)
+}
+
+/// The site of the copy of [`other_site_copy`].
+const OTHER_SITE_URL: &str = "https://globex.atlassian.net";
+
+/// A copy of a delivery whose `self` links name another site. The copy has
+/// its own delivery id and a good signature with `secret`. So it passes the
+/// checks of autumn, and only the site check of the bridge can refuse it.
+fn other_site_copy(delivery: &FakeDelivery, secret: &str) -> FakeDelivery {
+    let body = String::from_utf8_lossy(&delivery.body).replace(SITE_URL, OTHER_SITE_URL);
+    let signature = format!(
+        "sha256={}",
+        hmac_sha256_hex(secret.as_bytes(), body.as_bytes())
+    );
+    let id = format!("{}-other-site", delivery.id());
+    let mut copy = delivery.clone();
+    for (name, value) in &mut copy.headers {
+        if name.eq_ignore_ascii_case(SIGNATURE_HEADER) {
+            value.clone_from(&signature);
+        } else if name.eq_ignore_ascii_case(DELIVERY_HEADER) {
+            value.clone_from(&id);
+        }
+    }
+    copy.body = body.into_bytes();
+    copy
 }
 
 /// The person, the webhook, the worker restart and the app route.
