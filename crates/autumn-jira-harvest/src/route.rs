@@ -6,6 +6,17 @@
 //! lower hex chars of `HMAC-SHA256(key, "v1\n" + name + "\n" + id)`. Only a
 //! holder of the [`RouteKey`] can make a tag, so a person cannot point an
 //! issue at another run. The check of a tag runs in constant time.
+//!
+//! Limit (R2-webhook-security-6): the tag binds the run, not the issue. A
+//! create puts the route into the create body, and Jira gives the issue id
+//! only after that call, so the tag cannot hold the issue id without a
+//! second write. A person who can edit issue properties can therefore copy
+//! a valid entry to another issue. The copy cannot move a wait: the wait
+//! checks the issue id of each signal, and the bridge reads the status from
+//! its own site. But each status change of that issue adds one signal to
+//! the history of the run. `MAX_SIGNAL_ROUNDS` bounds the rounds that a
+//! wait spends on such signals. Give the permission to edit issue
+//! properties only to people that you trust.
 
 use std::fmt;
 
