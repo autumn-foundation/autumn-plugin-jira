@@ -1,6 +1,7 @@
 # ADR 0002: One backend seam, two auth modes, fixed hosts
 
-- Status: Accepted
+- Status: Accepted. Amended after review round 2: the stored cloud id
+  check repeats after an interval (plan V101).
 - Date: 2026-11-02
 
 ## Context
@@ -31,6 +32,12 @@ A free-form base URL or a followed redirect is an SSRF path.
   from `get_integration`. The cloud id comes from config, then from the
   connection metadata, then from discovery. Discovery stores the id in the
   metadata with a merge.
+- A stored cloud id can go stale when a tenant connects to another site.
+  After a 401 or a 404 under a stored id, the backend checks the id again
+  with `accessible-resources`. It does this at most one time in each
+  `CLOUD_ID_RECHECK_INTERVAL` (300 s), so ordinary 404 replies do not each
+  make a call. A failed check clears the time. When the id is not listed
+  any more, the backend stores the new id (plan V55, V101).
 - `resolve_cloud_id` keeps entries with a Jira scope. It fails on zero
   matches, and on more than one match without a site URL.
 - A backend failure is `NotSent { transient }`, `MaybeSent` or `Auth`. Each

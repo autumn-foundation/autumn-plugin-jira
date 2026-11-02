@@ -3,7 +3,9 @@
 - Status: Accepted. Amended for design v3 (as built): the end-of-wait
   drain. Amended after review round 1: the drain function, the read times,
   the wait bounds, the bridge status read and its limits (plan V83 to
-  V89).
+  V89). Amended after review round 2 (plan V106 to V109, V114). These
+  amendments are the v2 tag, the site check, the payload status, the
+  wait after the signal cap, and one site for each app.
 - Date: 2026-11-02
 
 ## Context
@@ -24,7 +26,11 @@ records the wall clock in history.
 - Routes live in the issue property `autumn-jira-routes`:
   `{"routes": [{"wf": name, "id": workflow id, "tag": hmac}]}`. The tag is
   HMAC-SHA256 with an app `RouteKey` (32 bytes or more) over
-  `"v1\n" + name + "\n" + id`, cut to 32 hex chars.
+  `"v2\n" + name + "\n" + id + "\n" + kind + "\n" + value`, cut to 32
+  hex chars (plan V107). The binding (`RouteBinding`) ties the tag to one
+  issue. A create binds its marker label (`kind` is `label`). The client
+  knows that label before the POST, so the create stays one call. A watch
+  binds the issue id that it read (`kind` is `issue`).
 - One constant label `autumn-tracked` marks a routed issue. A Jira admin can
   filter webhooks at the source with `labels = autumn-tracked`.
 - `jira_create_issue` writes the label and the property in the create body.
@@ -35,12 +41,30 @@ records the wall clock in history.
   workflow names and resolves the run by workflow id. Then it calls
   `send_signal_idempotent` with the delivery id as the key. The key is kept
   for the life of the run.
-- Status read (plan V88): for a route that passes both checks, the bridge
-  reads the issue status on the site of its own client. The signal holds
-  that status and key, not the payload values. A delivery does not name
-  its site, and two sites can have the same issue id. So a delivery of
-  site B cannot give a wait on site A a false status. One bridge serves
-  one site, with its own endpoint and secret.
+- Status read (plan V88, V107): the bridge reads the status, the id and
+  the labels of the issue on the site of its own client. Then it checks
+  each tag against that id and those labels, and the allowlist. A copied
+  entry on another issue gives `BadTag`. Two sites can have the same
+  issue id, so a delivery of site B cannot give a wait on site A a false
+  status. One bridge serves one site.
+- Site check (plan V106): a bridge with a site host refuses a delivery
+  whose `Delivery::site()` is another host or `None`. It makes no call,
+  and it counts the delivery in `other_site`. A direct client of a subdomain site
+  sets the host by itself. For a san-mateo or a cloud id client, the app
+  calls `site_host(SiteHost::from_url(..))` with the site URL of
+  `accessible-resources`. With no host, the bridge does no site check.
+- Signal status (plan V108): the bridge can have a host, and the delivery
+  can pass the site check. Then the signal holds the payload status and
+  the payload time. Else it holds the status of the read. So a status that
+  the issue passes through for a short time can end a wait only when the
+  bridge knows its host.
+- One site for each app (plan V114): autumn skips a second `JiraPlugin`,
+  so an app takes the webhooks of one Jira site. A wait on another site
+  ends by poll.
+- v1 tags (plan V107): a v1 tag binds the run only. The bridge refuses it
+  with `BadTag` unless the app calls `accept_unbound_v1_tags()`. An app
+  turns that opt-in on during an upgrade, until the runs with v1 entries
+  end.
 - Register the bridge with `JiraPlugin::sink_for_all_actors` when the app
   moves issues with an account in `ignore_actor_account_ids` (plan V71).
   Else a status change by that account signals nothing, and only the poll
@@ -70,10 +94,17 @@ records the wall clock in history.
   it returns.
 - Read times (plan V86): each read of the wait moves the newest time by
   `issue.updated`, so a signal older than a read is stale.
-- Bounds (plan V83, V85, V87): a wait has at most `MAX_POLL_ROUNDS` (3000)
-  poll rounds. It takes at most `MAX_SIGNAL_ROUNDS` (1000) signals that do
-  not end it. Its deadline is at most `LAST_READ_MARGIN` (46 min) before
-  the execution deadline of the run. The waits of one run run one at a
+- Bounds (plan V83, V85, V87, V109): a wait has at most `MAX_POLL_ROUNDS`
+  (3000) poll rounds. It takes at most `MAX_SIGNAL_ROUNDS` (1000) signal
+  rounds that do not end it, and each round counts, also a skipped one.
+  After that cap it polls at `min(poll_every, DEFAULT_POLL_EVERY)`, also
+  with no `poll_every`, so it does not go blind. In the worst case the
+  rounds use less than 35 000 history events, so 15 000 stay for the rest
+  of the workflow. The cap bounds the race rounds, not the stored
+  `SignalReceived` events. Its deadline is at most `LAST_READ_MARGIN`
+  (46 min) before the execution deadline of the run. A poll read at or
+  after the deadline is the last read. The poll reads and the last read
+  do not wait for a `Retry-After`. The waits of one run run one at a
   time. A retryable failure of a poll read is a missed poll.
 
 ## Consequences
@@ -83,12 +114,15 @@ records the wall clock in history.
 - Good: a lost webhook (cap, `excludeBody`, Jira gave up) delays the wait by
   one poll period at most.
 - Bad: two GETs per tracked delivery: the routes property, then the
-  status of each routed delivery. A forged route makes no extra call.
-- Bad: the route tag binds the run, not the issue (plan V89). A copied
-  route entry on another issue can make signals for the run. The wait
-  checks the issue id of each signal, the bridge reads the status from
-  its site, and `MAX_SIGNAL_ROUNDS` bounds the rounds. A tag with the
-  issue id needs a second PUT after the create. That is an open decision.
+  issue (status, id and labels).
+- Bad: a person who copies a route entry together with the marker label
+  to another issue is not seen (plan V107). Then a status change of that
+  issue signals the run. The wait checks the issue id of each signal, so
+  the copy cannot end the wait.
+- Bad: a forged or copied entry costs one issue read now, still with no
+  database call.
+- Bad: during an upgrade with `accept_unbound_v1_tags()`, a copied v1
+  entry still works, as before.
 - Bad: `jira_watch_issue` does a read-modify-write of the property. Two
   watchers at the same moment can lose one route.
 - Bad: the bridge resolves runs on one shard. A multi-shard engine needs a

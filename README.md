@@ -173,8 +173,23 @@ sequenceDiagram
   state still needs those events. Add it with
   `JiraPlugin::sink_for_all_actors(sink)`. Only such sinks get the events
   of an ignored actor.
-- One endpoint and one secret serve one Jira site. A delivery does not
-  name its site, so give each site its own endpoint and secret.
+- An app takes the webhooks of one Jira site. The plugin has one route,
+  and autumn skips a second `JiraPlugin` with a warning. One endpoint and
+  one secret serve that one site. In a multi-tenant app, the waits on the
+  other sites end by poll.
+- `Delivery::site()` gives the host of `issue.self` and `comment.self`,
+  for example `acme.atlassian.net`. It gives `None` when the payload names
+  no site, or two different sites. A sink can refuse a delivery of
+  another site with it.
+- One comment add comes in two deliveries with different delivery ids:
+  `jira:issue_updated` (type `issue_commented`) and `comment_created`.
+  `JiraEvent::comment()` gives the comment of both. Dedupe by the comment
+  id, or act on `comment_created` only.
+- A sink can use `?` on a client call. A `JiraError` then becomes a
+  `HandlerError` with the retry class of the client. One exception: an
+  `outcome_pending` error becomes `Permanent`, so the route answers 200.
+  A 503 makes Jira send the delivery again, and a second write can then
+  make a duplicate while the marker lookup lags.
 - `max_body_bytes` is also the memory that one unsigned request can use.
   autumn reads the body before it checks the signature. Put limits on body
   size, rate and concurrency in your proxy, or set a smaller cap.
@@ -268,7 +283,10 @@ async fn main() {
 connection. The cache keeps at most 1024 clients and drops the least
 recently used one. Pass only connection ids that your app checked. When a
 tenant connects to another site, call `JiraService::forget(id)`. The next
-`for_connection(id)` then reads the site again.
+`for_connection(id)` then reads the site again. A client also checks its
+stored cloud id again after a 401 or a 404, at most one time in each
+`CLOUD_ID_RECHECK_INTERVAL` (300 s). So the default client finds a new
+site within that time.
 
 Other settings, with their defaults:
 
@@ -289,9 +307,11 @@ Rules for these keys:
 - `email_env` and `token_env` hold env var names. A value that is not a
   name fails the start, and the error does not show it. The fix TOML of
   the boot check never prints a `secret_env` that is not a name.
-- `timeout_secs` is at most 60, the transport timeout that the harvest
-  budgets hold for. In San Mateo mode, the San Mateo transport owns the
-  timeout.
+- In API token mode, `timeout_secs` is at most 60, the transport timeout
+  that the harvest budgets hold for. In San Mateo mode, the San Mateo
+  transport owns the timeout, and the plugin does not check this key.
+  Keep the San Mateo transport timeout at 60 s or less, or the harvest
+  budgets do not hold.
 - `JiraPlugin::client(prebuilt)` keeps the settings of that client. A
   `[jira.http]` table that is not the default then fails the start.
 
@@ -389,8 +409,8 @@ let (registry, _dags, _schedules, config) = HarvestBuilder::new()
 | `jira_get_issue` | Reads one issue. |
 | `jira_search_page` | Reads one search page at a token. |
 | `jira_edit_issue` | Edits an issue (idempotent). |
-| `jira_transition_to_status` | Moves to a status with a state check. A retry gives `already_there`. |
-| `jira_add_comment` | Adds a comment at most once for the key. |
+| `jira_transition_to_status` | Moves to a status with a state check. After an attempt that can have sent, the next attempt only reads the status: `already_there` at the target, else a non-retryable `jira.outcome_unknown`. |
+| `jira_add_comment` | Adds a comment at most once for the key. Attempt 1 sends with no lookup first. |
 | `jira_delete_issue` | Deletes. A 404 on an attempt after the first gives `gone_after_retry`. |
 | `jira_watch_issue` | Adds a route to an issue that a person made. A second call sends no PUT. |
 
@@ -398,7 +418,8 @@ The `start_to_close` of a read or an edit is 9 minutes. A create, a
 transition and a watch get 42 minutes, and a comment gets 70 minutes.
 These budgets hold for a San Mateo send of four transport calls of 60 s
 each. The comment lookup of `jira_add_comment` reads at most 3 pages. At
-that cap it fails closed and never sends the comment again.
+that cap it fails closed and never sends the comment again. Attempt 1
+has no lookup before the send, so a busy issue still gets the comment.
 
 `await_issue_status` waits until an issue reaches a status. Webhooks make
 the wait faster. The wait does not need them: a poll ends it too.
@@ -423,8 +444,14 @@ async fn wait_for_done(ctx: &WorkflowContext, issue: IssueId) -> Result<StatusWa
 - A poll read that fails with a retryable error is a missed poll. The
   wait goes on.
 - A wait has at most `MAX_POLL_ROUNDS` (3000) poll rounds. After
-  `MAX_SIGNAL_ROUNDS` (1000) signals that do not end it, only the polls
-  and the deadline can end it.
+  `MAX_SIGNAL_ROUNDS` (1000) signal rounds that do not end it, only the
+  polls and the deadline can end it. The wait then polls at least each
+  `DEFAULT_POLL_EVERY` (15 minutes), also with no `poll_every`. In the
+  worst case the rounds use less than 35 000 history events, so 15 000
+  stay for the rest of the workflow.
+- A poll read at or after the deadline is the last read. A rate-limited
+  poll read is a missed poll at once: the wait does not wait for a
+  `Retry-After`.
 - The waits of one run run one at a time. A second wait starts when the
   first wait ends.
 - A webhook can come after the wait, while the workflow does other work.
@@ -439,16 +466,32 @@ the property cannot signal another run. The delivery id is the signal
 idempotency key: a repeated delivery gives one signal. A database error
 gives 503, and Jira sends the delivery again.
 
-The bridge reads the status of the issue on the site of its own client. It
-does not trust the status in the payload. One bridge serves one site. The
-tag binds the run, not the issue, and the wait checks the issue id of each
-signal.
+The bridge reads the issue on the site of its own client. The tag binds
+the run and the issue: a create binds its marker label, and a watch binds
+the issue id. So a route entry that a person copies to another issue gives
+`BadTag`. A person who copies the entry and the marker label is not seen,
+but the wait checks the issue id of each signal. One bridge serves one
+site.
+
+Give the bridge the host of its site. It then refuses a delivery of
+another site or of no site, makes no call, and counts it in `other_site`.
+With a host, the signal holds the status of the payload, so a short
+status still ends a wait. An API token client of a subdomain site gives
+its host by itself. For a San Mateo client, use the site URL of
+`accessible-resources`:
 
 ```rust,ignore
-let bridge = HarvestSignalBridge::new(pool, client, route_key).allow_workflow("jira_ticket_lifecycle");
+let host = SiteHost::from_url(&resource.url).ok_or("no site host")?;
+let bridge = HarvestSignalBridge::new(pool, client, route_key)
+    .allow_workflow("jira_ticket_lifecycle")
+    .site_host(host);
 // sink_for_all_actors: a status change by an ignored account still signals the run.
 let plugin = JiraPlugin::new().sink_for_all_actors(bridge);
 ```
+
+Route entries made before this version have v1 tags, which bind no
+issue. The bridge refuses them. During an upgrade, call
+`accept_unbound_v1_tags()` until the runs with v1 entries end.
 
 `failure_for(&JiraError)` gives the harvest error type `jira.<code>`, the
 retry class of the client and `retry_after`. After an attempt that can
@@ -511,6 +554,16 @@ the create gives the issue, so the step needs `allowHeaderOverrides=true`.
   marked write does a lookup only. A redelivery of a write with no
   `HarvestIdempotencyKey` fails and sends nothing. So a camel `retry(..)`
   never sends a create or a comment two times.
+- A camel redelivery of `transitionToStatus`, or a harvest attempt above
+  1, only reads the status. At the target it gives `already_there`. Else
+  it fails with `jira outcome_unknown` and sends nothing.
+- camel keeps the redelivery headers on the exchange after a retried step
+  recovers. So a later `jira:` write in that exchange also does a lookup
+  only, or reads the status only, or fails when it has no
+  `HarvestIdempotencyKey`. The rule fails closed. Remove
+  `CamelRedelivered` and `CamelRedeliveryCounter` after a retried step
+  that is not a `jira:` step, or do not use camel redelivery before a
+  `jira:` write.
 
 ## The ecosystem example
 
@@ -573,11 +626,18 @@ lost reply, the client sends the transition again in one case only. The
 issue is still at the status of the first attempt, and the transition is
 not global and not looped. Jira rejects such a transition after a commit,
 so it cannot run two times. In all other cases, the call gives
-`OutcomeUnknown`. A retry after `outcome_pending` must be a lookup only,
-for example `find_by_idempotency_key`, never the write again.
+`OutcomeUnknown`. Any stop after such an attempt gives `OutcomeUnknown`
+too, also a 429 or a failed status read, and it is not retryable. A host
+that retries after an attempt that can have sent calls
+`resume_transition_to_status`: one status read and no send. A retry after
+`outcome_pending` must be a lookup only, for example
+`find_by_idempotency_key`, never the write again.
 
 The comment lookup reads the newest comments, page by page, up to
-`max_pages`. It matches only a comment by the account of the client with a
+`max_pages`. When the total drops between two pages, the next page starts
+back by that drop, so a delete does not hide the marker.
+`add_comment_idempotent_first` is for the first attempt: nothing can have
+sent the comment yet, so it skips the lookup before the POST. It matches only a comment by the account of the client with a
 line that is the full marker. `has_comment_marker` needs the full marker
 on the last line of a comment.
 
@@ -652,7 +712,8 @@ cargo update --manifest-path examples/ecosystem/Cargo.toml -p autumn-jira \
 The README snippets compile as doc tests of `autumn-plugin-jira`, with the
 `testing` feature. The harvest and camel snippets are marked `ignore`:
 the plugin crate does not depend on those crates. A snippet that says
-"From the ... example" holds only lines of that example. The test
+"From the ... example" holds only code lines of that example, in the
+same order. Comments and test code of the example do not count. The test
 `readme_snippets_copy_their_examples` checks each line.
 
 No test calls a real Jira. The tests use `FakeJira` or a

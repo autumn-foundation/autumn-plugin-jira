@@ -2,7 +2,8 @@
 
 - Status: Accepted. Amended after review round 1: `scale_permille` is
   body-matched, the three lists are exact, and a test bans proof escapes
-  (plan V67).
+  (plan V67). Amended after review round 2: the escape scan ignores white
+  space, and the body extractor removes comments first (plan V103).
 - Date: 2026-11-02
 
 ## Context
@@ -38,10 +39,16 @@ run in CI. A loop with proof code does not body-match.
   comment does not count. `the_drift_check_sees_changes` proves that the
   check works.
 - `the_spec_has_no_proof_escape` fails when `verus/policy.rs` holds
-  `assume(`, `admit(`, `external_body`, `verifier::external`,
-  `#[verifier(`, `assume_specification` or
+  `assume(`, `admit(`, `assume_new(`, `external_body`,
+  `verifier::external`, `#[verifier(`, `assume_specification` or
   `exec_allows_no_decreases_clause` outside comments. Verus still says
-  "verified" with one of them, so the rule needs a test. The guard `adr_0005_names_each_policy_fn`
+  "verified" with one of them, so the rule needs a test. Verus tokens can
+  have white space between them. So the scan removes the comments and all
+  white space first, and `assume (false)` counts. An escape word directly
+  after a name character, as in `my_assume(`, is a name, not an escape.
+- The body extractor of `verus_bodies_match` removes the comments of the
+  whole file before it finds a function. So a `proof {` or a brace in a
+  comment cannot hide code from the compare (plan V103). The guard `adr_0005_names_each_policy_fn`
   fails when this list does not name a public function of `policy.rs`.
 - Each `ensures` clause also exists as a proptest, so the local loop checks
   the same rules that Verus proves.

@@ -2,7 +2,10 @@
 
 - Status: Accepted. Amended after review round 1 (plan V71 to V80, V88).
   The amendments are the config bounds, the handler slots, the body-cap
-  memory note, the ignored actors and the one-site rule.
+  memory note, the ignored actors and the one-site rule. Amended after
+  review round 2 (plan V100, V102, V106, V110, V114). These amendments
+  are the site of a delivery, the site check, the slot cap, the
+  `outcome_pending` rule and one site for each app.
 - Date: 2026-11-02
 
 ## Context
@@ -63,14 +66,26 @@ cap is 1 MiB, and an over-cap body gets 400. A duplicate id gets 409.
   `max_handler_tasks` slots (default 64) until it ends. The plugin stops
   it at `abandon_after_ms` (default 300 000). With no free slot, the route
   answers 503 at once and starts no task. Jira then sends the delivery
-  again. So a sink that hangs cannot make tasks without a limit.
+  again. So a sink that hangs cannot make tasks without a limit. The slot
+  count is at most `Semaphore::MAX_PERMITS` (plan V110).
 - When autumn stops the request at its request timeout, a drop guard
   counts the delivery as `timed_out` (plan V79). The start warns when the
   handlers can take longer than that timeout.
-- One site for each endpoint (plan V88): a delivery does not name its Jira
-  site, and two sites can have the same issue id. So one webhook endpoint
-  and one secret serve one site. Give each site its own endpoint, secret
-  and bridge.
+- One site for each app (plan V88, V114): two sites can have the same
+  issue id. So one webhook endpoint and one secret serve one site. The
+  plugin has one route for each app: autumn skips a second `JiraPlugin`
+  with a warning, and the plugin router is not public. So an app takes
+  the webhooks of one Jira site. A wait on an issue of another site ends
+  by poll.
+- The site of a delivery (plan V102, V106): `Delivery::site()` gives the
+  host of `issue.self` and `comment.self`. It gives `None` when no site is
+  named, or when the two name different sites. A bridge with a site host
+  refuses a delivery of another site or of no site, makes no call, and
+  counts it in `other_site`.
+- Handler errors (plan V100): `HandlerError::from` maps `OutcomeUnknown`
+  with a marker (`outcome_pending`) to `Permanent`. A 503 makes Jira send
+  the delivery again, the sink writes again, and a lookup that lags can
+  then make a duplicate.
 - Dedup layers: the autumn replay store, then `send_signal_idempotent` per
   workflow run, then idempotent sinks. The docs say "at least once".
 - v1 accepts HMAC webhooks only. A dynamic webhook with a Bearer JWT gets
@@ -99,6 +114,13 @@ cap is 1 MiB, and an over-cap body gets 400. A duplicate id gets 409.
   the app hold 26 MiB until the 401. Use proxy limits on body size, rate
   and concurrency, or a smaller cap.
 - Bad: a duplicate shows as a failed delivery in the Jira webhook log.
+- Bad: an app takes the webhooks of one Jira site only (plan V114). A
+  multi-tenant app gets no webhook speed-up for the other sites, and their
+  waits end by poll.
+- Bad: one comment add comes in two deliveries with different delivery
+  ids: `jira:issue_updated` with `issue_event_type_name = issue_commented`,
+  and `comment_created`. A sink that acts on a comment dedupes by the
+  comment id, or acts on `comment_created` only.
 - Bad: a memory replay store is per process and empty after a restart. In
   production autumn requires an explicit opt-in for it, or Redis.
 - Later: a durable inbox mode that starts a harvest run per delivery id.

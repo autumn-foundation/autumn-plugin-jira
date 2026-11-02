@@ -207,7 +207,7 @@ text.
 | V86 | Each read moves the newest time by `issue.updated`. | A signal older than a read moved the wait back (R4-harvest-determinism-3). | 9.3, ADR 0006 |
 | V87 | A retryable failure of a poll read or the last read is a missed poll. | One failed poll ended a long wait (R4-harvest-determinism-1). | 9.3 |
 | V88 | The bridge reads the status and the key from the site of its client. One bridge serves one site. | A delivery of another site with the same issue id moved a wait (R2-webhook-security-1). | 9.4, ADR 0004, ADR 0006 |
-| V89 | The route tag binds the run, not the issue. The limit and its bounds are written down. | A tag with the issue id needs a PUT after the create (R2-webhook-security-6). | 9.4, ADR 0006 |
+| V89 | The route tag binds the run, not the issue. The limit and its bounds are written down. V107 replaces this. | A tag with the issue id needs a PUT after the create (R2-webhook-security-6). | 9.4, ADR 0006 |
 | V90 | New camel option `settleMs` (default 10000, 0..=120000) and `EndpointOptions::settle_ms`. | The camel path does not get the harvest settle delay (R1-write-safety-10). | 10, ADR 0003 |
 | V91 | The own `JiraIssueKey` out header of an earlier step is not an override header. | A chain of `jira:` steps on two issues failed (R7-api-docs-2). | 10 |
 | V92 | A camel redelivery of a marked write does a lookup only. A redelivery of an unmarked write fails and sends nothing. | A camel `retry(..)` sent a create two times (R1-write-safety-1, R1-write-safety-2). | 10, ADR 0003 |
@@ -222,6 +222,18 @@ text.
 | V101 | `SanMateoBackend` checks a stored cloud id after a 401 or 404 at most one time in each `CLOUD_ID_RECHECK_INTERVAL` (300 s), not one time for its life. New pub const `backend::CLOUD_ID_RECHECK_INTERVAL`. | One ordinary 404 used up the only check, so a site move while the process ran was never seen (R2B-webhooks-secrets-1, R2F-fixcheck-a-4, R2G-fixcheck-b-1). | 4.4, 7.2 |
 | V102 | New `ids::SiteHost` (`parse`, `from_url`), `JiraSite::host() -> Option<SiteHost>`, the fields `WebhookIssue::site` and `WebhookComment::site` (the host of `self`), `JiraEvent::site()` and `Delivery::site()`. | A delivery had no site, so a sink could not refuse a delivery of another site with the same secret (R2F-fixcheck-a-2). | 4.2, 4.3, 4.8 |
 | V103 | The proof escape scan reads the spec with no white space and also finds `assume_new(`. The body extractor removes comments first. | `assume (false);` passed the guard, and a `proof {` in a line comment hid code from the compare (R2F-fixcheck-a-6, R2E-tests-guards-5, R2E-tests-guards-4). | 6 |
+| V104 | `jira_add_comment` calls `add_comment_idempotent_first` on attempt 1 and after a `NotSent` attempt, so it sends with no lookup first. `jira_transition_to_status` calls `resume_transition_to_status` after a `MaybeSent` or `Unknown` attempt: one status read, no send. | A busy issue got no comment on attempt 1, and a harvest retry sent a transition again after the issue moved on (R2A-write-safety-3). | 7.2, 9.2 |
+| V105 | A camel `transitionToStatus` on a camel redelivery or on a harvest attempt above 1 calls `resume_transition_to_status`. At the target it gives `already_there`. Else it fails with a non-retryable `outcome_unknown` and sends nothing. | A camel `retry(..)` sent a transition again after an automation moved the issue (R2A-write-safety-4). The README now names the header limit (R2D-integration-1). | 10, ADR 0003 |
+| V106 | New `HarvestSignalBridge::site_host(SiteHost)` and `BridgeCounters::other_site`. With a host, the bridge refuses a delivery whose `Delivery::site()` is another host or `None`, and makes no call. A direct client of a subdomain site sets the host by itself. | One secret on two sites let a delivery of another site reach the bridge (R2F-fixcheck-a-2). | 9.4, ADR 0004, ADR 0006 |
+| V107 | The v2 route tag binds the run and the issue: `HMAC(key, "v2\n" + name + "\n" + id + "\n" + kind + "\n" + value)`. New `RouteBinding { MarkerLabel, Issue }`. `tag`, `verify`, `property_entry` and `routes_from_property` take the binding. A create binds its marker label, a watch binds the issue id. A v1 tag gives `BadTag` unless the app calls `accept_unbound_v1_tags()`. V107 replaces V89. | A route entry copied to another issue signalled the run (R2F-fixcheck-a-3). | 9.4, ADR 0006 |
+| V108 | When the bridge knows its host and the delivery passed the site check, the signal status is the payload status. Else it is the status of the read, as in V88. | A late delivery gave the status of a later read, so a short status was lost (R2C-harvest-4). | 9.4 |
+| V109 | After `MAX_SIGNAL_ROUNDS`, the wait polls at `min(poll_every, DEFAULT_POLL_EVERY)`, also with no `poll_every`. A poll at or after the deadline is the last read. The poll reads and the last read treat `jira.rate_limited` as not retryable. The history bound is under 35 000 events. | The wait went blind after the signal cap, a read waited for a `Retry-After` past the deadline, and the history claim was wrong (R2C-harvest-1, R2C-harvest-2, R2C-harvest-3, R2E-tests-guards-6). | 9.3 |
+| V110 | The plugin caps the handler slot count at `Semaphore::MAX_PERMITS` (`runtime::slot_count`). | A large `max_handler_tasks` could make the semaphore panic on a 32-bit target (R2B-webhooks-secrets-3, R2D-integration-6). | 8.4 |
+| V111 | The cap of 60 on `[jira.http] timeout_secs` applies in API token mode only. In san_mateo mode the plugin does not use the value. The app keeps the San Mateo transport timeout at 60 s or less. | An unused value above 60 stopped a san_mateo start (R2D-integration-4). | 8.1, ADR 0003 |
+| V112 | The real path of `autumn_app` picks the profile as autumn-web does: `AUTUMN_ENV`, then `AUTUMN_PROFILE`, then `--profile`, then the build mode. The smoke script has the step "AUTUMN_ENV selects the profile file of the real path". | `AUTUMN_ENV` did not select the profile file of the real path (R2D-integration-3). | 12 |
+| V113 | The ecosystem stop log records a worker stop only when a worker stopped. | A deadline during the worker swap logged a stop that did not happen (R2D-integration-7). | 11.4 |
+| V114 | The plugin takes the webhooks of one Jira site for each app. autumn skips a second `JiraPlugin` with a warning, and the route of the plugin is not public. | The docs told an app to give each site its own endpoint and bridge, and the plugin cannot do that (R2D-integration-2). | 8.4, ADR 0004, ADR 0006 |
+| V115 | Guard changes: an ADR cites only the non-ADR docs; the metadata check reads workspace keys, multi-line arrays and empty values; the update check finds an update after `cd` or a separator and reads `--manifest-path=`; a README snippet copies the example code in order; new guard `ex_status_agrees`. | Each guard had a gap (R2E-tests-guards-2, R2E-tests-guards-7, R2E-tests-guards-8, R2E-tests-guards-9, R2G-fixcheck-b-2). | 13, 16 |
 
 ---
 
@@ -1562,7 +1574,7 @@ sequenceDiagram
   | `jira_get_issue`, `jira_search_page` | 1 read | 490 s | `"9m"` (`READ_START_TO_CLOSE`, 540 s) |
   | `jira_edit_issue`, `jira_delete_issue` | 1 idempotent write | 490 s | `"9m"` (`WRITE_START_TO_CLOSE`, 540 s) |
   | `jira_create_issue` | 1 marked write | 1 470 s | `"42m"` (`LONG_WRITE_START_TO_CLOSE`, 2 520 s) |
-  | `jira_add_comment` | `GET /myself` (a cold cache), then 1 marked write with up to `COMMENT_LOOKUP_PAGES` (3) comment pages before and after the send (V96) | 3 920 s | `"70m"` (`COMMENT_START_TO_CLOSE`, 4 200 s) |
+  | `jira_add_comment` | `GET /myself` (a cold cache), then 1 marked write with up to `COMMENT_LOOKUP_PAGES` (3) comment pages after the send, and before it only on the opt-in resend (V96, V104) | 3 920 s | `"70m"` (`COMMENT_START_TO_CLOSE`, 4 200 s) |
   | `jira_transition_to_status` | 1 checked write | 2 450 s | `"42m"` |
   | `jira_watch_issue` | GET issue, GET property, PUT property, PUT edit | 4 x 490 s = 1 960 s | `"42m"` |
 
@@ -1765,7 +1777,7 @@ max_backoff_ms = 30000
 max_pages = 1000
 lookup_attempts = 3
 lookup_delay_ms = 2000
-timeout_secs = 30                 # ReqwestTransport timeout in api_token mode; 1 to 60 (V64)
+timeout_secs = 30                 # ReqwestTransport timeout in api_token mode; 1 to 60 (V64); not checked in san_mateo mode (V111)
 
 [jira.webhook]
 endpoint_name = "jira"            # name of the [[security.webhooks.endpoints]] entry
@@ -1811,9 +1823,10 @@ Config rules of round 1 (V64, V73 to V77):
 - `timeout_secs` is 1 to `autumn_jira::client::MAX_TRANSPORT_TIMEOUT_SECS`
   (60), the bound of the harvest budgets. A harvest test keeps it equal to
   `autumn_jira_harvest::activities::MAX_TRANSPORT_TIMEOUT`. The error
-  names the key (V64). In san_mateo mode,
-  the San Mateo transport owns the timeout, so the plugin does not use
-  this value.
+  names the key (V64). The cap applies in API token mode only (V111). In
+  san_mateo mode the San Mateo transport owns the timeout, so the plugin
+  does not use or check this value. The app then keeps the San Mateo
+  transport timeout at 60 s or less, or the harvest budgets do not hold.
 - `JiraPlugin::with_config` uses the config as given. It reads no file and
   no `AUTUMN_JIRA__*` env var. `new()` and `JiraConfig::load` read them.
 
@@ -1912,7 +1925,9 @@ flowchart TB
   the task continues (B16). A sink after a `Transient` does not run.
   Docs: each sink is at least once, also when another sink fails.
 - Handler slots (V73): the runtime owns a semaphore with
-  `max_handler_tasks` permits. Each spawned task holds a permit until it
+  `max_handler_tasks` permits, at most `Semaphore::MAX_PERMITS`
+  (`runtime::slot_count`, V110). The `handler_tasks` health detail uses
+  the same count. Each spawned task holds a permit until it
   ends. The plugin stops a task at `abandon_after_ms`. With no free
   permit, the route answers 503 at once, starts no task, and adds one to
   `timed_out`. So a sink that hangs cannot make tasks without a limit.
@@ -2042,8 +2057,8 @@ ctx).await`. All return `Result<T, ActivityFailure>` [V typed failure rule].
 | `jira_get_issue` | `GetIssueInput { client, issue: IssueRef, fields: Option<Vec<FieldId>> }` -> `IssueSummary` | read | 9m | exponential(5, 1s) |
 | `jira_search_page` | `SearchPageInput { client, jql: String, fields: Option<Vec<FieldId>>, max_results: u32, token: Option<String> }` -> `SearchPageOutput { issues: Vec<IssueSummary>, next_token: Option<String> }` | read; one page per call (F26) with `JiraClient::search_page_at`. Jira gives back the input token: `jira.pagination_stalled`. An empty token: `jira.invalid_input`. | 9m | exponential(5, 1s) |
 | `jira_edit_issue` | `EditIssueInput { client, issue, set_summary: Option<String>, add_labels, remove_labels, fields, notify_users: Option<bool> }` -> `EditIssueOutput {}` | PUT idempotent | 9m | exponential(5, 1s) |
-| `jira_transition_to_status` | `TransitionInput { client, issue, target: StatusTarget, fields: Map<String, Value> }` -> `TransitionOutput { outcome: TransitionKind, status: StatusSummary, via: Option<TransitionId> }` (`moved` or `already_there`) | state check | 42m | exponential(5, 2s) |
-| `jira_add_comment` | `AddCommentInput { client, issue, text: String, resend_after_negative_lookup: bool, settle_secs: Option<u64> }` -> `CommentOutput { id: CommentId, outcome: CreateKind }` | marker from `ctx.idempotency_key()`; host rule; at most `COMMENT_LOOKUP_PAGES` comment pages (V96) | 70m | exponential(5, 2s) |
+| `jira_transition_to_status` | `TransitionInput { client, issue, target: StatusTarget, fields: Map<String, Value> }` -> `TransitionOutput { outcome: TransitionKind, status: StatusSummary, via: Option<TransitionId> }` (`moved` or `already_there`) | state check; after a `MaybeSent` or `Unknown` attempt, `resume_transition_to_status` reads the status and sends nothing (V104) | 42m | exponential(5, 2s) |
+| `jira_add_comment` | `AddCommentInput { client, issue, text: String, resend_after_negative_lookup: bool, settle_secs: Option<u64> }` -> `CommentOutput { id: CommentId, outcome: CreateKind }` | marker from `ctx.idempotency_key()`; host rule; attempt 1 and a `NotSent` attempt call `add_comment_idempotent_first` (no lookup before the POST, V104); at most `COMMENT_LOOKUP_PAGES` comment pages (V96) | 70m | exponential(5, 2s) |
 | `jira_delete_issue` | `DeleteIssueInput { client, issue, delete_subtasks: bool }` -> `DeleteOutput { outcome: DeleteKind }` (`deleted` or `gone_after_retry`) | DELETE idempotent; a 404 on any attempt after the first gives `gone_after_retry` (V39, V70) | 9m | exponential(5, 1s) |
 | `jira_watch_issue` | `WatchIssueInput { client, issue, route: SignalRoute }` -> `WatchOutput { issue: IssueSummary }` | GET issue, GET property, PUT property (merge route), PUT edit label `autumn-tracked`: all idempotent (R6, G10). It keeps each entry of another run as it is. | 42m | exponential(5, 1s) |
 
@@ -2286,8 +2301,9 @@ pub fn routes_from_property(value: &Value, key: &RouteKey, allowed: &BTreeSet<St
    routes then give `Duplicate`.
 8. Limits (ADR 0006): one shard; a multi-shard engine needs a fan-out
    lookup. The workflow checks `issue_id` in each signal, so a route on
-   another issue cannot move a workflow. One bridge serves one site: give
-   each site its own webhook endpoint, secret and bridge (V88).
+   another issue cannot move a workflow. One bridge serves one site (V88).
+   The plugin takes the webhooks of one site for each app: autumn skips a
+   second `JiraPlugin` (V114). A wait on another site ends by poll.
 9. Route tag scope (V89, R2F-fixcheck-a-3): a v2 tag binds the run and the
    issue. A create binds its marker label, which is known before the POST,
    so no second PUT is necessary. A watch binds the issue id. A copied
@@ -2500,9 +2516,18 @@ Camel redelivery (V92):
 - So a camel `retry(..)` never sends a `createIssue` or an `addComment`
   two times. Do not use camel redelivery on a route that a harvest
   activity calls: harvest is the one layer that retries.
+- A `transitionToStatus` on a camel redelivery, or on a
+  `HarvestActivityAttempt` above 1, calls `resume_transition_to_status`
+  (V105). At the target it gives `already_there`. Else it fails with
+  `jira outcome_unknown`, which is not retryable, and sends nothing. A
+  bad `HarvestActivityAttempt` value fails the transition with a
+  `ValidationError`.
 - Known limit: a redelivery of an earlier step also sets these headers, so
-  a later `jira:` write in that exchange also does a lookup only. It fails
-  closed and never makes a duplicate.
+  a later `jira:` write in that exchange also does a lookup only, or reads
+  the status only. It fails closed and never makes a duplicate. Remove
+  `CamelRedelivered` and `CamelRedeliveryCounter` after a retried step
+  that is not a `jira:` step, or do not use camel redelivery before a
+  `jira:` write.
 
 Harvest headers (V48):
 - `HarvestIdempotencyKey`: a non-empty string. It goes through
@@ -2679,7 +2704,7 @@ Workflow `incident_flow(input: AlertInput) -> IncidentOutput` lives in
 | Example | Crate | Shows | Needs | Failure test |
 |---|---|---|---|---|
 | `embedded` | `autumn-jira` | API token client on `FakeJira`: projects, issue types, create, get, edit, search pages, transition with resolution, comment, idempotent create after 503 after commit, delete. | nothing | 400 on a bad field gives `Validation` |
-| `autumn_app` | `autumn-plugin-jira` (`required-features = ["testing"]`) | `run()` app, route `GET /issues/{key}` with `JiraService` and `.http()?`, a log sink. The fake transport unless `JIRA_SITE` is set (V34). With `JIRA_SITE` the real path uses `ReqwestTransport` and `JiraConfig::load` (dev or prod from the build mode; `AUTUMN_ENV` wins), then sets the site from `JIRA_SITE` (V82). So profile files, `.env` and `AUTUMN_JIRA__*` apply. The plugin reads `JIRA_EMAIL` and `JIRA_API_TOKEN`. `scripts/smoke-autumn-example.sh` boots dev and prod, POSTs a signed webhook (openssl HMAC: 200, the copy 409, a bad signature 401), checks `/actuator/health`, sends SIGTERM. | nothing | the real path with no `JIRA_API_TOKEN` exits non-zero and names the variable |
+| `autumn_app` | `autumn-plugin-jira` (`required-features = ["testing"]`) | `run()` app, route `GET /issues/{key}` with `JiraService` and `.http()?`, a log sink. The fake transport unless `JIRA_SITE` is set (V34). With `JIRA_SITE` the real path uses `ReqwestTransport` and `JiraConfig::load` (dev or prod from the build mode; `AUTUMN_ENV` wins), then sets the site from `JIRA_SITE` (V82). So profile files, `.env` and `AUTUMN_JIRA__*` apply. The plugin reads `JIRA_EMAIL` and `JIRA_API_TOKEN`. The profile comes from `AUTUMN_ENV`, `AUTUMN_PROFILE`, `--profile`, then the build mode, as in autumn-web (V112). `scripts/smoke-autumn-example.sh` boots dev and prod, POSTs a signed webhook (openssl HMAC: 200, the copy 409, a bad signature 401), checks `/actuator/health`, sends SIGTERM. Its step "AUTUMN_ENV selects the profile file of the real path" boots with `AUTUMN_ENV=staging` and `autumn-staging.toml`, and the error must name `STAGING_JIRA_TOKEN`. | nothing | the real path with no `JIRA_API_TOKEN` exits non-zero and names the variable |
 | `harvest_workflow` | `autumn-jira-harvest` | Real Postgres worker. The recipe workflow `jira_ticket_lifecycle` (create with route, transition, `await_issue_status`, comment; all texts are input fields, R16). 503 after commit gives one issue and `found`. A delivery from `FakeJira` goes into `HarvestSignalBridge::deliver`. A second workflow, `jira_watch_lifecycle`, shows `jira_watch_issue` on an issue that a person made, done by poll only. Both workflows live in the example, not in `src`. The harvest retry `fixed(n, interval)` comes from input fields (`retry_attempts`, `retry_interval_ms`); the client uses `base_backoff_ms = 50`. | Postgres | 400 on create gives one POST and a workflow error |
 | `camel_route` | `autumn-jira-camel` | `direct:in` to `jira:createIssue` (with `HarvestIdempotencyKey`), `.set_body(Body::Empty)`, then `jira:transitionToStatus?status=category:indeterminate&allowHeaderOverrides=true` (it takes the issue from the `JiraIssueKey` out header); out headers. Attempt 1, then attempt 2 with the same key: 1 create POST, 1 transition, outcome `moved` then `already_there`. It registers a durable client (`ClientSettings::for_durable_host()`). | nothing | an unknown option fails at route add |
 
@@ -2835,7 +2860,7 @@ them, and its section "Review rounds" maps each finding to its tests.
 | AC37 camel idempotency and errors | WP6 | The key header gives the idempotent path. Attempt > 1 looks up only, unless `resendAfterNegativeLookup=true`. `OutcomeUnknown` with a key maps to `Io`, without a key to `ValidationError`. The map keeps the retry class against the pinned `is_retryable` copy for every `JiraError`. | `camel/t/route.rs::{key_header_uses_the_idempotent_path, retry_attempt_looks_up_only, opt_in_resends}`; `camel/t/retry_rule.rs::map_keeps_the_retry_class_for_every_error` |
 | AC38 Quality gates | WP8 | fmt; clippy pedantic and nursery `-D warnings`; `cargo doc -D warnings`; `missing_docs` deny; no `unwrap`, `expect`, `todo!`, `unimplemented!`, `TODO`, `FIXME` in `src/`; `unsafe_code = forbid`; each crate >= 85% `src/` lines (target 90); MSRV 1.89; README snippets compile. | CI jobs `lint`, `test`, `coverage`, `msrv`; `core/t/guards.rs::{no_unwrap_or_todo_in_src, every_allow_has_a_reason, no_continue_on_error}` |
 | AC39 Dependency rules | WP8 | One version each of the shared crates in both locks; the root lock has no `harvest-camel`, `autumn-harvest-plugin`, `pq-src`, `libsqlite3-sys`; the ecosystem lints equal the root lints. | CI job `deps`; `core/t/guards.rs::{root_lock_is_free_of_c_builds, ecosystem_lints_equal_the_root}` |
-| AC40 Docs | WP8 | README in the order of R20, with "What the plugin writes to your Jira" equal to `WRITES`; CLAUDE.md; ADRs 0001 to 0008; `plan.md`, `examples-plan.md`, `ac-evidence.md` (each named test exists in its file); Mermaid diagrams; ASD-STE100. | `core/t/guards.rs::{readme_writes_table_equals_writes, evidence_names_real_tests, adr_files_exist}`; review angle R7 |
+| AC40 Docs | WP8 | README in the order of R20, with "What the plugin writes to your Jira" equal to `WRITES`; CLAUDE.md; ADRs 0001 to 0008; `plan.md`, `examples-plan.md`, `ac-evidence.md` (each named test exists in its file); Mermaid diagrams; ASD-STE100. | `core/t/guards.rs::{readme_writes_table_equals_writes, evidence_names_real_tests, adr_files_exist, adrs_cite_real_doc_text, ex_status_agrees}`; review angle R7 |
 
 ### 16.2 Examples
 
@@ -2847,7 +2872,7 @@ them, and its section "Review rounds" maps each finding to its tests.
 | EX4 `camel_route` | WP6 | Create then transition through `jira:`; exact headers. An unknown option fails at route add. | ex: `camel_route::{the_route_creates_and_moves, unknown_option_fails_at_route_add}` |
 | EX5 Ecosystem happy path | WP7 | The nine timeline lines of 11.3 appear exactly. One POST for the create. One token refresh. `cloudId` in metadata. The run survives the worker restart. One chat message with an idempotency key. | eco u: `tests::happy_path_timeline_is_exact`; CI `example-ecosystem` `cargo run` |
 | EX6 Ecosystem failures | WP7 | A lost create with lag longer than the settle fails closed with `jira.outcome_unknown` and one POST. A wrong webhook secret (every POST 401) still resolves by poll. No webhook and no poll takes the timeout branch with an escalation comment. A wrong value gives `check failed:`. | eco u: `tests::{lost_create_fails_closed, bad_webhook_secret_resolves_by_poll, no_webhook_no_poll_times_out, a_wrong_value_fails_the_check}` |
-| EX7 Ecosystem edges | WP7 | Duplicate delivery 409 with one signal, tampered 401, bot actor 200 ignored. Two tenants on two fake sites stay apart. The real `harvest_camel::is_retryable` equals the pinned copy. The app with `SanMateoPlugin`, `HarvestPlugin` and `JiraPlugin` boots with `run()` and takes one signed POST over real HTTP. | eco u: `tests::{webhook_negatives, two_tenants_stay_apart, is_retryable_copy_matches_harvest_camel, boot_three_plugins_real_http}` |
+| EX7 Ecosystem edges | WP7 | Duplicate delivery 409 with one signal, tampered 401. The bot actor gets 200, and its copy goes only to the `sink_for_all_actors` bridge: `ignored_self` is 0 and the bridge gets 2 deliveries. Two tenants on two fake sites stay apart. The real `harvest_camel::is_retryable` equals the pinned copy. The app with `SanMateoPlugin`, `HarvestPlugin` and `JiraPlugin` boots with `run()` and takes one signed POST over real HTTP. | eco u: `tests::{webhook_negatives, two_tenants_stay_apart, is_retryable_copy_matches_harvest_camel, boot_three_plugins_real_http}` |
 | EX8 Examples wired | WP8 | Each example has `test = true`, `RUN_TIMEOUT`, `#[cfg(test)]`, `fn check(`, `expect_err(`, a CI step without `\|\|`, a README row; no `full_migrations_sql`, `allow_private_hosts` or `allow_plain_http`; every example file is listed; the ecosystem stays apart. | `core/t/examples_wired.rs::{each_example_is_wired, no_example_turns_on_the_dev_only_proxy_flags, each_example_file_is_in_the_list, the_ecosystem_workspace_stays_apart}` |
 
 ---
