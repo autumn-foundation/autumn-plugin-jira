@@ -349,11 +349,16 @@ impl JiraClient {
     /// on two conditions. The issue is still at the status of the first
     /// attempt. The transition is not global and not looped. Such a
     /// transition is not valid after a commit, so Jira rejects a second
-    /// send. Else the call
-    /// stops with `OutcomeUnknown`: an automation can have moved the issue
-    /// on, or a global transition can run two times. A 400 or a 409 after
-    /// a "maybe sent" attempt makes the client read the status once more:
-    /// at the target, it returns `Moved`.
+    /// send. Else the call stops with `OutcomeUnknown`: an automation can
+    /// have moved the issue on, or a global transition can run two times.
+    ///
+    /// After a 5xx or a "maybe sent" attempt, each stop that is not at the
+    /// target is `OutcomeUnknown` with no marker. That error is not
+    /// retryable, so a host does not start a new call that sends again. A
+    /// 400 or a 409 after such an attempt makes the client read the status
+    /// once more: at the target, it returns `Moved`. A host that retries
+    /// after its own attempt can have run calls
+    /// [`Self::resume_transition_to_status`].
     ///
     /// # Errors
     ///
@@ -367,12 +372,33 @@ impl JiraClient {
         fields: &TransitionFields,
     ) -> Result<TransitionOutcome> {
         let issue = issue.into();
+        // The cause of the last "maybe sent" attempt.
+        let mut unknown: Option<UnknownCause> = None;
+        let result = self
+            .transition_loop(&issue, target, fields, &mut unknown)
+            .await;
+        match (result, unknown) {
+            // An attempt can have run: no stop after it is retryable.
+            (Err(e), Some(cause)) if !matches!(e, JiraError::OutcomeUnknown { .. }) => {
+                Err(transition_unknown(cause))
+            }
+            (result, _) => result,
+        }
+    }
+
+    /// The attempts of [`Self::transition_to_status_with`]. It sets
+    /// `unknown` to the cause of each "maybe sent" attempt.
+    async fn transition_loop(
+        &self,
+        issue: &IssueRef,
+        target: &StatusTarget,
+        fields: &TransitionFields,
+        unknown: &mut Option<UnknownCause>,
+    ) -> Result<TransitionOutcome> {
         let status_only = FieldSet::new([FieldId::known("status")]);
         let mut attempt = 1_u32;
-        // The status before the first attempt, and the cause of the last
-        // "maybe sent" attempt.
+        // The status before the first attempt.
         let mut origin = None;
-        let mut unknown: Option<UnknownCause> = None;
         loop {
             let current = self.get_issue_with(issue.clone(), &status_only).await?;
             let status = current.status();
@@ -380,7 +406,7 @@ impl JiraClient {
             if let Some(status) = status.filter(|s| target.matches(s)) {
                 return Ok(TransitionOutcome::AlreadyThere(status));
             }
-            if let Some(cause) = unknown
+            if let Some(cause) = *unknown
                 && status_id != origin
             {
                 return Err(transition_unknown(cause));
@@ -393,18 +419,21 @@ impl JiraClient {
                     available: list.iter().map(|t| t.name.clone()).collect(),
                 });
             };
-            if let Some(cause) = unknown
+            if let Some(cause) = *unknown
                 && (transition.is_global || transition.looped)
             {
                 return Err(transition_unknown(cause));
             }
-            let request = transition_request(&issue, &transition.id, fields);
+            let request = transition_request(issue, &transition.id, fields);
             let sent = self.backend.send(request).await;
             let maybe = matches!(
                 call::classify(&sent),
                 policy::Outcome::ServerError | policy::Outcome::MaybeSent
             )
             .then(|| call::unknown_cause(&sent));
+            // A 400 or a 409 now: an earlier attempt can have moved the issue.
+            let earlier = unknown.is_some();
+            *unknown = maybe.or(*unknown);
             match self.judge(OpClass::CheckedWrite, Op::DoTransition, attempt, sent) {
                 Next::Done(_) => {
                     return Ok(TransitionOutcome::Moved {
@@ -413,15 +442,13 @@ impl JiraClient {
                     });
                 }
                 Next::Wait(wait) => {
-                    unknown = maybe.or(unknown);
                     tokio::time::sleep(wait).await;
                     attempt += 1;
                 }
                 Next::Confirm(cause) => return Err(transition_unknown(cause)),
                 Next::Fail(error @ (JiraError::Validation { .. } | JiraError::Conflict { .. }))
-                    if unknown.is_some() =>
+                    if earlier =>
                 {
-                    // An earlier attempt can have moved the issue.
                     let now = self.get_issue_with(issue.clone(), &status_only).await?;
                     return now
                         .status()
@@ -438,19 +465,36 @@ impl JiraClient {
         }
     }
 
-    /// Continues a transition after a host attempt that can have run.
+    /// Continues a transition after a host attempt that can have run, for
+    /// example a harvest retry after a timeout or after `outcome_unknown`.
+    ///
+    /// The call reads the status and sends nothing. At the target, it
+    /// returns `AlreadyThere`: the call cannot tell if the earlier attempt
+    /// or another actor moved the issue. Else it stops with
+    /// `OutcomeUnknown` with `cause`, because a new send can run the
+    /// transition a second time. A failed read also gives that error.
     ///
     /// # Errors
     ///
-    /// As [`Self::transition_to_status_with`].
+    /// `OutcomeUnknown` with no marker and `cause` when the issue is not at
+    /// the target, or when the read fails.
     pub async fn resume_transition_to_status(
         &self,
         issue: impl Into<IssueRef> + Send,
         target: &StatusTarget,
         cause: UnknownCause,
     ) -> Result<TransitionOutcome> {
-        let _ = cause;
-        self.transition_to_status_with(issue, target, &TransitionFields::default())
-            .await
+        let status_only = FieldSet::new([FieldId::known("status")]);
+        match self.get_issue_with(issue.into(), &status_only).await {
+            Ok(current) => current
+                .status()
+                .filter(|s| target.matches(s))
+                .map(TransitionOutcome::AlreadyThere)
+                .ok_or_else(|| transition_unknown(cause)),
+            Err(e) => {
+                tracing::warn!(code = e.code(), "jira: a resumed status read failed");
+                Err(transition_unknown(cause))
+            }
+        }
     }
 }

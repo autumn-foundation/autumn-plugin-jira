@@ -113,7 +113,8 @@ row.
 Each row is one change from design v2. The section column names the part
 of this file that now shows the change. The waves of section 17.1 found
 the changes V1 to V53. Review round 1 found V54 to V96, and each of these
-rows names its finding id. The wave and fixer reports give the full
+rows names its finding id. Review round 2 found V97
+and the later rows. The wave and fixer reports give the full
 text.
 
 | # | Change | Reason | Section |
@@ -214,6 +215,7 @@ text.
 | V94 | New `scripts/one-version.sh`. `scripts/extract-jira-schemas.py` needs the spec path. | One check for each lock, and no session path in the repo (R8-build-ci-2, R8-build-ci-5). | 14 |
 | V95 | ADR 0004 names the crash case of the replay store. | A crash after the keys are stored loses the event (R2-webhook-security-4). | ADR 0004 |
 | V96 | `jira_add_comment` reads at most `COMMENT_LOOKUP_PAGES` (3) comment pages, and its `start_to_close` is 70m (`COMMENT_START_TO_CLOSE`). New `autumn_jira::client::MAX_TRANSPORT_TIMEOUT_SECS` (60), the cap of `timeout_secs`. | The paged lookup of V62 and the cold `GET /myself` did not fit the 42m budget (follow-up of R1-write-safety-9 and R9-test-quality-6). | 7.2, 8.1, 9.2 |
+| V97 | After a maybe-sent transition attempt, every stop off the target is a non-retryable `OutcomeUnknown`. New `JiraClient::resume_transition_to_status(issue, target, cause)`: one status read, no send. | A host retry after a stop with a retryable error started a new call and sent the transition again (R2A-write-safety-1, R2A-write-safety-2). | 4.5, 7.1 |
 
 ---
 
@@ -681,6 +683,7 @@ impl JiraClient {
     pub async fn transition(&self, issue: impl Into<IssueRef> + Send, id: &TransitionId, fields: &TransitionFields) -> Result<()>;
     pub async fn transition_to_status(&self, issue: impl Into<IssueRef> + Send, target: &StatusTarget) -> Result<TransitionOutcome>;
     pub async fn transition_to_status_with(&self, issue: impl Into<IssueRef> + Send, target: &StatusTarget, fields: &TransitionFields) -> Result<TransitionOutcome>;
+    pub async fn resume_transition_to_status(&self, issue: impl Into<IssueRef> + Send, target: &StatusTarget, cause: UnknownCause) -> Result<TransitionOutcome>;
 
     // Comments
     pub async fn add_comment(&self, issue: impl Into<IssueRef> + Send, body: &Adf) -> Result<Comment>;
@@ -1441,7 +1444,16 @@ Rules:
   on, or a global transition can run two times.
 - A 400 or a 409 after a "maybe sent" attempt makes the client read the
   status once more (V63). At the target, the call gives `Moved { via, to
-  }`. Else it gives the error.
+  }`.
+- After a 5xx or a "maybe sent" attempt, each stop that is not at the
+  target gives `OutcomeUnknown { op: DoTransition, marker: None }`. That
+  error is not retryable. This includes the stop of the last attempt, a
+  429, a failed status read and the 400 or 409 above. So no host retry
+  starts a new call that sends again (R2A-write-safety-1, V97).
+- `resume_transition_to_status(issue, target, cause)` is the call of a
+  host retry after its own attempt can have run. It reads the status and
+  sends nothing. At the target, it gives `AlreadyThere`. Else, and when the
+  read fails, it gives `OutcomeUnknown { cause, marker: None }` (V97).
 - `delete_issue`: `IdempotentWrite`. A 404 on a retry after a `MaybeSent`
   or 5xx attempt gives `Ok(DeleteOutcome::GoneAfterRetry)`. A 404 on the
   first attempt gives `NotFoundOrForbidden`.
