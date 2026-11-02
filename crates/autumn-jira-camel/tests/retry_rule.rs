@@ -29,7 +29,10 @@ use camel_api::CamelError;
 /// SQLite (plan D14, ADR 0008). The ecosystem test
 /// `is_retryable_copy_matches_harvest_camel` compares this copy with the
 /// real function on every mapped error. Change both together.
-fn is_retryable(err: &CamelError) -> bool {
+///
+/// It is `pub(crate)`, because the ecosystem test includes this file with
+/// `#[path]` and calls it.
+pub(crate) fn is_retryable(err: &CamelError) -> bool {
     match err {
         CamelError::ValidationError(_)
         | CamelError::TypeConversionFailed(_)
@@ -82,7 +85,8 @@ const CODES: [&str; 23] = [
 ];
 
 /// One or more values of each `JiraError` variant, for each operation.
-fn every_error() -> Vec<JiraError> {
+/// The ecosystem test uses the same samples, so it is `pub(crate)`.
+pub(crate) fn every_error() -> Vec<JiraError> {
     let mut out = vec![
         JiraError::InvalidInput {
             what: "issue key",
