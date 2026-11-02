@@ -72,6 +72,38 @@ pub async fn start(
     Ok(camel)
 }
 
+/// Starts a camel context with one route `direct:in` to `to`. The route
+/// has a camel redelivery: `retries` more tries with a 1 ms wait, for each
+/// error that `matches` accepts.
+///
+/// # Errors
+///
+/// The error of the route add, for example a bad `jira:` URI.
+pub async fn start_redelivering(
+    component: JiraComponent,
+    to: &str,
+    retries: u32,
+    matches: impl Fn(&CamelError) -> bool + Send + Sync + 'static,
+) -> Result<CamelContext, CamelError> {
+    let mut camel = CamelContext::builder().build().await?;
+    camel.register_component(DirectComponent::new());
+    camel.register_component(component);
+    let wait = std::time::Duration::from_millis(1);
+    let handler = camel_api::ErrorHandlerConfig::log_only()
+        .on_exception(matches)
+        .retry(retries)
+        .with_backoff(wait, 1.0, wait)
+        .build();
+    let route = RouteBuilder::from("direct:in")
+        .route_id("route-redelivery")
+        .error_handler(handler)
+        .to(to)
+        .build()?;
+    camel.add_route_definition(route).await?;
+    camel.start().await?;
+    Ok(camel)
+}
+
 /// Starts a camel context with `direct:in` to `to`.
 pub async fn start_one(component: JiraComponent, to: &str) -> Result<CamelContext, CamelError> {
     start(component, &[("direct:in", to)]).await

@@ -1008,3 +1008,84 @@ async fn override_header_with_flag_works() {
     assert_eq!(reply(&ex)["issue"], json!("OPS-2"));
     stop(camel).await;
 }
+
+// --- R1-write-safety-1, R1-write-safety-2: camel redelivery --------------
+
+/// `true` for `CamelError::Io`: the error of a marked write that can have
+/// run (`jira outcome_pending`).
+const fn is_io(error: &CamelError) -> bool {
+    matches!(error, CamelError::Io(_))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn camel_redelivery_of_marked_create_looks_up_only() {
+    let fake = FakeJira::new();
+    // The POST commits and the reply is lost. The search index lags, so
+    // no lookup can see the issue.
+    fake.index_lag(std::time::Duration::from_secs(3600));
+    fake.fault(FakeOp::CreateIssue, Fault::StatusAfterCommit(503));
+    let camel = start_redelivering(
+        component(&fake),
+        "jira:createIssue?project=OPS&issueType=Task",
+        2,
+        is_io,
+    )
+    .await
+    .unwrap();
+    let err = send(
+        &camel,
+        "direct:in",
+        attempt(json!({"summary": "Disk full"}), "wf-1/a-1", json!(1)),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(fake.count(FakeOp::CreateIssue), 1, "one POST: {err}");
+    assert_eq!(fake.issues().len(), 1, "{err}");
+    assert!(
+        validation(&err).starts_with("jira outcome_unknown: "),
+        "{err}"
+    );
+    stop(camel).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn camel_redelivery_never_resends_unmarked_writes() {
+    let fake = FakeJira::new();
+    two_issues(&fake).await;
+    let before = fake.count(FakeOp::CreateIssue);
+    fake.fault(FakeOp::CreateIssue, Fault::StatusAfterCommit(502));
+    let camel = start_redelivering(
+        component(&fake),
+        "jira:createIssue?project=OPS&issueType=Task",
+        2,
+        |_| true,
+    )
+    .await
+    .unwrap();
+    let err = send(&camel, "direct:in", json(json!({"summary": "Lost"})))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        fake.count(FakeOp::CreateIssue),
+        before + 1,
+        "one POST: {err}"
+    );
+    assert!(validation(&err).contains(KEY), "{err}");
+    stop(camel).await;
+
+    fake.fault(FakeOp::AddComment, Fault::StatusAfterCommit(503));
+    let camel = start_redelivering(
+        component(&fake),
+        "jira:addComment?issueKey=OPS-1",
+        2,
+        |_| true,
+    )
+    .await
+    .unwrap();
+    let err = send(&camel, "direct:in", json(json!("Looking")))
+        .await
+        .unwrap_err();
+    assert_eq!(fake.count(FakeOp::AddComment), 1, "one POST: {err}");
+    assert!(validation(&err).contains(KEY), "{err}");
+    stop(camel).await;
+}
