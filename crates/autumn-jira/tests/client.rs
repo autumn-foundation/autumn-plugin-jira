@@ -475,3 +475,42 @@ async fn offset_pager_reads_the_first_page_like_the_token_pager() {
     ));
     assert_eq!(more.requests().len(), 1);
 }
+
+/// AC8: an empty transitions list gives `TransitionNotAvailable` with no
+/// names, and the client sends no POST.
+#[tokio::test]
+async fn an_empty_transitions_list_names_no_transition() {
+    use autumn_jira::StatusTarget;
+    let transport = MemoryTransport::new();
+    transport.reply(
+        "GET",
+        &format!("{BASE}/issue/OPS-1"),
+        HttpResponse::json(
+            200,
+            &json!({"id": "10001", "key": "OPS-1", "fields": {"status": {
+                "id": "10000", "name": "To Do", "statusCategory": {"key": "new"}
+            }}}),
+        ),
+    );
+    transport.reply(
+        "GET",
+        &format!("{BASE}/issue/OPS-1/transitions"),
+        HttpResponse::json(200, &json!({"transitions": []})),
+    );
+    let client = memory_client(&transport);
+    let err = client
+        .transition_to_status(&key("OPS-1"), &StatusTarget::done())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        JiraError::TransitionNotAvailable {
+            target: StatusTarget::done().to_string(),
+            available: vec![],
+        }
+    );
+    let sent = transport.requests();
+    assert_eq!(sent.len(), 2, "one status read and one transitions read");
+    assert!(sent.iter().all(|r| r.method == "GET"), "no POST");
+    assert!(sent[0].url.contains("fields=status"), "{}", sent[0].url);
+}
