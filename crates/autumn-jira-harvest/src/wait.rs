@@ -471,6 +471,30 @@ mod tests {
         assert_eq!(files, 7, "a new file in src/ needs a line in this guard");
     }
 
+    /// R4-harvest-determinism-5: the wait ends before the execution deadline
+    /// of the run, with room for the last read.
+    #[test]
+    fn the_deadline_fits_the_run() {
+        let now = chrono::DateTime::from_timestamp(1_000_000, 0).unwrap();
+        let hour = chrono::Duration::hours(1);
+        let margin = chrono::Duration::from_std(LAST_READ_MARGIN).unwrap();
+        // No execution deadline: the full timeout.
+        assert_eq!(wait_deadline(now, hour, None), now + hour);
+        // A far execution deadline: the full timeout.
+        let far = now + hour * 24;
+        assert_eq!(wait_deadline(now, hour, Some(far)), now + hour);
+        // A near execution deadline: the wait ends one margin before it.
+        let near = now + hour * 2;
+        assert_eq!(wait_deadline(now, hour * 3, Some(near)), near - margin);
+        // A deadline closer than the margin: the wait ends now.
+        let close = now + chrono::Duration::minutes(5);
+        assert_eq!(wait_deadline(now, hour, Some(close)), now);
+        // The margin covers every attempt of the last read and its backoff.
+        let retry = crate::activities::get_issue_retry();
+        let attempts = crate::activities::READ_START_TO_CLOSE * retry.max_attempts;
+        assert!(LAST_READ_MARGIN >= attempts + Duration::from_secs(15));
+    }
+
     #[test]
     fn helpers() {
         assert!(is_older(Some(1), Some(2)));
