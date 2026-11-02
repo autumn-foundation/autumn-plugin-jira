@@ -981,3 +981,29 @@ async fn a_resumed_transition_off_the_target_sends_nothing() {
         .unwrap_err();
     assert_eq!(err.code(), "outcome_unknown");
 }
+
+#[tokio::test(start_paused = true)]
+async fn transition_with_no_is_global_after_maybe_sent_is_not_resent() {
+    let fake = FakeJira::new();
+    let plain = api_token_client(&fake);
+    let issue = plain.create_issue(&task("t")).await.unwrap().key;
+    let path = format!("/rest/api/3/issue/{issue}/transitions");
+    let mut bare = capture(&fake, Op::GetTransitions, &path, &[]).await;
+    for t in bare["transitions"].as_array_mut().unwrap() {
+        let t = t.as_object_mut().unwrap();
+        t.remove("isGlobal");
+        t.remove("looped");
+    }
+    let backend = Scripted::new(Arc::new(direct(Arc::new(fake.clone()))), move |r, _| {
+        (r.op == Op::GetTransitions).then(|| Ok(json_reply(200, &bare)))
+    });
+    let client = JiraClient::new(backend.clone()).with_settings(fast_settings());
+    // The first attempt does not commit, and its outcome is not known.
+    fake.fault(FakeOp::DoTransition, Fault::Timeout);
+    let err = client
+        .transition_to_status(&issue, &StatusTarget::in_progress())
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "outcome_unknown", "{err:?}");
+    assert_eq!(transition_posts(&backend), 1);
+}
