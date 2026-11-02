@@ -27,9 +27,9 @@ a column with "test" in its header is a `fn` in the named file or module.
 | Examples | EX1 to EX4 done. EX5 to EX8 in progress (wave 4). |
 | Tests | 345 pass, 0 fail in the main workspace (`cargo test --workspace --all-features --locked`, with Postgres) at the end of wave 3. The five live cases in `core/t/live.rs` are ignored and never run in CI. |
 | Line coverage (`src/`) | `autumn-jira` 97.63%, `autumn-jira-fake` 98.96%, `autumn-plugin-jira` 94.97%, `autumn-jira-harvest` 96.36%, `autumn-jira-camel` 97.02% (the wave reports; `cargo llvm-cov`, tests and examples left out). The CI gate is 85% for each crate. |
-| Verus | `verus/policy.rs`: 31 verified, 0 errors (CI run 41387106070, job 125090259261, head `59dc5d4`). |
-| MSRV | 1.89: `cargo +1.89.0 check --workspace --all-targets --all-features --locked` passed in CI (run 41387106070, job `msrv`, head `59dc5d4`). Verified in CI only (plan R4). |
-| CI | `lint`, `test` (with coverage), `examples`, `msrv`, `verus`, `deps`, `example-ecosystem`. The full run on the PR head is due at C5. |
+| Verus | `verus/policy.rs`: 31 verified, 0 errors (CI run 41422883903, job `verus` 125202423323, head `8c278e7`). |
+| MSRV | 1.89: `cargo +1.89.0 check --workspace --all-targets --all-features --locked` passed in CI (run 41422883903, job `msrv` 125202423505, head `8c278e7`). Verified in CI only (plan R4). |
+| CI | Run 41422883903 on head `8c278e7`: all 7 jobs pass. The jobs are `lint`, `test` (with coverage), `examples`, `msrv`, `verus`, `deps` and `example-ecosystem` (job 125202423939). |
 
 ## Acceptance criteria: library
 
@@ -72,9 +72,9 @@ a column with "test" in its header is a `fn` in the named file or module.
 | AC35 Watch an issue | Done | `harvest/t/activities.rs::watch_is_idempotent`; `harvest/t/wait.rs::wait_on_a_human_issue` |
 | AC36 camel component | Done | `camel/t/route.rs::{create_get_edit_transition_comment_search, consumer_is_rejected, unknown_option_lists_names, project_and_jql_conflict, override_header_without_flag_fails, override_header_with_flag_works, errors_hold_no_body, a_named_connection_picks_its_client}`; u: `options::{uri_options_match_the_parser, unknown_option_lists_names, project_and_jql_conflict, defaults, parses_all_options_of_each_operation, operations_match_the_constant, option_of_another_operation_fails, the_first_error_is_stable}`; u: `input::{read_takes_json_text_and_bytes, create_reads_each_key, edit_needs_one_change, transition_takes_nothing_or_fields, comment_takes_text_or_a_string}`; u: `headers::{marked_reads_the_key_and_the_attempt, a_header_equal_to_the_option_passes}` |
 | AC37 camel idempotency and errors | Done | `camel/t/route.rs::{key_header_uses_the_idempotent_path, retry_attempt_looks_up_only, opt_in_resends}`; `camel/t/retry_rule.rs::{map_keeps_the_retry_class_for_every_error, the_samples_cover_every_code, each_camel_kind_gives_its_camel_variant, messages_hold_the_code_and_no_body, outcome_unknown_with_a_key_is_io_and_without_is_validation, http_errors_have_the_plan_shape}`; u: `error::{http_errors_name_the_method_of_the_failed_call, reason_phrases}` |
-| AC38 Quality gates | In progress (wave 4). Clippy pedantic and nursery `-D warnings` are clean at the end of wave 3. MSRV passed in CI. Coverage of each crate is over 85% (see "Summary"). | CI jobs `lint`, `test`, `msrv`; `core/t/guards.rs::{no_unwrap_or_todo_in_src, no_unwrap_or_todo_in_src_sees_each_kind, every_allow_has_a_reason, every_allow_has_a_reason_sees_a_bare_allow, no_continue_on_error, no_continue_on_error_sees_hidden_failures}` |
-| AC39 Dependency rules | In progress (wave 4) | CI job `deps`; `core/t/guards.rs::{root_lock_is_free_of_c_builds, root_lock_is_free_of_c_builds_sees_one, ecosystem_lints_equal_the_root, the_lint_compare_sees_a_change}` |
-| AC40 Docs | In progress (wave 4). This file, `docs/plan.md` (design v3, as built) and `docs/examples-plan.md` are written. The review angle R7 is due after C4. | `core/t/guards.rs::{readme_writes_table_equals_writes, the_writes_compare_sees_a_change, evidence_names_real_tests, the_evidence_check_sees_a_missing_test, adr_files_exist, adr_files_exist_sees_a_gap, the_lexer_drops_comments_and_test_items}`; u: `writes::{writes_table, writes_match_the_markers}` |
+| AC38 Quality gates | In progress (wave 4). Clippy pedantic and nursery `-D warnings` are clean at the end of wave 3. MSRV passed in CI. Coverage of each crate is over 85% (see "Summary"). | CI jobs `lint`, `test`, `msrv`; `core/t/guards.rs::{no_unwrap_or_todo_in_src, no_unwrap_or_todo_in_src_sees_each_kind, every_allow_has_a_reason, every_allow_has_a_reason_sees_a_bare_allow, no_continue_on_error, no_continue_on_error_sees_hidden_failures, no_session_paths, no_session_paths_sees_one}` |
+| AC39 Dependency rules | In progress (wave 4) | CI job `deps`; `core/t/guards.rs::{root_lock_is_free_of_c_builds, root_lock_is_free_of_c_builds_sees_one, ecosystem_lints_equal_the_root, the_lint_compare_sees_a_change, weekly_updates_get_the_one_version_check, weekly_updates_get_the_one_version_check_sees_a_gap, published_crates_have_metadata, published_crates_have_metadata_sees_a_gap}` |
+| AC40 Docs | In progress (wave 4). This file, `docs/plan.md` (design v3, as built) and `docs/examples-plan.md` are written. The review angle R7 is due after C4. | `core/t/guards.rs::{readme_writes_table_equals_writes, the_writes_compare_sees_a_change, evidence_names_real_tests, the_evidence_check_sees_a_missing_test, adr_files_exist, adr_files_exist_sees_a_gap, the_lexer_drops_comments_and_test_items, docs_are_ste_prose, docs_are_ste_prose_sees_a_long_sentence, docs_make_no_stale_claims, docs_make_no_stale_claims_sees_each_claim, adrs_cite_real_doc_text, adrs_cite_real_doc_text_sees_a_missing_quote, adr_0005_names_each_policy_fn, adr_0005_names_each_policy_fn_sees_a_gap}`; u: `writes::{writes_table, writes_match_the_markers}` |
 
 ## Acceptance criteria: examples
 
@@ -87,7 +87,7 @@ a column with "test" in its header is a `fn` in the named file or module.
 | EX5 Ecosystem happy path | In progress (wave 4, WP7). RED commit `c439a8f`. | eco u: `tests::happy_path_timeline_is_exact`; CI job `example-ecosystem` |
 | EX6 Ecosystem failures | In progress (wave 4, WP7) | eco u: `tests::{lost_create_fails_closed, bad_webhook_secret_resolves_by_poll, no_webhook_no_poll_times_out, a_wrong_value_fails_the_check, the_line_format_has_an_eight_wide_tag}` |
 | EX7 Ecosystem edges | In progress (wave 4, WP7) | eco u: `tests::{webhook_negatives, two_tenants_stay_apart, is_retryable_copy_matches_harvest_camel, boot_three_plugins_real_http}` |
-| EX8 Examples wired | In progress (wave 4, WP8a). RED commit `9250bd7`. | `core/t/examples_wired.rs::{each_example_is_wired, no_example_turns_on_the_dev_only_proxy_flags, each_example_file_is_in_the_list, the_ecosystem_workspace_stays_apart}` |
+| EX8 Examples wired | In progress (wave 4, WP8a). RED commit `9250bd7`. | `core/t/examples_wired.rs::{each_example_is_wired, no_example_turns_on_the_dev_only_proxy_flags, each_example_file_is_in_the_list, the_ecosystem_workspace_stays_apart, readme_snippets_copy_their_examples, docs_give_the_ci_commands_of_the_separate_workspace, a_comment_or_a_string_is_not_code, a_time_bound_in_the_tests_is_for_a_server_only, a_step_name_or_an_if_is_not_a_run, a_readme_command_needs_its_env_vars, a_snippet_must_copy_its_example, a_doc_must_give_the_ci_commands}` |
 
 ## Spikes
 
@@ -102,7 +102,7 @@ a column with "test" in its header is a `fn` in the named file or module.
 ## Verus
 
 - `verus verus/policy.rs`: "verification results:: 31 verified, 0 errors".
-  CI run 41387106070, job 125090259261, head `59dc5d4`.
+  CI run 41422883903, job 125202423323, head `8c278e7`.
 - The proofs have no `assume` and no `admit`. The proof style copies the
   san-mateo `verus/policy.rs`. The `nonlinear_arith` form of
   `lemma_scale_fits` copies autumn-harvest `formal`.
