@@ -79,10 +79,13 @@ mod tests {
             cause: UnknownCause::Network,
             marker: Some(MarkerRef::label("autumn-idem-x".to_owned())),
         };
-        assert!(matches!(
-            HandlerError::from(pending),
-            HandlerError::Transient(_)
-        ));
+        // A redelivery calls the write again, so `outcome_pending` is
+        // permanent for a sink, though `is_retryable` is `true`.
+        assert!(pending.is_retryable());
+        assert_eq!(
+            HandlerError::from(pending.clone()),
+            HandlerError::Permanent(pending.to_string())
+        );
         let missing = JiraError::NotFoundOrForbidden { op: Op::GetIssue };
         assert_eq!(
             HandlerError::from(missing.clone()),
