@@ -1659,7 +1659,7 @@ flowchart TB
   `webhook_config::check_webhook_endpoint` does the check. The startup hook
   reads the endpoints from `state.config_arc().security.webhooks.endpoints`.
 - autumn itself enforces the 32-byte production secret and fails a memory
-  replay store in prod unless `allow_memory_in_production` [V W15]. The
+  replay store in prod unless `[security.webhooks.replay] allow_memory_in_production` [V W15]. The
   docs show both. The `autumn_app` prod profile sets a 32+ byte secret and
   `[security.webhooks.replay] allow_memory_in_production = true` with a
   comment.

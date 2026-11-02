@@ -12,9 +12,12 @@ In one afternoon, you can:
 - open a ticket from a durable workflow, and wait for a person to close it,
 - test all of it with no Jira site and no network.
 
-The safe path is the default. A create, a comment or a transition is never
-sent a second time after a lost reply. The client finds the first write by
-its marker. Webhooks are at least once, so each handler must be idempotent.
+The safe path is the default. By default, a create, a comment or a
+transition does not run two times after a lost reply. A create or a comment
+carries a marker, and the client finds the first write by its marker. A
+transition reads the status first. Only an explicit opt-in sends a marked
+write again. Webhooks are at least once, so each handler must be
+idempotent.
 
 ## Crates
 
@@ -133,7 +136,9 @@ assert!(block.contains("max_body_bytes = 27262976"));
 
 autumn checks the signature and the delivery id. After that check, the
 route answers 200 or 503 only. An ignored delivery gets 200 and a counter.
-A failed sink gets 503, so Jira sends the delivery again.
+A sink that returns `Transient`, panics or times out gets 503, so Jira
+sends the delivery again. A `Permanent` error gets 200, a counter and an
+error log, and Jira does not send the delivery again.
 
 ```mermaid
 sequenceDiagram
@@ -159,9 +164,10 @@ sequenceDiagram
 - `ignore_actor_account_ids` drops the events of your own service account,
   so the app does not answer its own writes.
 - In the prod profile, autumn needs a webhook secret of 32 bytes or more.
-  It refuses the memory replay store unless
-  `allow_memory_in_production = true` (one replica only). With more
-  replicas, use the Redis replay store.
+  It refuses the memory replay store unless you set
+  `[security.webhooks.replay] allow_memory_in_production = true` (one
+  replica only). With more replicas, set `[security.webhooks.replay]`
+  `backend = "redis"` and `redis.url`.
 
 ### Test your handler
 
@@ -470,9 +476,9 @@ A test compares this table with `autumn_jira::writes::WRITES`.
 
 **Safe writes.** Jira ignores an `Idempotency-Key` header, so the client
 never sends one. A create or a comment carries a marker. After a 5xx or a
-network error that can have reached Jira, the client never sends the write
-a second time. It looks for the marker. A transition reads the status
-first.
+network error that can have reached Jira, the client does not send a marked
+write again. It looks for the marker. A transition reads the status first.
+When the issue is at the target, the client sends nothing.
 
 ```mermaid
 flowchart TD
@@ -487,14 +493,18 @@ flowchart TD
 
 A plain `create_issue`, `add_comment` or `transition` has no marker. After
 a lost reply, it gives `OutcomeUnknown { marker: None }`. After a 429, it
-gives `RateLimited`. The opt-in `resend_after_negative_lookup` sends a
-write again after a lookup finds nothing. The search index can lag, so
-this can make a duplicate (ADR 0003).
+gives `RateLimited`. The client has no opt-in to send a write again. The
+harvest input field `resend_after_negative_lookup` and the camel option
+`resendAfterNegativeLookup=true` send a marked write again after a lookup
+finds nothing. The search index can lag, so this can make a duplicate
+(ADR 0003). This opt-in is best effort.
 
 **At-least-once webhooks.** Jira can send a delivery more than once.
 autumn answers 409 to a repeated delivery id inside the replay window, but
-a sink must still be idempotent. The bridge uses the delivery id as the signal
-idempotency key.
+a sink must still be idempotent. The bridge uses the delivery id as the
+signal idempotency key. A process crash during a sink can lose a delivery.
+autumn keeps the delivery id, so each Jira retry gets 409 (ADR 0004). A
+wait with `poll_every` still ends by poll.
 
 **Fixed hosts, no redirects.** Only `JiraSite::base_url` makes a base URL.
 A 3xx gives `Redirect`, and the client never calls the `Location`.

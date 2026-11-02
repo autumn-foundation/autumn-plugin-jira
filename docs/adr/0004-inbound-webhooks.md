@@ -48,8 +48,18 @@ cap is 1 MiB, and an over-cap body gets 400. A duplicate id gets 409.
 
 - Good: verification and replay protection come from autumn, in constant
   time.
-- Good: a handler fault never loses an event: the 503 frees the replay keys
-  and Jira sends again.
+- Good: a handler fault that gives 503 does not lose the event. The 503
+  frees the replay keys, and Jira sends the delivery again.
+- Bad: a process crash during a handler can lose a delivery. autumn stores
+  the replay keys before the handlers run. A crash (an OOM kill, a
+  SIGKILL) sends no reply and does not free the keys. With the Redis
+  replay store, the keys stay for `replay_window_secs`. Each Jira retry
+  then gets 409, and no sink gets the event. The memory store loses its
+  keys with the process, so a retry to a new process gets through.
+- Mitigation: the sinks dedup on their own (`send_signal_idempotent`). A
+  wait with a poll ends within one poll period (ADR 0006). An upstream
+  autumn change can close the gap: a short key while the handler runs,
+  and the full window only after a reply that is not a 5xx.
 - Bad: a duplicate shows as a failed delivery in the Jira webhook log.
 - Bad: a memory replay store is per process and empty after a restart. In
   production autumn requires an explicit opt-in for it, or Redis.

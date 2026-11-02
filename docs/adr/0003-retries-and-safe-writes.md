@@ -91,7 +91,7 @@ layers multiply the sends and break the activity timeout.
 - Bad: by default a lost create whose issue stays hidden longer than the
   settle delay fails closed with `outcome_unknown`. A person must check.
 - Bad: with the opt-in, index lag longer than the settle delay can give a
-  duplicate. The docs say "best effort; no exactly once".
+  duplicate. The docs say "this can make a duplicate".
 - Bad: a site without the Labels field on the create screen cannot use
   idempotent create. The error says how to fix it. No silent fallback.
 - Bad: the Jira `Retry-After` hint is lost when the error goes through
