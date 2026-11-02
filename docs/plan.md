@@ -113,9 +113,9 @@ row.
 Each row is one change from design v2. The section column names the part
 of this file that now shows the change. The waves of section 17.1 found
 the changes V1 to V53. Review round 1 found V54 to V96, and each of these
-rows names its finding id. Review round 2 found V97
-and the later rows. The wave and fixer reports give the full
-text.
+rows names its finding id. Review round 2 found V97 to V116. Review
+round 3, the last round, found V117 to V122. V123 closes an open item of
+round 2 after round 3. The wave and fixer reports give the full text.
 
 | # | Change | Reason | Section |
 |---|---|---|---|
@@ -235,6 +235,13 @@ text.
 | V114 | The plugin takes the webhooks of one Jira site for each app. autumn skips a second `JiraPlugin` with a warning, and the route of the plugin is not public. | The docs told an app to give each site its own endpoint and bridge, and the plugin cannot do that (R2D-integration-2). | 8.4, ADR 0004, ADR 0006 |
 | V115 | Guard changes: an ADR cites only the non-ADR docs; the metadata check reads workspace keys, multi-line arrays and empty values; the update check finds an update after `cd` or a separator and reads `--manifest-path=`; a README snippet copies the example code in order; new guard `ex_status_agrees`. | Each guard had a gap (R2E-tests-guards-2, R2E-tests-guards-7, R2E-tests-guards-8, R2E-tests-guards-9, R2G-fixcheck-b-2). | 13, 16 |
 | V116 | A camel `addComment` on harvest attempt 1 with no camel redelivery calls `add_comment_idempotent_first`, as `jira_add_comment` does (V104). With no `HarvestActivityAttempt` header, on a camel redelivery or on an attempt above 1, it keeps the lookup before the send. | A busy issue got no comment from a camel route on attempt 1 (R2A-write-safety-3, the camel half). | 10, ADR 0003 |
+| V117 | An opt-in resend of `jira_add_comment` after a `MaybeSent` or `Unknown` attempt never ends with `sent = false`. A retryable failure that tells "not sent" there becomes `jira.outcome_pending`, so the next attempt looks up first again. Only a `NotSent` that follows attempt 1 or another `NotSent` calls `add_comment_idempotent_first`. | A pre-lookup 503 of the opt-in resend gave `NotSent`, and the next attempt sent a second comment with no lookup (R3-write-safety-1). | 7.2, 9.2 |
+| V118 | `jira_transition_to_status` maps the errors of `transition_to_status_with` with `marked_write_failure`: a status read or a transition list read that fails gives `sent = false`. After a "maybe sent" POST, the client turns each stop into `OutcomeUnknown`, so a read error comes before any POST. | A GetIssue 503 on attempt 1 gave `sent = true`, so attempt 2 only resumed and failed with `jira.outcome_unknown` (R3-write-safety-2). | 7.2, 9.2 |
+| V119 | A failed cloud id check of `SanMateoBackend` keeps its start time. The next check comes after `CLOUD_ID_RECHECK_INTERVAL`, also while the failure lasts. | A site URL that no site had, or a 429 of `accessible-resources`, made one more call for each 401 or 404 (R3-webhooks-site-auth-1). | 4.4, ADR 0002 |
+| V120 | `SanMateoBackend::discover_cloud_id` also resets the cached prefix when the target has no cloud id. The signature does not change. | An explicit discovery stored the new id, but the requests went to the old id for up to 300 s (R3-webhooks-site-auth-2). | 4.4 |
+| V121 | The proof escape scan skips an escape word as a longer name only when a letter, a digit or `_` comes just before it in the source, with no white space between them. | The scan removed the white space first, so `pub assume_specification[f]` read as a longer name and passed the guard (R3-tests-docs-guards-2). | 6 |
+| V122 | The AC39 update check skips a shell keyword (`then`, `do`, `else`, `elif`, `if`, `while`, `until`), `!`, a wrapper (`time`, `env`) and `NAME=value` assignments at the start of a segment before it looks for `cargo update`. | `if ...; then cargo update; fi` escaped the one-version check (R3-tests-docs-guards-4). | 13, 16 |
+| V123 | New `JiraBackend::refresh_site` with a default that gives `Ok(None)`. `SanMateoBackend` overrides it: for `atlassian` with no target cloud id it runs the discovery of `discover_cloud_id` and resets the prefix (V120). New `JiraClient::refresh_site` and `JiraService::refresh_default`. | The plugin had no manual refresh for the default client: `JiraService::forget` acts on `for_connection` clients only. A moved tenant waited up to `CLOUD_ID_RECHECK_INTERVAL` (R2G-fixcheck-b-1). | 4.4, 4.5, 8, ADR 0002 |
 
 ---
 
@@ -522,6 +529,9 @@ pub trait JiraBackend: Send + Sync + 'static {
     async fn send(&self, request: ApiRequest) -> Result<ApiResponse, BackendError>;
     /// Mode and site for health details. No secrets.
     fn info(&self) -> BackendInfo;
+    /// V123: reads the site again, at once. Gives the new cloud id, or `None`
+    /// for a fixed site. The default gives `Ok(None)` and makes no call.
+    async fn refresh_site(&self) -> Result<Option<CloudId>> { Ok(None) }
 }
 
 pub struct DirectBackend { /* site, auth, Arc<dyn HttpTransport> */ }
@@ -588,10 +598,19 @@ application/json`, `content-type: application/json` when a body exists,
   404 replies do not each make a call (V101). When the token covers the
   id, nothing changes. Else the backend picks the site again, stores the
   new id in the metadata, and uses it from the next attempt on. It never
-  sends the attempt again. A failed check changes nothing, and the next
-  401 or 404 checks again. A discovery counts as a check. A
-  `target.cloud_id` is never checked. So a site move while the process
+  sends the attempt again. A failed check changes nothing else, but it
+  counts as a check, so a failure that lasts makes at most one call in each
+  interval (V119). A discovery counts as a check. An explicit
+  `discover_cloud_id` also resets the cached prefix, so the next attempt
+  uses the new id (V120). A `target.cloud_id` is never checked. So a site move while the process
   runs is seen at the first 401 or 404 after the interval.
+- Manual refresh (V123): `JiraBackend::refresh_site` reads the site at once,
+  with no wait for the interval. `SanMateoBackend` runs the discovery of
+  `discover_cloud_id` and resets the prefix when the provider is
+  `atlassian` and the target has no cloud id. Else it gives `Ok(None)` and
+  makes no call. Another provider gives `Config { code:
+  "not_a_jira_provider" }`. `JiraClient::refresh_site` and
+  `JiraService::refresh_default` call it.
 - Residual case (V55): when the token covers the old and the new site and
   no `site_url` is set, the backend keeps the stored id. Only a credential
   fingerprint can find this case, and san-mateo gives none.
@@ -679,6 +698,7 @@ impl JiraClient {
     #[must_use] pub fn durable(self) -> Self;                       // settings.durable()
     pub fn settings(&self) -> &ClientSettings;
     pub fn info(&self) -> BackendInfo;
+    pub async fn refresh_site(&self) -> Result<Option<CloudId>>;   // V123: backend.refresh_site()
 
     // Account and site
     pub async fn myself(&self) -> Result<User>;                     // always calls Jira; fills the cache
@@ -1367,7 +1387,10 @@ Tests in `policy::tests` (V67):
   `exec_allows_no_decreases_clause` outside comments. Verus still says
   "verified" with one of them. The scan reads the code with no white
   space, because Verus tokens can have spaces between them (V103).
-  Negative self-tests insert each one, also with spaces.
+  An escape word that follows a letter, a digit or `_` with no white space
+  in the source is part of a longer name, for example `my_assume(`. A
+  keyword before the escape, as in `pub assume_specification`, is not
+  (V121). Negative self-tests insert each one, also with spaces.
 - `the_drift_check_sees_changes`: an edited copy fails the body match. The
   extractor removes the comments before it finds the body and its proof
   blocks, so a brace in a comment hides no code (V103).
@@ -1673,6 +1696,11 @@ impl JiraService {
     /// `for_connection` reads the site of the connection again. Use it when
     /// a tenant connects to another site. API token mode: it does nothing.
     pub fn forget(&self, connection_id: &str);
+    /// V123: `client().refresh_site()`. The default client reads its site
+    /// again at once, with no wait for `CLOUD_ID_RECHECK_INTERVAL`. `None`
+    /// for a fixed site: API token mode, `jira-basic`, a configured
+    /// `cloud_id`, or no `connection_id`.
+    pub async fn refresh_default(&self) -> Result<Option<CloudId>, JiraError>;
 }
 // V28: san_mateo mode without `connection_id`: `client()` (and `Deref`) is a
 // client over a private backend that never sends. Each call gives
@@ -2058,8 +2086,8 @@ ctx).await`. All return `Result<T, ActivityFailure>` [V typed failure rule].
 | `jira_get_issue` | `GetIssueInput { client, issue: IssueRef, fields: Option<Vec<FieldId>> }` -> `IssueSummary` | read | 9m | exponential(5, 1s) |
 | `jira_search_page` | `SearchPageInput { client, jql: String, fields: Option<Vec<FieldId>>, max_results: u32, token: Option<String> }` -> `SearchPageOutput { issues: Vec<IssueSummary>, next_token: Option<String> }` | read; one page per call (F26) with `JiraClient::search_page_at`. Jira gives back the input token: `jira.pagination_stalled`. An empty token: `jira.invalid_input`. | 9m | exponential(5, 1s) |
 | `jira_edit_issue` | `EditIssueInput { client, issue, set_summary: Option<String>, add_labels, remove_labels, fields, notify_users: Option<bool> }` -> `EditIssueOutput {}` | PUT idempotent | 9m | exponential(5, 1s) |
-| `jira_transition_to_status` | `TransitionInput { client, issue, target: StatusTarget, fields: Map<String, Value> }` -> `TransitionOutput { outcome: TransitionKind, status: StatusSummary, via: Option<TransitionId> }` (`moved` or `already_there`) | state check; after a `MaybeSent` or `Unknown` attempt, `resume_transition_to_status` reads the status and sends nothing (V104) | 42m | exponential(5, 2s) |
-| `jira_add_comment` | `AddCommentInput { client, issue, text: String, resend_after_negative_lookup: bool, settle_secs: Option<u64> }` -> `CommentOutput { id: CommentId, outcome: CreateKind }` | marker from `ctx.idempotency_key()`; host rule; attempt 1 and a `NotSent` attempt call `add_comment_idempotent_first` (no lookup before the POST, V104); at most `COMMENT_LOOKUP_PAGES` comment pages (V96) | 70m | exponential(5, 2s) |
+| `jira_transition_to_status` | `TransitionInput { client, issue, target: StatusTarget, fields: Map<String, Value> }` -> `TransitionOutput { outcome: TransitionKind, status: StatusSummary, via: Option<TransitionId> }` (`moved` or `already_there`) | state check; after a `MaybeSent` or `Unknown` attempt, `resume_transition_to_status` reads the status and sends nothing (V104); a failed read before the POST gives `sent = false` (V118) | 42m | exponential(5, 2s) |
+| `jira_add_comment` | `AddCommentInput { client, issue, text: String, resend_after_negative_lookup: bool, settle_secs: Option<u64> }` -> `CommentOutput { id: CommentId, outcome: CreateKind }` | marker from `ctx.idempotency_key()`; host rule; attempt 1 and a `NotSent` attempt call `add_comment_idempotent_first` (no lookup before the POST, V104); an opt-in resend never gives `NotSent` (V117); at most `COMMENT_LOOKUP_PAGES` comment pages (V96) | 70m | exponential(5, 2s) |
 | `jira_delete_issue` | `DeleteIssueInput { client, issue, delete_subtasks: bool }` -> `DeleteOutput { outcome: DeleteKind }` (`deleted` or `gone_after_retry`) | DELETE idempotent; a 404 on any attempt after the first gives `gone_after_retry` (V39, V70) | 9m | exponential(5, 1s) |
 | `jira_watch_issue` | `WatchIssueInput { client, issue, route: SignalRoute }` -> `WatchOutput { issue: IssueSummary }` | GET issue, GET property, PUT property (merge route), PUT edit label `autumn-tracked`: all idempotent (R6, G10). It keeps each entry of another run as it is. | 42m | exponential(5, 1s) |
 
@@ -2983,7 +3011,9 @@ without the backslash escape; (M7) the bridge maps a finished run to 503;
 (M8) the wait deadline from `ctx.now()`; (M9) `host_may_send` ignores
 `MaybeSent`; (M10) the route mounted with `nest`. Each mutation must fail a
 named test. `cargo mutants -f crates/autumn-jira/src/policy.rs` with zero
-survivors when the tool installs.
+non-equivalent survivors. An equivalent mutant gives the same value on each
+input, so no test can kill it. The run found 9 equivalent mutants. The list
+is in [ac-evidence.md](ac-evidence.md), section "Mutation tests".
 
 ---
 

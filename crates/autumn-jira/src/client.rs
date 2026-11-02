@@ -26,7 +26,7 @@ use crate::backend::{
     encode_segment,
 };
 use crate::error::{JiraError, Op, Result};
-use crate::ids::{AccountId, IssueRef, PageToken, ProjectKey, TransitionId};
+use crate::ids::{AccountId, CloudId, IssueRef, PageToken, ProjectKey, TransitionId};
 use crate::jql::Jql;
 use crate::model::wire::{
     CountWire, EntityPropertyWire, IssueTypePageWire, SearchPage, SearchPageWire, TransitionsWire,
@@ -241,6 +241,22 @@ impl JiraClient {
     #[must_use]
     pub fn info(&self) -> BackendInfo {
         self.backend.info()
+    }
+
+    /// Reads the site of the backend again, at once, with
+    /// [`JiraBackend::refresh_site`]. Use it when a tenant connects to
+    /// another site. The clones of this client share the backend, so they
+    /// also use the new site.
+    ///
+    /// It returns the new cloud id. It returns `None` for a fixed site: an
+    /// API token client, a `jira-basic` connection, or a target cloud id.
+    ///
+    /// # Errors
+    ///
+    /// The errors of the read, for example `JiraError::CloudId` when no
+    /// site matches.
+    pub async fn refresh_site(&self) -> Result<Option<CloudId>> {
+        self.backend.refresh_site().await
     }
 
     /// Reads the user of the credentials (`GET /myself`). It caches the

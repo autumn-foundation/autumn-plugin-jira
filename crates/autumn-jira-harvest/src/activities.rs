@@ -173,6 +173,32 @@ fn send_failure(error: &JiraError, settle: Duration) -> ActivityFailure {
     }
 }
 
+/// The failure of an opt-in resend of a marked write. The resend comes
+/// after an attempt that can have sent the write.
+///
+/// [`previous_attempt`] reads only the attempt just before. So a failure
+/// that tells "not sent" here would hide the possible send of an earlier
+/// attempt. The next attempt would then send with no lookup. A retryable
+/// failure that tells "not sent" stays `jira.outcome_pending` instead. The
+/// next attempt then looks up first again (R3-write-safety-1).
+fn resend_failure(error: &JiraError, settle: Duration) -> ActivityFailure {
+    let failure = send_failure(error, settle);
+    let not_sent = failure
+        .details
+        .as_ref()
+        .and_then(|details| details.get("sent"))
+        == Some(&Value::Bool(false));
+    if failure.non_retryable || !not_sent {
+        return failure;
+    }
+    ActivityFailure::retryable(
+        OUTCOME_PENDING_ERROR,
+        format!("an earlier attempt can have sent the write, and this attempt failed: {error}"),
+    )
+    .with_details(maybe_sent_details(error.code(), error.status(), true))
+    .with_retry_after(settle)
+}
+
 /// The field set of an input: the default set for `None`.
 fn field_set(fields: Option<&[FieldId]>) -> FieldSet {
     fields.map_or_else(FieldSet::default, |list| {
@@ -651,33 +677,34 @@ impl TransitionInput {
         ctx: &ActivityContext,
     ) -> Result<TransitionOutput, ActivityFailure> {
         let outcome = match previous_attempt(ctx) {
+            // After a "maybe sent" POST, the client turns each stop into
+            // `OutcomeUnknown`. So a read error comes before any POST, and
+            // it gets `sent = false` (R3-write-safety-2).
             Previous::First | Previous::NotSent => {
                 let mut fields = TransitionFields::default();
                 fields.fields.clone_from(&self.fields);
                 client
                     .transition_to_status_with(self.issue.clone(), &self.target, &fields)
                     .await
+                    .map_err(|e| marked_write_failure(&e))
             }
-            Previous::MaybeSent => {
-                client
-                    .resume_transition_to_status(
-                        self.issue.clone(),
-                        &self.target,
-                        UnknownCause::Network,
-                    )
-                    .await
-            }
-            Previous::Unknown => {
-                client
-                    .resume_transition_to_status(
-                        self.issue.clone(),
-                        &self.target,
-                        UnknownCause::Timeout,
-                    )
-                    .await
-            }
-        }
-        .map_err(|e| failure_for(&e))?;
+            Previous::MaybeSent => client
+                .resume_transition_to_status(
+                    self.issue.clone(),
+                    &self.target,
+                    UnknownCause::Network,
+                )
+                .await
+                .map_err(|e| failure_for(&e)),
+            Previous::Unknown => client
+                .resume_transition_to_status(
+                    self.issue.clone(),
+                    &self.target,
+                    UnknownCause::Timeout,
+                )
+                .await
+                .map_err(|e| failure_for(&e)),
+        }?;
         Ok(match outcome {
             TransitionOutcome::AlreadyThere(status) => TransitionOutput {
                 outcome: TransitionKind::AlreadyThere,
@@ -766,17 +793,15 @@ impl AddCommentInput {
         // earlier attempt sent the comment. So the pre-lookup can find
         // nothing, and its page cap must not stop the send (R2A-write-safety-3).
         // The opt-in resend after a possible send keeps the pre-lookup.
-        let sent = match previous_attempt(ctx) {
-            Previous::First | Previous::NotSent => {
-                client
-                    .add_comment_idempotent_first(self.issue.clone(), &body, &key)
-                    .await
-            }
-            Previous::MaybeSent | Previous::Unknown => {
-                client
-                    .add_comment_idempotent(self.issue.clone(), &body, &key)
-                    .await
-            }
+        let first = matches!(previous_attempt(ctx), Previous::First | Previous::NotSent);
+        let sent = if first {
+            client
+                .add_comment_idempotent_first(self.issue.clone(), &body, &key)
+                .await
+        } else {
+            client
+                .add_comment_idempotent(self.issue.clone(), &body, &key)
+                .await
         };
         match sent {
             Ok(CommentOutcome::Created(comment)) => Ok(CommentOutput {
@@ -787,7 +812,8 @@ impl AddCommentInput {
                 id: comment.id,
                 outcome: CreateKind::Found,
             }),
-            Err(e) => Err(send_failure(&e, settle)),
+            Err(e) if first => Err(send_failure(&e, settle)),
+            Err(e) => Err(resend_failure(&e, settle)),
         }
     }
 }

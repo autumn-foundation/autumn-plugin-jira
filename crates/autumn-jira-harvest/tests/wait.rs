@@ -1135,3 +1135,96 @@ async fn missed_polls_fit_the_history_cap() {
         "{poll_round} events for each missed poll, {signal_round} for each signal: {worst}"
     );
 }
+
+// ------------------------------------------------- the reads of the loop
+
+/// A `WorkflowSimulator` of the wait. Its mock `jira_get_issue` gets the
+/// attempt number, and the simulator uses the retry policy of each call.
+/// Its `system_now()` reads the wall clock, so a slow mock read moves the
+/// wait past its deadline.
+fn simulator(
+    read: impl Fn(Value, u32) -> Result<Value, String> + Send + Sync + 'static,
+) -> autumn_harvest::WorkflowSimulator {
+    autumn_harvest::WorkflowSimulator::new(handler())
+        .with_activity_info(&autumn_jira_harvest::jira_get_issue_info())
+        .mock_activity_with_attempt(GET_ISSUE, read)
+}
+
+/// R3-tests-docs-guards-3 (R2C-harvest-2): a rate-limited poll is a
+/// missed poll at once. The poll read does not wait for the `Retry-After`
+/// of Jira, so harvest makes no second attempt of that read.
+#[tokio::test]
+async fn a_rate_limited_poll_makes_one_attempt() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    let rate_limited = autumn_harvest::failure::IntoActivityErrorString::into_error_payload(
+        autumn_jira_harvest::failure_for(&autumn_jira::JiraError::RateLimited {
+            op: autumn_jira::error::Op::GetIssue,
+            retry_after: Some(Duration::from_secs(900)),
+            reason: None,
+        }),
+    );
+    let calls = Arc::new(AtomicU32::new(0));
+    let retried = Arc::new(AtomicBool::new(false));
+    let read = {
+        let (calls, retried) = (Arc::clone(&calls), Arc::clone(&retried));
+        move |_: Value, attempt: u32| {
+            if attempt > 1 {
+                retried.store(true, Ordering::SeqCst);
+                return Ok(issue_at(&done()));
+            }
+            match calls.fetch_add(1, Ordering::SeqCst) {
+                0 => Ok(issue_at(&in_progress())),
+                1 => Err(rate_limited.clone()),
+                _ => Ok(issue_at(&done())),
+            }
+        }
+    };
+    let result = simulator(read).run(input(3_600, Some(60))).await;
+    let wait: StatusWait =
+        serde_json::from_value(result.final_output.clone().expect("the wait ends")).unwrap();
+    assert_eq!(
+        wait,
+        StatusWait::Reached {
+            status: done(),
+            source: WaitSource::Poll
+        }
+    );
+    assert!(
+        !retried.load(Ordering::SeqCst),
+        "a rate-limited poll read waits for no Retry-After"
+    );
+    // The first read, the rate-limited poll and the next poll.
+    assert_eq!(reads(&result.history).len(), 3);
+}
+
+/// R3-tests-docs-guards-3 (R2C-harvest-2): a poll read that ends at or
+/// after the deadline is the last read. The wait makes no read after it.
+#[tokio::test]
+async fn a_poll_that_ends_at_the_deadline_is_the_last_read() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    let calls = Arc::new(AtomicU32::new(0));
+    let read = {
+        let calls = Arc::clone(&calls);
+        move |_: Value, _: u32| {
+            // The poll read ends after the deadline of the 2 s wait.
+            if calls.fetch_add(1, Ordering::SeqCst) == 1 {
+                std::thread::sleep(Duration::from_millis(2_500));
+            }
+            Ok(issue_at(&in_progress()))
+        }
+    };
+    let result = simulator(read).run(input(2, Some(1))).await;
+    let wait: StatusWait =
+        serde_json::from_value(result.final_output.clone().expect("the wait ends")).unwrap();
+    assert_eq!(
+        wait,
+        StatusWait::TimedOut {
+            last: Some(in_progress())
+        }
+    );
+    // The first read and the poll. No read after the deadline.
+    assert_eq!(reads(&result.history).len(), 2);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}

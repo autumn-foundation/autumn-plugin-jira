@@ -592,6 +592,27 @@ mod tests {
 
     const DB_ENV: &str = "JIRA_TEST_DATABASE_URL";
 
+    /// One Tokio runtime for every test in this binary. It lives as long as
+    /// the process.
+    ///
+    /// autumn-harvest keeps one notify sender for each pool in a
+    /// process-global list. When a sender stops, the next pool that
+    /// registers starts it again on its own runtime. That can be the
+    /// runtime of another test. When that test ends, its runtime stops. The
+    /// connections of the sender then close in the middle of a transaction,
+    /// and an unrelated test fails. The guard
+    /// `postgres_tests_share_one_runtime` keeps `#[tokio::test]` out of this
+    /// file (R3-tests-docs-guards-1).
+    fn runtime() -> &'static tokio::runtime::Runtime {
+        static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+        RUNTIME.get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("the test runtime starts")
+        })
+    }
+
     /// The test database URL. With no URL, the test skips, but not in CI.
     fn database_url() -> Option<String> {
         match std::env::var(DB_ENV) {
@@ -607,40 +628,50 @@ mod tests {
         }
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn lifecycle_resolves_by_webhook() {
-        let Some(url) = database_url() else { return };
-        let summary = run(&url, scenario_fake()).await.expect("the example runs");
-        check(&summary).expect("the summary is right");
-        assert_eq!(summary["lifecycle"]["wait"]["source"], "Signal");
+    #[test]
+    fn lifecycle_resolves_by_webhook() {
+        runtime().block_on(async {
+            let Some(url) = database_url() else { return };
+            let summary = run(&url, scenario_fake()).await.expect("the example runs");
+            check(&summary).expect("the summary is right");
+            assert_eq!(summary["lifecycle"]["wait"]["source"], "Signal");
+        });
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn watch_resolves_by_poll() {
-        let Some(url) = database_url() else { return };
-        let fake = FakeJira::new().with_webhook_secret(WEBHOOK_SECRET);
-        let h = Harness::start(&url, fake).await.unwrap();
-        let second = watch(&h).await;
-        let bridge = h.bridge.counters();
-        h.stop().await.unwrap();
-        let second = second.expect("the watch run ends");
-        assert_eq!(second["wait"]["Reached"]["source"], "Poll", "{second}");
-        assert_eq!(bridge.deliveries, 0, "no webhook");
+    #[test]
+    fn watch_resolves_by_poll() {
+        runtime().block_on(async {
+            let Some(url) = database_url() else { return };
+            let fake = FakeJira::new().with_webhook_secret(WEBHOOK_SECRET);
+            let h = Harness::start(&url, fake).await.unwrap();
+            let second = watch(&h).await;
+            let bridge = h.bridge.counters();
+            h.stop().await.unwrap();
+            let second = second.expect("the watch run ends");
+            // No print of the run output: CodeQL traces the client token into it.
+            assert_eq!(
+                second["wait"]["Reached"]["source"], "Poll",
+                "the watch ends by poll"
+            );
+            assert_eq!(bridge.deliveries, 0, "no webhook");
+        });
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_400_fails_with_one_post() {
-        let Some(url) = database_url() else { return };
-        let fake = FakeJira::new().with_webhook_secret(WEBHOOK_SECRET);
-        fake.fault(FakeOp::CreateIssue, Fault::Status(400));
-        let err = run(&url, fake.clone())
-            .await
-            .expect_err("the workflow fails");
-        let err = err.to_string();
-        assert!(err.starts_with("workflow ticket-"), "{err}");
-        // A 400 is not retryable: one POST, and no wait for the timeout.
-        assert_eq!(fake.count(FakeOp::CreateIssue), 1, "{err}");
-        assert_eq!(fake.issues().len(), 0, "no issue");
+    #[test]
+    fn a_400_fails_with_one_post() {
+        runtime().block_on(async {
+            let Some(url) = database_url() else { return };
+            let fake = FakeJira::new().with_webhook_secret(WEBHOOK_SECRET);
+            fake.fault(FakeOp::CreateIssue, Fault::Status(400));
+            let err = run(&url, fake.clone())
+                .await
+                .expect_err("the workflow fails");
+            let err = err.to_string();
+            assert!(err.starts_with("workflow ticket-"), "{err}");
+            // A 400 is not retryable: one POST, and no wait for the timeout.
+            assert_eq!(fake.count(FakeOp::CreateIssue), 1, "{err}");
+            assert_eq!(fake.issues().len(), 0, "no issue");
+        });
     }
 
     #[test]

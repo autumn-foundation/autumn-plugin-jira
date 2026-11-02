@@ -510,6 +510,75 @@ mod check {
         out
     }
 
+    /// Returns `true` when `chars` holds `pattern` at `at`.
+    fn holds(chars: &[char], at: usize, pattern: &str) -> bool {
+        pattern
+            .chars()
+            .enumerate()
+            .all(|(k, c)| chars.get(at + k) == Some(&c))
+    }
+
+    /// AC4: each `fn` that makes a `ProxyRequest` sets `retries` to 0.
+    ///
+    /// san-mateo sends a call again `retries` times. The client owns the
+    /// retries (plan 7.1), so each proxy call of the backend sends one
+    /// time. The san-mateo 0.1 default is 0, so no behavior test sees a
+    /// removed `retries = 0`. The backend must not rely on that default:
+    /// a new default must not send a write a second time.
+    pub fn proxy_retry_violations(path: &str, text: &str) -> Vec<String> {
+        let src = Source::new(text);
+        let bare: Vec<char> = src.bare().chars().collect();
+        // A `fn` item starts at each `fn` keyword. Its span ends at the next one.
+        let starts: Vec<usize> = (0..bare.len())
+            .filter(|&i| holds(&bare, i, "fn ") && (i == 0 || !is_ident(bare[i - 1])))
+            .collect();
+        let next_char = |from: usize| bare[from..].iter().copied().find(|c| !c.is_whitespace());
+        let prev_char = |to: usize| {
+            bare[..to]
+                .iter()
+                .rev()
+                .copied()
+                .find(|c| !c.is_whitespace())
+        };
+        let mut out = Vec::new();
+        for i in 0..bare.len() {
+            let word = "ProxyRequest";
+            if !holds(&bare, i, word) || (i > 0 && is_ident(bare[i - 1])) {
+                continue;
+            }
+            let after = i + word.len();
+            let made = match next_char(after) {
+                Some(':') => true,
+                // A struct literal, not a type: `-> ProxyRequest {` is a type.
+                Some('{') => matches!(prev_char(i), Some('=' | '(' | ',' | '[')),
+                _ => false,
+            };
+            if !made {
+                continue;
+            }
+            let from = starts.iter().rev().copied().find(|&s| s <= i).unwrap_or(0);
+            let to = starts
+                .iter()
+                .copied()
+                .find(|&s| s > i)
+                .unwrap_or(bare.len());
+            let body: String = bare[from..to]
+                .iter()
+                .filter(|c| !c.is_whitespace())
+                .collect();
+            let sets_zero = [".retries=0;", ".retries(0)", "retries:0,", "retries:0}"]
+                .iter()
+                .any(|p| body.contains(p));
+            if !sets_zero {
+                out.push(format!(
+                    "{path}:{}: a `ProxyRequest` with no `retries = 0`: the client owns the retries",
+                    src.line_of(i)
+                ));
+            }
+        }
+        out
+    }
+
     /// AC38: no `unwrap`, `expect`, `todo!`, `unimplemented!` in code, and
     /// no `TODO` or `FIXME` in comments, outside test items.
     pub fn unwrap_todo_violations(path: &str, text: &str) -> Vec<String> {
@@ -860,14 +929,43 @@ mod check {
             .collect()
     }
 
+    /// The words that can come before a command in one segment: a shell
+    /// keyword, `!`, or a wrapper that runs the command.
+    const COMMAND_PREFIXES: [&str; 10] = [
+        "then", "do", "else", "elif", "if", "while", "until", "!", "time", "env",
+    ];
+
+    /// Returns `true` for a `NAME=value` word: an assignment before a
+    /// command.
+    fn is_assignment(word: &str) -> bool {
+        word.split_once('=').is_some_and(|(name, _)| {
+            !name.is_empty()
+                && !name.starts_with('-')
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+    }
+
+    /// The words of a segment with no shell keyword, wrapper or assignment
+    /// at the start (R3-tests-docs-guards-4).
+    fn command_words(command: &str) -> Vec<&str> {
+        let words = shell_words(command);
+        let start = words
+            .iter()
+            .position(|w| !COMMAND_PREFIXES.contains(w) && !is_assignment(w))
+            .unwrap_or(words.len());
+        words[start..].to_vec()
+    }
+
     /// The manifest of a `cargo update` in a shell line, or `None`. The
     /// update can come after `&&`, `||`, `;` or `|`, and can follow a `cd`.
-    /// Both `--manifest-path p` and `--manifest-path=p` name the manifest
+    /// A shell keyword such as `then`, a wrapper such as `env X=1` or
+    /// `time`, and an assignment can come before it. Both
+    /// `--manifest-path p` and `--manifest-path=p` name the manifest
     /// (R2E-tests-guards-8).
     fn updated_manifest(line: &str, dir: &mut Option<String>) -> Option<String> {
         let mut found = None;
         for command in line.split(['&', '|', ';']) {
-            let words = shell_words(command);
+            let words = command_words(command);
             match words.as_slice() {
                 ["cd", to, ..] => *dir = Some((*to).trim_end_matches('/').to_owned()),
                 ["cargo", "update", rest @ ..] => {
@@ -2144,6 +2242,33 @@ fn fake_does_not_depend_on_the_client_sees_a_dependency() {
     }
 }
 
+// --- AC4: one san-mateo send for each attempt ----------------------------
+
+#[test]
+fn proxy_requests_set_zero_retries() {
+    assert_files(
+        "proxy_requests_set_zero_retries",
+        &src_files(&CRATES),
+        check::proxy_retry_violations,
+    );
+}
+
+#[test]
+fn proxy_requests_set_zero_retries_sees_a_default() {
+    let p = "crates/autumn-jira/src/backend/san_mateo.rs";
+    let bad = "fn a() {\n    let mut r = ProxyRequest::get(PATH);\n    r.headers = h;\n}\n\
+               fn b() {\n    r.retries = 0;\n}";
+    assert_eq!(check::proxy_retry_violations(p, bad).len(), 1);
+    let literal = "fn c() {\n    let r = ProxyRequest { method: m, ..ProxyRequest::default() };\n}";
+    assert_eq!(check::proxy_retry_violations(p, literal).len(), 2);
+    let good = "// A ProxyRequest::get(P) with no retries.\n\
+                fn d() -> ProxyRequest {\n    let mut r = ProxyRequest::get(P);\n    r.retries = 0;\n    r\n}\n\
+                fn e() {\n    let r = ProxyRequest::new(\"POST\", P).retries(0);\n    let s = \"ProxyRequest::get(x)\";\n}\n\
+                fn f() {\n    let r = ProxyRequest { retries: 0, ..ProxyRequest::default() };\n}\n\
+                use san_mateo::{ConnectionKey, ProxyRequest};";
+    assert_eq!(check::proxy_retry_violations(p, good), NONE);
+}
+
 // --- AC33: no ctx.now() in harvest code ----------------------------------
 
 #[test]
@@ -2191,10 +2316,19 @@ fn pg_runtime_violations(path: &str, text: &str) -> Vec<String> {
         .collect()
 }
 
+/// The scan reads every crate, with its tests and its examples, and the
+/// ecosystem. A Postgres test in a crate example runs in CI too
+/// (R3-tests-docs-guards-1).
 #[test]
 fn postgres_tests_share_one_runtime() {
-    let mut files = files_under(&root().join("crates/autumn-jira-harvest/tests"), &["rs"]);
+    let mut files = files_under(&root().join("crates"), &["rs"]);
     files.extend(files_under(&root().join("examples/ecosystem/src"), &["rs"]));
+    assert!(
+        files
+            .iter()
+            .any(|f| rel(f) == "crates/autumn-jira-harvest/examples/harvest_workflow.rs"),
+        "the scan reads the crate examples"
+    );
     assert_files(
         "postgres_tests_share_one_runtime",
         &files,
@@ -2591,6 +2725,19 @@ fn weekly_updates_get_the_one_version_check_sees_a_gap() {
                   \x20     - run: cargo update --manifest-path=\"$MANIFEST\"\n";
     let eco_cd = "jobs:\n  eco:\n    steps:\n\
                   \x20     - run: cd examples/ecosystem && cargo update\n";
+    // R3-tests-docs-guards-4: an update after a shell keyword or a wrapper.
+    let wrapped: Vec<String> = [
+        "if [ \"$WEEKLY\" = 1 ]; then cargo update; fi",
+        "for m in a; do cargo update; done",
+        "if false; then true; else cargo update; fi",
+        "env CARGO_TERM_COLOR=never cargo update",
+        "time cargo update",
+        "CARGO_TERM_COLOR=never cargo update",
+        "! cargo update",
+    ]
+    .iter()
+    .map(|line| format!("jobs:\n  w:\n    steps:\n      - run: {line}\n"))
+    .collect();
     for bad in [
         weekly.to_owned(),
         format!(
@@ -2602,8 +2749,15 @@ fn weekly_updates_get_the_one_version_check_sees_a_gap() {
         format!("{eco_eq}      - run: bash scripts/one-version.sh Cargo.toml\n"),
         eco_cd.to_owned(),
         format!("{eco_cd}      - run: bash scripts/one-version.sh Cargo.toml\n"),
-    ] {
+    ]
+    .into_iter()
+    .chain(wrapped.iter().cloned())
+    {
         assert_eq!(check::update_violations(&bad).len(), 1, "{bad}");
+    }
+    for line in &wrapped {
+        let good = format!("{line}      - run: bash scripts/one-version.sh Cargo.toml\n");
+        assert_eq!(check::update_violations(&good), NONE, "{good}");
     }
     for good in [
         format!("{weekly}      - run: bash scripts/one-version.sh Cargo.toml\n"),

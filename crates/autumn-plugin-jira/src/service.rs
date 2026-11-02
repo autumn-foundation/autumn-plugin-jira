@@ -115,13 +115,33 @@ impl JiraService {
     /// San Mateo mode: drops the cached client of `connection_id`. The next
     /// [`for_connection`](Self::for_connection) makes a new client, which
     /// reads the site of the connection again. Use it when a tenant
-    /// connects to another site. The default client does not change.
+    /// connects to another site. The default client does not change: use
+    /// [`refresh_default`](Self::refresh_default) for it.
     ///
     /// In API token mode, or for an id that is not cached, it does nothing.
     pub fn forget(&self, connection_id: &str) {
         if let Some(tenants) = &self.tenants {
             tenants.forget(connection_id);
         }
+    }
+
+    /// Reads the site of the default client again, at once. The default
+    /// client is the client of [`client`](Self::client) and of `Deref`.
+    ///
+    /// Use it when the tenant of the default connection connects to another
+    /// site. The next call goes to the new site. It does not wait for
+    /// [`CLOUD_ID_RECHECK_INTERVAL`](autumn_jira::backend::CLOUD_ID_RECHECK_INTERVAL).
+    /// For a `for_connection` client, use [`forget`](Self::forget).
+    ///
+    /// It returns the new cloud id. It returns `None` and makes no call when
+    /// the site is fixed: API token mode, a `jira-basic` connection, a
+    /// `cloud_id` in `[jira.san_mateo]`, or no `connection_id`.
+    ///
+    /// # Errors
+    /// The errors of [`JiraClient::refresh_site`], for example
+    /// `JiraError::CloudId` when no site matches `site_url`.
+    pub async fn refresh_default(&self) -> Result<Option<CloudId>, JiraError> {
+        self.client.refresh_site().await
     }
 }
 

@@ -475,3 +475,83 @@ async fn san_mateo_startup_makes_no_network_call() {
     assert_eq!(fake.count(FakeOp::AccessibleResources), 1, "discovery");
     assert_eq!(fake.count(FakeOp::Myself), 1);
 }
+
+/// The cloud id of the site that the default tenant moves to.
+const MOVED_CLOUD_ID: &str = "77777777-2222-4333-8444-555555555555";
+
+/// A transport that serves fake `a` until `moved`, then fake `b`: the
+/// tenant connects the same san-mateo connection to another site.
+struct Moving {
+    a: FakeJira,
+    b: FakeJira,
+    moved: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl autumn_jira::san_mateo::transport::HttpTransport for Moving {
+    async fn send(
+        &self,
+        request: autumn_jira::san_mateo::transport::HttpRequest,
+    ) -> Result<
+        autumn_jira::san_mateo::transport::HttpResponse,
+        autumn_jira::san_mateo::transport::TransportError,
+    > {
+        if self.moved.load(std::sync::atomic::Ordering::SeqCst) {
+            self.b.send(request).await
+        } else {
+            self.a.send(request).await
+        }
+    }
+}
+
+/// R2G-fixcheck-b-1: after the default tenant moves to another site,
+/// `refresh_default` reads the site again. The next call of the default
+/// client goes to the new site with no wait for the check interval.
+#[tokio::test(flavor = "multi_thread")]
+async fn refresh_default_reads_the_new_site_at_once() {
+    let sites = Arc::new(Moving {
+        a: with_oauth(FakeJira::new()),
+        b: with_oauth(FakeJira::new().with_site("beta", MOVED_CLOUD_ID)),
+        moved: std::sync::atomic::AtomicBool::new(false),
+    });
+    let san = san_mateo(sites.clone());
+    oauth_connection(&san, CONNECTION, None).await;
+    let state = AppState::for_test();
+    state.insert_extension(SanMateoService::new(san));
+    let config = autumn_plugin_jira::JiraConfig::from_toml_str(&format!(
+        "[jira.san_mateo]\nenvironment = \"{ENV}\"\nintegration = \"{OAUTH_INTEGRATION}\"\nconnection_id = \"{CONNECTION}\"\n"
+    ))
+    .unwrap();
+    let rt = JiraPlugin::with_config(config).start(&state).unwrap();
+    let jira = JiraService::require(&state).unwrap();
+    // The first call discovers site A. The discovery counts as a check.
+    jira.myself().await.unwrap();
+    assert_eq!(sites.a.count(FakeOp::AccessibleResources), 1);
+    // The tenant moves. The default client keeps the old cloud id: in the
+    // check interval, a 404 makes no check.
+    sites.moved.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(jira.myself().await.is_err());
+    assert_eq!(sites.b.count(FakeOp::AccessibleResources), 0);
+    // A manual refresh reads the site at once.
+    let id = rt.service().refresh_default().await.unwrap();
+    assert_eq!(
+        id.map(|id| id.as_str().to_owned()).as_deref(),
+        Some(MOVED_CLOUD_ID)
+    );
+    jira.myself().await.unwrap();
+    let last = sites.b.requests().pop().unwrap();
+    assert_eq!(
+        last.path,
+        format!("/ex/jira/{MOVED_CLOUD_ID}/rest/api/3/myself")
+    );
+
+    // A fixed site reads nothing: API token mode and no connection_id.
+    let fake = FakeJira::new();
+    let rt = plugin(&fake).start(&AppState::for_test()).unwrap();
+    assert_eq!(rt.service().refresh_default().await.unwrap(), None);
+    let rt = JiraPlugin::with_config(san_mateo_config(None))
+        .start(&state)
+        .unwrap();
+    assert_eq!(rt.service().refresh_default().await.unwrap(), None);
+    assert_eq!(fake.requests().len(), 0);
+}

@@ -87,13 +87,16 @@ pub fn failure_for(err: &JiraError) -> ActivityFailure {
 }
 
 /// The failure of a marked write (`create_issue_idempotent`,
-/// `add_comment_idempotent`).
+/// `add_comment_idempotent`) or of `transition_to_status_with`.
 ///
 /// It is [`failure_for`], with one change: an error of a read operation
 /// gets `details.sent = false`. A marked write gives a read error only from
 /// the pre-lookup, before the send. A failed lookup after the send becomes
 /// `OutcomeUnknown` in the client. So a read error tells that the write did
-/// not go out, and the next attempt can send it (R5-spec-proof-1).
+/// not go out, and the next attempt can send it (R5-spec-proof-1). A
+/// transition is the same: after a "maybe sent" POST, the client turns each
+/// stop into `OutcomeUnknown`. So a status read or a transition list read
+/// that fails comes before any POST (R3-write-safety-2).
 #[must_use]
 pub(crate) fn marked_write_failure(err: &JiraError) -> ActivityFailure {
     let mut failure = failure_for(err);

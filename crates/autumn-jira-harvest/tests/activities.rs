@@ -1127,56 +1127,70 @@ async fn no_secret_in_outputs_or_history() {
 /// write, so the next attempt sends the write.
 #[tokio::test(start_paused = true)]
 async fn a_failed_pre_lookup_is_not_sent() {
-    for comment in [false, true] {
-        let fake = FakeJira::new();
-        let client = durable(&fake);
-        let key = human_issue(&fake, "Printer").await;
-        let first = first_ctx();
-        // The durable client sends a read two times. Both fail.
-        let lookup = if comment {
-            FakeOp::GetComments
-        } else {
-            FakeOp::Search
-        };
-        fake.fault(lookup, Fault::Status(503));
-        fake.fault(lookup, Fault::Status(503));
-        // Attempt 1 of a comment has no pre-lookup (R2A-write-safety-3).
-        // The opt-in resend after a crash has one.
-        let failure = if comment {
-            let mut resend = AddCommentInput::new(key_ref(&key), "Fixed it");
-            resend.resend_after_negative_lookup = true;
-            resend
-                .run(&client, &retry_of(&first, 2, None))
-                .await
-                .unwrap_err()
-        } else {
-            create_input().run(&client, &first).await.unwrap_err()
-        };
-        assert!(!failure.non_retryable, "{failure:?}");
-        assert_eq!(
-            failure.details.as_ref().and_then(|d| d.get("sent")),
-            Some(&json!(false)),
-            "{failure:?}"
-        );
-        let second = retry_of(&first, 3, Some(failure.into_error_payload()));
-        assert_eq!(
-            autumn_jira_harvest::previous_attempt(&second),
-            autumn_jira::policy::Previous::NotSent
-        );
-        if comment {
-            let made = AddCommentInput::new(key_ref(&key), "Fixed it")
-                .run(&client, &second)
-                .await
-                .unwrap();
-            assert_eq!(made.outcome, CreateKind::Created);
-            assert_eq!(fake.count(FakeOp::AddComment), 1);
-        } else {
-            let made = create_input().run(&client, &second).await.unwrap();
-            assert_eq!(made.outcome, CreateKind::Created);
-            // The person's issue and this one.
-            assert_eq!(fake.count(FakeOp::CreateIssue), 2);
-        }
+    let fake = FakeJira::new();
+    let client = durable(&fake);
+    human_issue(&fake, "Printer").await;
+    let first = first_ctx();
+    // The durable client sends a read two times. Both fail.
+    fake.fault(FakeOp::Search, Fault::Status(503));
+    fake.fault(FakeOp::Search, Fault::Status(503));
+    let failure = create_input().run(&client, &first).await.unwrap_err();
+    assert!(!failure.non_retryable, "{failure:?}");
+    assert_eq!(
+        failure.details.as_ref().and_then(|d| d.get("sent")),
+        Some(&json!(false)),
+        "{failure:?}"
+    );
+    let second = retry_of(&first, 2, Some(failure.into_error_payload()));
+    assert_eq!(
+        autumn_jira_harvest::previous_attempt(&second),
+        autumn_jira::policy::Previous::NotSent
+    );
+    let made = create_input().run(&client, &second).await.unwrap();
+    assert_eq!(made.outcome, CreateKind::Created);
+    // The person's issue and this one.
+    assert_eq!(fake.count(FakeOp::CreateIssue), 2);
+}
+
+/// R3-write-safety-1: `NotSent` tells only that the attempt just before
+/// sent nothing. An opt-in resend comes after an attempt that can have
+/// sent the comment. So a failure of that resend before its POST must
+/// not give `NotSent`. Else the next attempt sends with no lookup, and
+/// the issue gets a second comment.
+#[tokio::test(start_paused = true)]
+async fn an_opt_in_resend_after_a_failed_pre_lookup_looks_up_first() {
+    let fake = FakeJira::new();
+    let client = durable(&fake);
+    let key = human_issue(&fake, "Printer").await;
+    let mut comment = AddCommentInput::new(key_ref(&key), "Fixed it");
+    comment.resend_after_negative_lookup = true;
+    // Attempt 1: the POST commits, and the reply is a 503. The lookup
+    // after the send fails two times. Attempt 2: the pre-lookup of the
+    // opt-in resend fails two times.
+    fake.fault(FakeOp::AddComment, Fault::StatusAfterCommit(503));
+    for _ in 0..4 {
+        fake.fault(FakeOp::GetComments, Fault::Status(503));
     }
+    let first = first_ctx();
+    let failure = comment.run(&client, &first).await.unwrap_err();
+    assert_eq!(failure.error_type, OUTCOME_PENDING_ERROR, "{failure:?}");
+    assert_eq!(fake.count(FakeOp::AddComment), 1);
+    let second = retry_of(&first, 2, Some(failure.into_error_payload()));
+    let failure = comment.run(&client, &second).await.unwrap_err();
+    assert!(!failure.non_retryable, "{failure:?}");
+    assert_eq!(fake.count(FakeOp::AddComment), 1, "no POST before a lookup");
+    let third = retry_of(&first, 3, Some(failure.into_error_payload()));
+    assert_ne!(
+        autumn_jira_harvest::previous_attempt(&third),
+        autumn_jira::policy::Previous::NotSent,
+        "attempt 1 can have sent the comment"
+    );
+    // Attempt 3 looks up first, and finds the comment of attempt 1.
+    let reads = fake.count(FakeOp::GetComments);
+    let found = comment.run(&client, &third).await.unwrap();
+    assert_eq!(found.outcome, CreateKind::Found);
+    assert_eq!(fake.count(FakeOp::AddComment), 1, "no second comment");
+    assert!(fake.count(FakeOp::GetComments) > reads, "a lookup first");
 }
 
 /// R1-write-safety-6: the `sent` flag of a failure tells only the last
@@ -1331,4 +1345,38 @@ async fn a_transition_after_a_maybe_sent_attempt_sends_nothing() {
     let output = back.run(&durable, &ctx).await.unwrap();
     assert_eq!(output.outcome, TransitionKind::Moved);
     assert_eq!(fake.count(FakeOp::DoTransition), 1);
+}
+
+/// R3-write-safety-2: a status read or a transition list read that fails
+/// before the POST sends nothing. So the next attempt is "not sent", and
+/// it moves the issue. It does not stop with `jira.outcome_unknown`.
+#[tokio::test(start_paused = true)]
+async fn a_failed_read_before_the_transition_is_not_sent() {
+    for (op, code) in [(FakeOp::GetIssue, 503), (FakeOp::GetTransitions, 503)] {
+        let fake = FakeJira::new();
+        let durable = durable(&fake);
+        let key = human_issue(&fake, "Printer").await;
+        let first = first_ctx();
+        let transition = TransitionInput::new(key_ref(&key), StatusTarget::in_progress());
+        // The durable client sends a read two times. Both fail.
+        fake.fault(op, Fault::Status(code));
+        fake.fault(op, Fault::Status(code));
+        let failure = transition.run(&durable, &first).await.unwrap_err();
+        assert!(!failure.non_retryable, "{op:?}: {failure:?}");
+        assert_eq!(
+            failure.details.as_ref().and_then(|d| d.get("sent")),
+            Some(&json!(false)),
+            "{op:?}: {failure:?}"
+        );
+        assert_eq!(fake.count(FakeOp::DoTransition), 0);
+        let second = retry_of(&first, 2, Some(failure.into_error_payload()));
+        assert_eq!(
+            autumn_jira_harvest::previous_attempt(&second),
+            autumn_jira::policy::Previous::NotSent,
+            "{op:?}"
+        );
+        let output = transition.run(&durable, &second).await.unwrap();
+        assert_eq!(output.outcome, TransitionKind::Moved, "{op:?}");
+        assert_eq!(fake.count(FakeOp::DoTransition), 1, "{op:?}");
+    }
 }
