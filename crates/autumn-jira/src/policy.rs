@@ -705,6 +705,10 @@ mod tests {
             "#[verifier :: external_body]",
             "let t = Tracked::assume_new();",
             "proof { assume\n(false); }",
+            // R3-tests-docs-guards-2: a keyword before the escape is no name.
+            "pub assume_specification[f](x: u64);",
+            "pub assume_specification <T> [f](x: T);",
+            "pub\nassume_specification[f](x: u64);",
         ] {
             assert_ne!(proof_escapes(spaced), Vec::<String>::new(), "{spaced}");
         }
@@ -712,6 +716,10 @@ mod tests {
         assert_ne!(proof_escapes(&spaced), Vec::<String>::new());
         // A longer name that ends in an escape word is no escape.
         assert_eq!(proof_escapes("my_assume(x);"), Vec::<String>::new());
+        assert_eq!(
+            proof_escapes("pub fn my_assume_specification(x: u64) {}"),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
