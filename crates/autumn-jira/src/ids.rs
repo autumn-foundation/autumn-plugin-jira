@@ -669,6 +669,7 @@ mod tests {
             "delivery" => WebhookDeliveryId::parse(input).is_ok(),
             "token" => PageToken::parse(input).is_ok(),
             "idem" => IdempotencyKey::parse(input).is_ok(),
+            "host" => SiteHost::parse(input).is_ok(),
             other => panic!("unknown type {other}"),
         }
     }
@@ -683,6 +684,12 @@ mod tests {
         let token_201 = "x".repeat(201);
         let field_64 = format!("a{}", "b".repeat(63));
         let field_65 = format!("a{}", "b".repeat(64));
+        let host_63_label = format!("{}.net", "a".repeat(63));
+        let host_64_label = format!("{}.net", "a".repeat(64));
+        // 4 labels of 62 chars and 3 dots: 251 chars. Then ".b" or ".bc".
+        let four = vec!["a".repeat(62); 4].join(".");
+        let host_253 = format!("{four}.b");
+        let host_254 = format!("{four}.bc");
         let rows: Vec<(&str, &str, bool)> = vec![
             ("project", "OPS", true),
             ("project", "AB", true),
@@ -779,6 +786,24 @@ mod tests {
             ("idem", &token_201, false),
             ("idem", "a\tb", false),
             ("idem", "", false),
+            ("host", "acme.atlassian.net", true),
+            ("host", "a", true),
+            ("host", "a-1.b2", true),
+            ("host", &host_63_label, true),
+            ("host", &host_64_label, false),
+            ("host", &host_253, true),
+            ("host", &host_254, false),
+            ("host", "", false),
+            ("host", "ACME.net", false),
+            ("host", "a..b", false),
+            ("host", ".a", false),
+            ("host", "a.", false),
+            ("host", "-a.b", false),
+            ("host", "a-.b", false),
+            ("host", "a b", false),
+            ("host", "a/b", false),
+            ("host", "a:1", false),
+            ("host", "a_b.c", false),
         ];
         for (what, input, expected) in rows {
             assert_eq!(check(what, input), expected, "{what} {input:?}");
@@ -831,6 +856,13 @@ mod tests {
         assert!(serde_json::from_str::<WebhookDeliveryId>("\"\"").is_err());
         assert!(serde_json::from_str::<PageToken>("\"\"").is_err());
         assert!(serde_json::from_str::<IdempotencyKey>("\"a b\"").is_err());
+        assert!(serde_json::from_str::<SiteHost>("\"A..b\"").is_err());
+        assert!(serde_json::from_str::<SiteHost>("\"a:443\"").is_err());
+        let host: SiteHost = serde_json::from_str("\"acme.atlassian.net\"").unwrap();
+        assert_eq!(
+            serde_json::to_string(&host).unwrap(),
+            "\"acme.atlassian.net\""
+        );
         let key: IssueKey = serde_json::from_str("\"OPS-9\"").unwrap();
         assert_eq!(serde_json::to_string(&key).unwrap(), "\"OPS-9\"");
         let category: StatusCategoryKey = serde_json::from_str("\"done\"").unwrap();
@@ -899,6 +931,7 @@ mod tests {
             "[a-z0-9:_-]{0,130}",
             "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
             "(customfield_)?[a-zA-Z0-9_]{0,66}",
+            "[a-zA-Z0-9-]{0,64}(\\.[a-z0-9-]{0,64}){0,4}",
         ]
     }
 
@@ -917,7 +950,7 @@ mod tests {
             }
             round_trip!(ProjectKey, IssueKey, IssueId, ProjectId, StatusId, CommentId,
                 TransitionId, IssueTypeId, AccountId, CloudId, SiteName, StatusCategoryKey,
-                FieldId, WebhookDeliveryId, PageToken, IdempotencyKey);
+                FieldId, WebhookDeliveryId, PageToken, IdempotencyKey, SiteHost);
             if let Ok(r) = IssueRef::parse(&input) {
                 prop_assert_eq!(IssueRef::parse(&r.to_string()).unwrap(), r);
             }
@@ -926,7 +959,7 @@ mod tests {
         #[test]
         fn no_panic_proptest(input in any_input()) {
             for what in ["project", "issue_key", "issue_id", "issue_ref", "account", "cloud",
-                "site", "category", "field", "delivery", "token", "idem"] {
+                "site", "category", "field", "delivery", "token", "idem", "host"] {
                 let _ = check(what, &input);
             }
             if let Ok(key) = IssueKey::parse(&input) {
