@@ -17,6 +17,8 @@ use autumn_web::webhook::hmac_sha256_hex;
 
 const CHILD_MARK: &str = "AUTUMN_PLUGIN_JIRA_BOOT_CHILD";
 const SECRET: &str = "boot-webhook-secret-0123456789abcdef";
+/// When set, the child writes a long log before it starts.
+const NOISE_MARK: &str = "AUTUMN_PLUGIN_JIRA_BOOT_NOISE";
 
 #[autumn_web::get("/")]
 async fn index() -> &'static str {
@@ -30,6 +32,13 @@ async fn index() -> &'static str {
 async fn boot_child_server() {
     if std::env::var(CHILD_MARK).is_err() {
         return;
+    }
+    if std::env::var(NOISE_MARK).is_ok() {
+        // More output than one pipe buffer (64 KiB on Linux), as a long
+        // log gives.
+        for n in 0..4096 {
+            eprintln!("boot child log line {n:05} {}", "x".repeat(40));
+        }
     }
     Box::pin(
         autumn_web::app()
@@ -146,6 +155,8 @@ async fn missing_secret_exits_and_names_the_variable() {
 async fn the_app_boots_and_takes_a_signed_post() {
     let port = free_port();
     let dir = app_dir("ok");
+    // R9-test-quality-4: trace logs fill a pipe buffer. The test must not
+    // depend on a small log volume.
     let mut child = spawn(
         &dir,
         port,
@@ -153,6 +164,8 @@ async fn the_app_boots_and_takes_a_signed_post() {
             ("BOOT_JIRA_EMAIL", DEFAULT_EMAIL),
             ("BOOT_JIRA_TOKEN", DEFAULT_API_TOKEN),
             ("BOOT_JIRA_WEBHOOK_SECRET", SECRET),
+            ("AUTUMN_LOG__LEVEL", "trace"),
+            (NOISE_MARK, "1"),
         ],
     );
     let client = reqwest::Client::builder().no_proxy().build().unwrap();
