@@ -436,7 +436,11 @@ async fn comment_lookup_finds_marker_beyond_100() {
         .add_comment_idempotent(&issue, &Adf::text("Escalated"), &k)
         .await
         .unwrap();
-    assert!(matches!(first, CommentOutcome::Created(_)), "{first:?}");
+    // No Debug print: a comment outcome holds the account id of the client.
+    assert!(
+        matches!(first, CommentOutcome::Created(_)),
+        "the outcome is Created"
+    );
     // A bot writes 120 newer comments.
     for n in 0..120 {
         fake.human_comment(issue.as_str(), &format!("ci note {n}"), "ann")
@@ -451,7 +455,11 @@ async fn comment_lookup_finds_marker_beyond_100() {
         .add_comment_idempotent(&issue, &Adf::text("Escalated"), &k)
         .await
         .unwrap();
-    assert!(matches!(again, CommentOutcome::Found(_)), "{again:?}");
+    // No Debug print: a comment outcome holds the account id of the client.
+    assert!(
+        matches!(again, CommentOutcome::Found(_)),
+        "the outcome is Found"
+    );
     assert_eq!(fake.count(FakeOp::AddComment), 1);
 }
 
@@ -482,7 +490,11 @@ async fn a_marker_from_another_author_is_not_found() {
         .add_comment_idempotent(&issue, &Adf::text("Escalated"), &k)
         .await
         .unwrap();
-    assert!(matches!(outcome, CommentOutcome::Created(_)), "{outcome:?}");
+    // No Debug print: a comment outcome holds the account id of the client.
+    assert!(
+        matches!(outcome, CommentOutcome::Created(_)),
+        "the outcome is Created"
+    );
     assert_eq!(fake.count(FakeOp::AddComment), 1);
 }
 
@@ -506,7 +518,11 @@ async fn marked_write_with_an_unexpected_2xx_looks_up_the_marker() {
         .add_comment_idempotent(&issue, &Adf::text("hi"), &key(51))
         .await
         .unwrap();
-    assert!(matches!(outcome, CommentOutcome::Found(_)), "{outcome:?}");
+    // No Debug print: a comment outcome holds the account id of the client.
+    assert!(
+        matches!(outcome, CommentOutcome::Found(_)),
+        "the outcome is Found"
+    );
     assert_eq!(fake.count(FakeOp::AddComment), 1);
 }
 
@@ -1033,7 +1049,11 @@ async fn comment_lookup_survives_a_delete_between_pages() {
         .add_comment_idempotent(&issue, &Adf::text("Escalated"), &k)
         .await
         .unwrap();
-    assert!(matches!(first, CommentOutcome::Created(_)), "{first:?}");
+    // No Debug print: a comment outcome holds the account id of the client.
+    assert!(
+        matches!(first, CommentOutcome::Created(_)),
+        "the outcome is Created"
+    );
     for n in 0..100 {
         fake.human_comment(issue.as_str(), &format!("new {n}"), "ann")
             .unwrap();
@@ -1089,7 +1109,11 @@ async fn a_first_attempt_comments_on_an_issue_with_many_comments() {
         .add_comment_idempotent_first(&issue, &Adf::text("Escalated"), &k)
         .await
         .unwrap();
-    assert!(matches!(outcome, CommentOutcome::Created(_)), "{outcome:?}");
+    // No Debug print: a comment outcome holds the account id of the client.
+    assert!(
+        matches!(outcome, CommentOutcome::Created(_)),
+        "the outcome is Created"
+    );
     assert_eq!(fake.count(FakeOp::AddComment), 1);
     // After a lost reply, the lookup finds the new comment on page 1.
     let k = key(72);
@@ -1098,6 +1122,10 @@ async fn a_first_attempt_comments_on_an_issue_with_many_comments() {
         .add_comment_idempotent_first(&issue, &Adf::text("Again"), &k)
         .await
         .unwrap();
-    assert!(matches!(outcome, CommentOutcome::Found(_)), "{outcome:?}");
+    // No Debug print: a comment outcome holds the account id of the client.
+    assert!(
+        matches!(outcome, CommentOutcome::Found(_)),
+        "the outcome is Found"
+    );
     assert_eq!(fake.count(FakeOp::AddComment), 2);
 }
