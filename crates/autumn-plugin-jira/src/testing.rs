@@ -67,8 +67,8 @@ pub fn plugin_for(fake: &FakeJira) -> JiraPlugin {
 }
 
 /// An `AutumnConfig` with the Jira endpoint at `/jira/webhook` (secret
-/// [`TEST_WEBHOOK_SECRET`]) and CSRF on. autumn exempts the webhook path
-/// from CSRF.
+/// [`TEST_WEBHOOK_SECRET`]), CSRF on, and `[health] detailed = true`.
+/// autumn exempts the webhook path from CSRF.
 #[must_use]
 pub fn app_config() -> AutumnConfig {
     let mut cfg = AutumnConfig::default();
@@ -76,6 +76,9 @@ pub fn app_config() -> AutumnConfig {
     endpoint.secret = Some(TEST_WEBHOOK_SECRET.to_owned());
     cfg.security.webhooks.endpoints.push(endpoint);
     cfg.security.csrf.enabled = true;
+    // The health report then shows the details of the `jira` indicator,
+    // with the webhook counters.
+    cfg.health.detailed = true;
     cfg
 }
 

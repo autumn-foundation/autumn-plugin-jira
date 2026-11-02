@@ -7,9 +7,10 @@
 //!
 //! One `.plugin(..)` call adds Jira. `autumn.toml` (next to this file) holds
 //! the names of the env vars with the secrets, never the secrets. The app
-//! uses `FakeJira`, an in-memory Jira, unless `JIRA_SITE`, `JIRA_EMAIL` and
-//! `JIRA_API_TOKEN` are all set. Then it calls your Jira Cloud site with a
-//! `ReqwestTransport`.
+//! uses `FakeJira`, an in-memory Jira, unless `JIRA_SITE` is set. Then it
+//! calls your Jira Cloud site with a `ReqwestTransport`, and the plugin
+//! reads `JIRA_EMAIL` and `JIRA_API_TOKEN`. When one of them is not set,
+//! the boot stops with a non-zero exit, and the error names the variable.
 //!
 //! Run it from the repository root. autumn reads `autumn.toml` from
 //! `AUTUMN_MANIFEST_DIR`:
@@ -51,8 +52,9 @@ use autumn_plugin_jira::{
 use autumn_web::{AutumnResult, Json, Path};
 use serde_json::{Value, json};
 
-/// The env vars that select a real Jira site.
-const REAL_ENV: [&str; 3] = ["JIRA_SITE", "JIRA_EMAIL", "JIRA_API_TOKEN"];
+/// The env var that selects a real Jira site, for example `acme` for
+/// `https://acme.atlassian.net`.
+const SITE_ENV: &str = "JIRA_SITE";
 
 #[autumn_web::get("/")]
 async fn index() -> &'static str {
@@ -63,10 +65,12 @@ async fn index() -> &'static str {
 /// A bad key gives 400 (strict `IssueKey`), a missing issue 404.
 #[autumn_web::get("/issues/{key}")]
 async fn issue(jira: JiraService, Path(key): Path<IssueKey>) -> AutumnResult<Json<Value>> {
-    let _ = (jira, key);
-    Err(autumn_web::AutumnError::internal_server_error_msg(
-        "not yet",
-    ))
+    let issue = jira.get_issue(key).await.http()?;
+    Ok(Json(json!({
+        "key": issue.key.to_string(),
+        "summary": issue.fields.summary,
+        "status": issue.fields.status.map(|s| s.name),
+    })))
 }
 
 /// A sink that logs the delivery id and the event name, never the body.
@@ -103,19 +107,19 @@ async fn seeded_fake() -> Result<FakeJira, String> {
     Ok(fake)
 }
 
-/// The plugin: on the real site when `JIRA_SITE`, `JIRA_EMAIL` and
-/// `JIRA_API_TOKEN` are set, else on the seeded fake. It also returns the
-/// mode name for the summary.
+/// The plugin: on the real site when `JIRA_SITE` is set, else on the
+/// seeded fake. It also returns the mode name for the summary.
 async fn plugin() -> Result<(JiraPlugin, &'static str), String> {
-    let real = REAL_ENV
-        .iter()
-        .all(|k| std::env::var(k).is_ok_and(|v| !v.trim().is_empty()));
-    if real {
+    let site = std::env::var(SITE_ENV)
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    if let Some(site) = site {
         let mut config =
             JiraConfig::from_toml_str(include_str!("autumn.toml")).map_err(|e| e.to_string())?;
-        if let (Some(api), Ok(site)) = (config.api_token.as_mut(), std::env::var("JIRA_SITE")) {
+        if let Some(api) = config.api_token.as_mut() {
             api.site = Some(site);
         }
+        // The plugin reads JIRA_EMAIL and JIRA_API_TOKEN at the start.
         return Ok((JiraPlugin::with_config(config).sink(LogSink), "real"));
     }
     let fake = seeded_fake().await?;
