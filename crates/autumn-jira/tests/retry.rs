@@ -365,3 +365,63 @@ async fn plain_transition_is_sent_once() {
         1
     );
 }
+
+/// One planned trouble of an unsafe write.
+#[derive(Debug, Clone)]
+enum Trouble {
+    Fault(Fault),
+    RateLimit,
+}
+
+/// AC15 as a table: each unsafe write, each trigger, one request.
+#[tokio::test(start_paused = true)]
+async fn unsafe_writes_send_once_table() {
+    let troubles = [
+        Trouble::Fault(Fault::Status(500)),
+        Trouble::Fault(Fault::StatusAfterCommit(503)),
+        Trouble::Fault(Fault::NetworkAfterCommit),
+        Trouble::Fault(Fault::Timeout),
+        Trouble::RateLimit,
+    ];
+    for op in [
+        FakeOp::CreateIssue,
+        FakeOp::AddComment,
+        FakeOp::DoTransition,
+    ] {
+        for trouble in troubles.clone() {
+            let fake = FakeJira::new();
+            let key = issue(&fake).await;
+            let client = api_token_client(&fake);
+            let before = fake.count(op);
+            match trouble.clone() {
+                Trouble::Fault(fault) => fake.fault(op, fault),
+                Trouble::RateLimit => fake.rate_limit(op, 1, 1),
+            }
+            let result = match op {
+                FakeOp::CreateIssue => client.create_issue(&task("t")).await.map(|_| ()),
+                FakeOp::AddComment => client.add_comment(&key, &Adf::text("hi")).await.map(|_| ()),
+                _ => {
+                    client
+                        .transition(
+                            &key,
+                            &TransitionId::parse("21").unwrap(),
+                            &TransitionFields::default(),
+                        )
+                        .await
+                }
+            };
+            let err = result.unwrap_err();
+            let label = format!("{op:?} {trouble:?}: {err:?}");
+            match trouble {
+                Trouble::RateLimit => {
+                    assert!(matches!(err, JiraError::RateLimited { .. }), "{label}")
+                }
+                _ => assert!(
+                    matches!(err, JiraError::OutcomeUnknown { marker: None, .. }),
+                    "{label}"
+                ),
+            }
+            assert_eq!(fake.count(op) - before, 1, "{label}");
+        }
+    }
+}
