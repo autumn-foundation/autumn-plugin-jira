@@ -98,7 +98,8 @@ enum Source {
 /// `accessible-resources`. It does this at most one time in each
 /// [`CLOUD_ID_RECHECK_INTERVAL`], so ordinary 404 replies do not each make
 /// a call. A site move while the process runs is seen at the first 401 or
-/// 404 after the interval. When the token does not cover the stored id,
+/// 404 after the interval. [`JiraBackend::refresh_site`] reads the site at
+/// once, with no wait for the interval. When the token does not cover the stored id,
 /// the backend picks the site again and stores the new id in the metadata.
 /// The next attempt uses the new id. The backend never sends the attempt
 /// again.
@@ -230,6 +231,12 @@ impl SanMateoBackend {
                 "only the atlassian provider has a cloud id to discover".to_owned(),
             ));
         }
+        self.rediscover().await
+    }
+
+    /// Runs a discovery and resets the prefix when the target has no cloud
+    /// id. A cloud id of the target stays fixed.
+    async fn rediscover(&self) -> Result<CloudId> {
         let id = self.discover().await?;
         // No lock on `prefix` is held here: only `prefix()` holds it while
         // it discovers, and it does not call this method.
@@ -439,6 +446,23 @@ impl JiraBackend for SanMateoBackend {
             headers: reply.headers,
             body: reply.body,
         })
+    }
+
+    /// `atlassian` with no cloud id in the target: the discovery of
+    /// [`SanMateoBackend::discover_cloud_id`], at once. A `jira-basic`
+    /// connection and a cloud id of the target are fixed sites, so they
+    /// give `None` and make no call.
+    async fn refresh_site(&self) -> Result<Option<CloudId>> {
+        let provider = self
+            .provider()
+            .await
+            .map_err(|e| backend_error(Op::Discovery, &e))?;
+        match prefix_for(&provider, self.target.cloud_id.as_ref())
+            .map_err(|e| backend_error(Op::Discovery, &e))?
+        {
+            Some(_) => Ok(None),
+            None => self.rediscover().await.map(Some),
+        }
     }
 
     fn info(&self) -> BackendInfo {

@@ -115,7 +115,8 @@ impl JiraService {
     /// San Mateo mode: drops the cached client of `connection_id`. The next
     /// [`for_connection`](Self::for_connection) makes a new client, which
     /// reads the site of the connection again. Use it when a tenant
-    /// connects to another site. The default client does not change.
+    /// connects to another site. The default client does not change: use
+    /// [`refresh_default`](Self::refresh_default) for it.
     ///
     /// In API token mode, or for an id that is not cached, it does nothing.
     pub fn forget(&self, connection_id: &str) {

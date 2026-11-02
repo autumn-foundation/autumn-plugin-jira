@@ -248,8 +248,8 @@ impl JiraClient {
     /// another site. The clones of this client share the backend, so they
     /// also use the new site.
     ///
-    /// It returns the new cloud id, or `None` when the site is fixed: an API
-    /// token client, a `jira-basic` connection, or a cloud id in the target.
+    /// It returns the new cloud id. It returns `None` for a fixed site: an
+    /// API token client, a `jira-basic` connection, or a target cloud id.
     ///
     /// # Errors
     ///

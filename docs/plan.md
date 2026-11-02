@@ -604,6 +604,13 @@ application/json`, `content-type: application/json` when a body exists,
   `discover_cloud_id` also resets the cached prefix, so the next attempt
   uses the new id (V120). A `target.cloud_id` is never checked. So a site move while the process
   runs is seen at the first 401 or 404 after the interval.
+- Manual refresh (V123): `JiraBackend::refresh_site` reads the site at once,
+  with no wait for the interval. `SanMateoBackend` runs the discovery of
+  `discover_cloud_id` and resets the prefix when the provider is
+  `atlassian` and the target has no cloud id. Else it gives `Ok(None)` and
+  makes no call. Another provider gives `Config { code:
+  "not_a_jira_provider" }`. `JiraClient::refresh_site` and
+  `JiraService::refresh_default` call it.
 - Residual case (V55): when the token covers the old and the new site and
   no `site_url` is set, the backend keeps the stored id. Only a credential
   fingerprint can find this case, and san-mateo gives none.

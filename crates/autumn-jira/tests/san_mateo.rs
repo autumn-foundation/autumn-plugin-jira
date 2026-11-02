@@ -430,7 +430,7 @@ async fn refresh_site_of_a_fixed_site_makes_no_call() {
     let key = basic_connection(&san).await;
     let basic = autumn_jira::JiraClient::san_mateo(san, SanMateoTarget::new(ENV, key));
     assert_eq!(basic.refresh_site().await.unwrap(), None);
-    assert!(transport.requests().is_empty());
+    assert_eq!(transport.requests().len(), 0);
 
     // A cloud id in the target stays fixed.
     let fake = with_oauth(FakeJira::new());
@@ -452,7 +452,7 @@ async fn refresh_site_of_a_fixed_site_makes_no_call() {
         Arc::new(fake.clone()),
     );
     assert_eq!(direct.refresh_site().await.unwrap(), None);
-    assert!(fake.requests().is_empty());
+    assert_eq!(fake.requests().len(), 0);
 
     // A provider that is not a Jira provider is a config error.
     let san = san_mateo(Arc::new(MemoryTransport::new()));

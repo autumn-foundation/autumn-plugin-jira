@@ -553,5 +553,5 @@ async fn refresh_default_reads_the_new_site_at_once() {
         .start(&state)
         .unwrap();
     assert_eq!(rt.service().refresh_default().await.unwrap(), None);
-    assert!(fake.requests().is_empty());
+    assert_eq!(fake.requests().len(), 0);
 }
