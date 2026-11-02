@@ -2208,9 +2208,9 @@ fn postgres_tests_share_one_runtime_sees_a_test_runtime() {
     let bad = "fn database_url() {}\n#[tokio::test(flavor = \"multi_thread\")]\nasync fn t() {}";
     assert_eq!(pg_runtime_violations(p, bad).len(), 1);
     let good = "fn database_url() {}\n#[test]\nfn t() { runtime().block_on(async {}); }";
-    assert!(pg_runtime_violations(p, good).is_empty());
+    assert_eq!(pg_runtime_violations(p, good), NONE);
     let other = "#[tokio::test]\nasync fn t() {}";
-    assert!(pg_runtime_violations(p, other).is_empty());
+    assert_eq!(pg_runtime_violations(p, other), NONE);
 }
 
 // --- AC30: no exactly-once claim -----------------------------------------

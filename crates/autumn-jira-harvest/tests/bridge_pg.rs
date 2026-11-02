@@ -54,6 +54,26 @@ const WORKFLOW: &str = "incident_flow";
 
 static MIGRATED: OnceCell<()> = OnceCell::const_new();
 
+/// One Tokio runtime for every test in this binary. It lives as long as the
+/// process.
+///
+/// autumn-harvest keeps one notify sender for each pool in a process-global
+/// list. When a sender stops, the next pool that registers starts it again
+/// on its own runtime. That can be the runtime of another test. When that
+/// test ends, its runtime stops. The connections of the sender then close in
+/// the middle of a transaction, and an unrelated test fails (CI run
+/// 41468004102). The guard `postgres_tests_share_one_runtime` keeps
+/// `#[tokio::test]` out of this file.
+fn runtime() -> &'static tokio::runtime::Runtime {
+    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("the test runtime starts")
+    })
+}
+
 /// The test database URL. With no URL, the test skips, but not in CI.
 fn database_url() -> Option<String> {
     match std::env::var(DB_ENV) {
@@ -190,146 +210,156 @@ fn make_bridge(pool: DbPool, fake: &FakeJira) -> HarvestSignalBridge {
     HarvestSignalBridge::new(pool, client, route_key()).allow_workflow(WORKFLOW)
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn duplicate_delivery_gives_one_signal() {
-    let Some(url) = database_url() else { return };
-    migrated(&url).await;
-    let pool = pool(&url);
-    let workflow_id = format!("incident:{}", nonce());
-    let started = start_run(&pool, &url, &workflow_id).await;
-    let fake = fake();
-    let route = SignalRoute::new(WORKFLOW, &workflow_id).unwrap();
-    let key = tracked_issue(
-        &fake,
-        vec![route.property_entry(&route_key(), &test_binding())],
-    )
-    .await;
-    let delivery = status_change(&fake, &key);
-    let bridge = make_bridge(pool.clone(), &fake);
+#[test]
+fn duplicate_delivery_gives_one_signal() {
+    runtime().block_on(async {
+        let Some(url) = database_url() else { return };
+        migrated(&url).await;
+        let pool = pool(&url);
+        let workflow_id = format!("incident:{}", nonce());
+        let started = start_run(&pool, &url, &workflow_id).await;
+        let fake = fake();
+        let route = SignalRoute::new(WORKFLOW, &workflow_id).unwrap();
+        let key = tracked_issue(
+            &fake,
+            vec![route.property_entry(&route_key(), &test_binding())],
+        )
+        .await;
+        let delivery = status_change(&fake, &key);
+        let bridge = make_bridge(pool.clone(), &fake);
 
-    assert_eq!(
-        bridge.route(&delivery).await.unwrap(),
-        vec![RouteOutcome::Signalled]
-    );
-    // Jira sends the same delivery again: one signal.
-    assert_eq!(
-        bridge.route(&delivery).await.unwrap(),
-        vec![RouteOutcome::Duplicate]
-    );
-    bridge.deliver(Arc::new(delivery.clone())).await.unwrap();
-    let exec_id = started.handle.exec_id();
-    let mut conn = pool.get().await.unwrap();
-    let signals = autumn_harvest::signal::load_pending_signals(&mut conn, exec_id)
-        .await
-        .unwrap();
-    assert_eq!(signals.len(), 1);
-    let signal = &signals[0];
-    assert_eq!(signal.signal_name, SIGNAL);
-    let payload: IssueSignal = serde_json::from_value(signal.payload.clone()).unwrap();
-    assert_eq!(payload.delivery_id, delivery.meta.id);
-    assert_eq!(payload.event, "jira:issue_updated");
-    assert_eq!(payload.issue_key.as_ref(), Some(&key));
-    assert_eq!(payload.status.unwrap().name, "In Progress");
-    assert!(payload.timestamp_ms.is_some());
-    let text = serde_json::to_string(&signal.payload).unwrap();
-    assert!(!text.contains(DEFAULT_API_TOKEN), "{text}");
-    let counters = bridge.counters();
-    assert_eq!(
-        (counters.deliveries, counters.signalled, counters.duplicate),
-        (3, 1, 2)
-    );
+        assert_eq!(
+            bridge.route(&delivery).await.unwrap(),
+            vec![RouteOutcome::Signalled]
+        );
+        // Jira sends the same delivery again: one signal.
+        assert_eq!(
+            bridge.route(&delivery).await.unwrap(),
+            vec![RouteOutcome::Duplicate]
+        );
+        bridge.deliver(Arc::new(delivery.clone())).await.unwrap();
+        let exec_id = started.handle.exec_id();
+        let mut conn = pool.get().await.unwrap();
+        let signals = autumn_harvest::signal::load_pending_signals(&mut conn, exec_id)
+            .await
+            .unwrap();
+        assert_eq!(signals.len(), 1);
+        let signal = &signals[0];
+        assert_eq!(signal.signal_name, SIGNAL);
+        let payload: IssueSignal = serde_json::from_value(signal.payload.clone()).unwrap();
+        assert_eq!(payload.delivery_id, delivery.meta.id);
+        assert_eq!(payload.event, "jira:issue_updated");
+        assert_eq!(payload.issue_key.as_ref(), Some(&key));
+        assert_eq!(payload.status.unwrap().name, "In Progress");
+        assert!(payload.timestamp_ms.is_some());
+        let text = serde_json::to_string(&signal.payload).unwrap();
+        assert!(!text.contains(DEFAULT_API_TOKEN), "{text}");
+        let counters = bridge.counters();
+        assert_eq!(
+            (counters.deliveries, counters.signalled, counters.duplicate),
+            (3, 1, 2)
+        );
+    });
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn missing_run_is_skipped() {
-    let Some(url) = database_url() else { return };
-    migrated(&url).await;
-    let fake = fake();
-    let route = SignalRoute::new(WORKFLOW, &format!("incident:{}", nonce())).unwrap();
-    let key = tracked_issue(
-        &fake,
-        vec![route.property_entry(&route_key(), &test_binding())],
-    )
-    .await;
-    let delivery = status_change(&fake, &key);
-    let bridge = make_bridge(pool(&url), &fake);
-    assert_eq!(
-        bridge.route(&delivery).await.unwrap(),
-        vec![RouteOutcome::NoRun]
-    );
-    // The sink answers Ok: the plugin gives 200.
-    bridge.deliver(Arc::new(delivery)).await.unwrap();
-    assert_eq!(bridge.counters().no_run, 2);
+#[test]
+fn missing_run_is_skipped() {
+    runtime().block_on(async {
+        let Some(url) = database_url() else { return };
+        migrated(&url).await;
+        let fake = fake();
+        let route = SignalRoute::new(WORKFLOW, &format!("incident:{}", nonce())).unwrap();
+        let key = tracked_issue(
+            &fake,
+            vec![route.property_entry(&route_key(), &test_binding())],
+        )
+        .await;
+        let delivery = status_change(&fake, &key);
+        let bridge = make_bridge(pool(&url), &fake);
+        assert_eq!(
+            bridge.route(&delivery).await.unwrap(),
+            vec![RouteOutcome::NoRun]
+        );
+        // The sink answers Ok: the plugin gives 200.
+        bridge.deliver(Arc::new(delivery)).await.unwrap();
+        assert_eq!(bridge.counters().no_run, 2);
+    });
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn finished_run_is_skipped() {
-    let Some(url) = database_url() else { return };
-    migrated(&url).await;
-    let pool = pool(&url);
-    let workflow_id = format!("incident:{}", nonce());
-    let started = start_run(&pool, &url, &workflow_id).await;
-    started
-        .handle
-        .cancel("the test ends the run")
-        .await
-        .unwrap();
-    let fake = fake();
-    let route = SignalRoute::new(WORKFLOW, &workflow_id).unwrap();
-    let key = tracked_issue(
-        &fake,
-        vec![route.property_entry(&route_key(), &test_binding())],
-    )
-    .await;
-    let delivery = status_change(&fake, &key);
-    let bridge = make_bridge(pool.clone(), &fake);
-    assert_eq!(
-        bridge.route(&delivery).await.unwrap(),
-        vec![RouteOutcome::Finished]
-    );
-    bridge.deliver(Arc::new(delivery)).await.unwrap();
-    assert_eq!(bridge.counters().finished, 2);
-    let mut conn = pool.get().await.unwrap();
-    let signals = autumn_harvest::signal::load_pending_signals(&mut conn, started.handle.exec_id())
-        .await
-        .unwrap();
-    assert!(signals.is_empty());
+#[test]
+fn finished_run_is_skipped() {
+    runtime().block_on(async {
+        let Some(url) = database_url() else { return };
+        migrated(&url).await;
+        let pool = pool(&url);
+        let workflow_id = format!("incident:{}", nonce());
+        let started = start_run(&pool, &url, &workflow_id).await;
+        started
+            .handle
+            .cancel("the test ends the run")
+            .await
+            .unwrap();
+        let fake = fake();
+        let route = SignalRoute::new(WORKFLOW, &workflow_id).unwrap();
+        let key = tracked_issue(
+            &fake,
+            vec![route.property_entry(&route_key(), &test_binding())],
+        )
+        .await;
+        let delivery = status_change(&fake, &key);
+        let bridge = make_bridge(pool.clone(), &fake);
+        assert_eq!(
+            bridge.route(&delivery).await.unwrap(),
+            vec![RouteOutcome::Finished]
+        );
+        bridge.deliver(Arc::new(delivery)).await.unwrap();
+        assert_eq!(bridge.counters().finished, 2);
+        let mut conn = pool.get().await.unwrap();
+        let signals =
+            autumn_harvest::signal::load_pending_signals(&mut conn, started.handle.exec_id())
+                .await
+                .unwrap();
+        assert!(signals.is_empty());
+    });
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn db_error_is_transient() {
-    let fake = fake();
-    let route = SignalRoute::new(WORKFLOW, "incident:closed-db").unwrap();
-    let key = tracked_issue(
-        &fake,
-        vec![route.property_entry(&route_key(), &test_binding())],
-    )
-    .await;
-    let delivery = status_change(&fake, &key);
-    let bridge = make_bridge(pool(CLOSED_URL), &fake);
-    let err = bridge.route(&delivery).await.unwrap_err();
-    assert!(matches!(err, HandlerError::Transient(_)), "{err:?}");
-    assert!(!err.to_string().contains("jira:jira"), "{err}");
-    let err = bridge
-        .deliver(Arc::new(delivery.clone()))
-        .await
-        .unwrap_err();
-    assert!(matches!(err, HandlerError::Transient(_)), "{err:?}");
-    assert_eq!(bridge.counters().transient, 2);
+#[test]
+fn db_error_is_transient() {
+    runtime().block_on(async {
+        let fake = fake();
+        let route = SignalRoute::new(WORKFLOW, "incident:closed-db").unwrap();
+        let key = tracked_issue(
+            &fake,
+            vec![route.property_entry(&route_key(), &test_binding())],
+        )
+        .await;
+        let delivery = status_change(&fake, &key);
+        let bridge = make_bridge(pool(CLOSED_URL), &fake);
+        let err = bridge.route(&delivery).await.unwrap_err();
+        assert!(matches!(err, HandlerError::Transient(_)), "{err:?}");
+        assert!(!err.to_string().contains("jira:jira"), "{err}");
+        let err = bridge
+            .deliver(Arc::new(delivery.clone()))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, HandlerError::Transient(_)), "{err:?}");
+        assert_eq!(bridge.counters().transient, 2);
 
-    // A Jira 503 on the property read is transient too. A 404 means no
-    // property: nothing to route.
-    fake.fault(FakeOp::GetProperty, Fault::Status(503));
-    fake.fault(FakeOp::GetProperty, Fault::Status(503));
-    fake.fault(FakeOp::GetProperty, Fault::Status(503));
-    fake.fault(FakeOp::GetProperty, Fault::Status(503));
-    fake.fault(FakeOp::GetProperty, Fault::Status(503));
-    let err = bridge.route(&delivery).await.unwrap_err();
-    assert!(matches!(err, HandlerError::Transient(_)), "{err:?}");
+        // A Jira 503 on the property read is transient too. A 404 means no
+        // property: nothing to route.
+        fake.fault(FakeOp::GetProperty, Fault::Status(503));
+        fake.fault(FakeOp::GetProperty, Fault::Status(503));
+        fake.fault(FakeOp::GetProperty, Fault::Status(503));
+        fake.fault(FakeOp::GetProperty, Fault::Status(503));
+        fake.fault(FakeOp::GetProperty, Fault::Status(503));
+        let err = bridge.route(&delivery).await.unwrap_err();
+        assert!(matches!(err, HandlerError::Transient(_)), "{err:?}");
+    });
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn forged_tag_makes_no_db_call() {
+#[test]
+fn forged_tag_makes_no_db_call() {
+    runtime().block_on(async {
     let fake = fake();
     let good = SignalRoute::new(WORKFLOW, "incident:A-1").unwrap();
     let other = SignalRoute::new("other_flow", "B-2").unwrap();
@@ -380,6 +410,7 @@ async fn forged_tag_makes_no_db_call() {
     // The Debug output of the bridge hides the key.
     let debug = format!("{bridge:?}");
     assert!(!debug.contains("bridge-route-key"), "{debug}");
+    });
 }
 
 /// R2-webhook-security-1: site B posts a status change of its issue 10000
@@ -388,114 +419,119 @@ async fn forged_tag_makes_no_db_call() {
 /// bridge has no site check. It reads the status from its own site, so the
 /// signal holds the status of the issue of site A, not the status in the
 /// payload of site B.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_delivery_of_another_site_gives_the_status_of_this_site() {
-    let Some(url) = database_url() else { return };
-    migrated(&url).await;
-    let pool = pool(&url);
-    let workflow_id = format!("incident:{}", nonce());
-    let started = start_run(&pool, &url, &workflow_id).await;
-    let site_a = fake();
-    let site_b = fake().with_site("beta", "22222222-2222-4333-8444-555555555555");
-    let route = SignalRoute::new(WORKFLOW, &workflow_id).unwrap();
-    let ours = tracked_issue(
-        &site_a,
-        vec![route.property_entry(&route_key(), &test_binding())],
-    )
-    .await;
-    let theirs = tracked_issue_on(&site_b, "beta", vec![]).await;
-    let our_id = client(&site_a).get_issue(ours.clone()).await.unwrap().id;
-    let their_id = client_on(&site_b, "beta")
-        .get_issue(theirs.clone())
-        .await
-        .unwrap()
-        .id;
-    assert_eq!(our_id, their_id, "the two sites use the same issue id");
-    let delivery = status_change(&site_b, &theirs);
-    let cloud = JiraClient::api_token(
-        JiraSite::CloudId(CloudId::parse(DEFAULT_CLOUD_ID).unwrap()),
-        BasicAuth::new(DEFAULT_EMAIL, Secret::new(DEFAULT_API_TOKEN)).unwrap(),
-        Arc::new(site_a.clone()),
-    );
-    let bridge =
-        HarvestSignalBridge::new(pool.clone(), cloud, route_key()).allow_workflow(WORKFLOW);
-    assert_eq!(
-        bridge.route(&delivery).await.unwrap(),
-        vec![RouteOutcome::Signalled]
-    );
-    let mut conn = pool.get().await.unwrap();
-    let signals = autumn_harvest::signal::load_pending_signals(&mut conn, started.handle.exec_id())
-        .await
-        .unwrap();
-    assert_eq!(signals.len(), 1);
-    let payload: IssueSignal = serde_json::from_value(signals[0].payload.clone()).unwrap();
-    assert_eq!(payload.issue_id, our_id);
-    assert_eq!(payload.issue_key.as_ref(), Some(&ours));
-    // The issue of site A did not move.
-    assert_eq!(payload.status.unwrap().name, "To Do");
+#[test]
+fn a_delivery_of_another_site_gives_the_status_of_this_site() {
+    runtime().block_on(async {
+        let Some(url) = database_url() else { return };
+        migrated(&url).await;
+        let pool = pool(&url);
+        let workflow_id = format!("incident:{}", nonce());
+        let started = start_run(&pool, &url, &workflow_id).await;
+        let site_a = fake();
+        let site_b = fake().with_site("beta", "22222222-2222-4333-8444-555555555555");
+        let route = SignalRoute::new(WORKFLOW, &workflow_id).unwrap();
+        let ours = tracked_issue(
+            &site_a,
+            vec![route.property_entry(&route_key(), &test_binding())],
+        )
+        .await;
+        let theirs = tracked_issue_on(&site_b, "beta", vec![]).await;
+        let our_id = client(&site_a).get_issue(ours.clone()).await.unwrap().id;
+        let their_id = client_on(&site_b, "beta")
+            .get_issue(theirs.clone())
+            .await
+            .unwrap()
+            .id;
+        assert_eq!(our_id, their_id, "the two sites use the same issue id");
+        let delivery = status_change(&site_b, &theirs);
+        let cloud = JiraClient::api_token(
+            JiraSite::CloudId(CloudId::parse(DEFAULT_CLOUD_ID).unwrap()),
+            BasicAuth::new(DEFAULT_EMAIL, Secret::new(DEFAULT_API_TOKEN)).unwrap(),
+            Arc::new(site_a.clone()),
+        );
+        let bridge =
+            HarvestSignalBridge::new(pool.clone(), cloud, route_key()).allow_workflow(WORKFLOW);
+        assert_eq!(
+            bridge.route(&delivery).await.unwrap(),
+            vec![RouteOutcome::Signalled]
+        );
+        let mut conn = pool.get().await.unwrap();
+        let signals =
+            autumn_harvest::signal::load_pending_signals(&mut conn, started.handle.exec_id())
+                .await
+                .unwrap();
+        assert_eq!(signals.len(), 1);
+        let payload: IssueSignal = serde_json::from_value(signals[0].payload.clone()).unwrap();
+        assert_eq!(payload.issue_id, our_id);
+        assert_eq!(payload.issue_key.as_ref(), Some(&ours));
+        // The issue of site A did not move.
+        assert_eq!(payload.status.unwrap().name, "To Do");
+    });
 }
 
 /// R2F-fixcheck-a-2: one webhook secret can serve two sites by mistake. The
 /// bridge serves the site of its client. It refuses a delivery whose
 /// `issue.self` names another host, or names no host, and it makes no call.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_delivery_of_another_site_is_refused() {
-    let site_a = fake();
-    let site_b = fake().with_site("beta", "22222222-2222-4333-8444-555555555555");
-    let route = SignalRoute::new(WORKFLOW, "incident:other-site").unwrap();
-    let ours = tracked_issue(
-        &site_a,
-        vec![route.property_entry(&route_key(), &test_binding())],
-    )
-    .await;
-    let theirs = tracked_issue_on(
-        &site_b,
-        "beta",
-        vec![route.property_entry(&route_key(), &test_binding())],
-    )
-    .await;
-    let delivery = status_change(&site_b, &theirs);
-    assert_eq!(
-        delivery.site().map(SiteHost::as_str),
-        Some("beta.atlassian.net")
-    );
-    // Each DB call on this pool fails, so Ok means no DB call.
-    let bridge = make_bridge(pool(CLOSED_URL), &site_a);
-    assert_eq!(bridge.route(&delivery).await.unwrap(), vec![]);
-    assert_eq!(site_a.count(FakeOp::GetProperty), 0, "no Jira call");
-    assert_eq!(site_a.count(FakeOp::GetIssue), 0, "no Jira call");
-    let counters = bridge.counters();
-    assert_eq!((counters.other_site, counters.skipped), (1, 0));
+#[test]
+fn a_delivery_of_another_site_is_refused() {
+    runtime().block_on(async {
+        let site_a = fake();
+        let site_b = fake().with_site("beta", "22222222-2222-4333-8444-555555555555");
+        let route = SignalRoute::new(WORKFLOW, "incident:other-site").unwrap();
+        let ours = tracked_issue(
+            &site_a,
+            vec![route.property_entry(&route_key(), &test_binding())],
+        )
+        .await;
+        let theirs = tracked_issue_on(
+            &site_b,
+            "beta",
+            vec![route.property_entry(&route_key(), &test_binding())],
+        )
+        .await;
+        let delivery = status_change(&site_b, &theirs);
+        assert_eq!(
+            delivery.site().map(SiteHost::as_str),
+            Some("beta.atlassian.net")
+        );
+        // Each DB call on this pool fails, so Ok means no DB call.
+        let bridge = make_bridge(pool(CLOSED_URL), &site_a);
+        assert_eq!(bridge.route(&delivery).await.unwrap(), vec![]);
+        assert_eq!(site_a.count(FakeOp::GetProperty), 0, "no Jira call");
+        assert_eq!(site_a.count(FakeOp::GetIssue), 0, "no Jira call");
+        let counters = bridge.counters();
+        assert_eq!((counters.other_site, counters.skipped), (1, 0));
 
-    // A delivery that names no site is refused too.
-    let mut body: Value = serde_json::from_slice(&raw_status_change(&site_a, &ours)).unwrap();
-    body["issue"].as_object_mut().unwrap().remove("self");
-    let parsed = parse_event(&serde_json::to_vec(&body).unwrap()).unwrap();
-    let meta = DeliveryMeta::new(
-        WebhookDeliveryId::parse("acme-no-site").unwrap(),
-        0,
-        Flow::Primary,
-    );
-    let unnamed = Delivery::new(meta, parsed);
-    assert_eq!(unnamed.site(), None);
-    assert_eq!(bridge.route(&unnamed).await.unwrap(), vec![]);
-    assert_eq!(bridge.counters().other_site, 2);
-    assert_eq!(site_a.count(FakeOp::GetProperty), 0, "no Jira call");
+        // A delivery that names no site is refused too.
+        let mut body: Value = serde_json::from_slice(&raw_status_change(&site_a, &ours)).unwrap();
+        body["issue"].as_object_mut().unwrap().remove("self");
+        let parsed = parse_event(&serde_json::to_vec(&body).unwrap()).unwrap();
+        let meta = DeliveryMeta::new(
+            WebhookDeliveryId::parse("acme-no-site").unwrap(),
+            0,
+            Flow::Primary,
+        );
+        let unnamed = Delivery::new(meta, parsed);
+        assert_eq!(unnamed.site(), None);
+        assert_eq!(bridge.route(&unnamed).await.unwrap(), vec![]);
+        assert_eq!(bridge.counters().other_site, 2);
+        assert_eq!(site_a.count(FakeOp::GetProperty), 0, "no Jira call");
 
-    // A bridge with an explicit site host: a san-mateo client does not
-    // tell its host, so the app gives it. A delivery of acme is then
-    // another site.
-    let fresh = tracked_issue(
-        &site_a,
-        vec![route.property_entry(&route_key(), &test_binding())],
-    )
-    .await;
-    let ours_delivery = status_change(&site_a, &fresh);
-    let beta = make_bridge(pool(CLOSED_URL), &site_a)
-        .site_host(SiteHost::parse("beta.atlassian.net").unwrap());
-    assert_eq!(beta.route(&ours_delivery).await.unwrap(), vec![]);
-    assert_eq!(beta.counters().other_site, 1);
-    assert_eq!(site_a.count(FakeOp::GetProperty), 0, "no Jira call");
+        // A bridge with an explicit site host: a san-mateo client does not
+        // tell its host, so the app gives it. A delivery of acme is then
+        // another site.
+        let fresh = tracked_issue(
+            &site_a,
+            vec![route.property_entry(&route_key(), &test_binding())],
+        )
+        .await;
+        let ours_delivery = status_change(&site_a, &fresh);
+        let beta = make_bridge(pool(CLOSED_URL), &site_a)
+            .site_host(SiteHost::parse("beta.atlassian.net").unwrap());
+        assert_eq!(beta.route(&ours_delivery).await.unwrap(), vec![]);
+        assert_eq!(beta.counters().other_site, 1);
+        assert_eq!(site_a.count(FakeOp::GetProperty), 0, "no Jira call");
+    });
 }
 
 /// The body of the next status change of `key`, as Jira posts it.
@@ -519,108 +555,114 @@ fn activity_ctx() -> autumn_harvest::context::ActivityContext {
 /// marker label of the create, and a watch to the issue id. A person who
 /// copies the route entry and the tracked label to another issue gives no
 /// signal: the tag of the copy does not verify there.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_copied_route_does_not_signal() {
-    let Some(url) = database_url() else { return };
-    migrated(&url).await;
-    let pool = pool(&url);
-    let workflow_id = format!("incident:{}", nonce());
-    let started = start_run(&pool, &url, &workflow_id).await;
-    let fake = fake();
-    let route = SignalRoute::new(WORKFLOW, &workflow_id).unwrap();
-    let bridge = make_bridge(pool.clone(), &fake);
+#[test]
+fn a_copied_route_does_not_signal() {
+    runtime().block_on(async {
+        let Some(url) = database_url() else { return };
+        migrated(&url).await;
+        let pool = pool(&url);
+        let workflow_id = format!("incident:{}", nonce());
+        let started = start_run(&pool, &url, &workflow_id).await;
+        let fake = fake();
+        let route = SignalRoute::new(WORKFLOW, &workflow_id).unwrap();
+        let bridge = make_bridge(pool.clone(), &fake);
 
-    // A: made by the create activity with a route.
-    let mut create = autumn_jira_harvest::CreateIssueInput::new(
-        ProjectKey::parse("OPS").unwrap(),
-        IssueTypeRef::Name("Task".into()),
-        "Disk full",
-    );
-    create.route = Some(route.clone());
-    let made = create.run(&client(&fake), &activity_ctx()).await.unwrap();
-    let _ = fake.take_deliveries();
-    let routes = client(&fake)
-        .get_issue_property(made.key.clone(), ROUTES_PROPERTY)
-        .await
-        .unwrap()
-        .unwrap();
-    // C: a person's issue that the watch activity tracks.
-    let watched = tracked_issue(&fake, vec![]).await;
-    autumn_jira_harvest::WatchIssueInput::new(watched.clone(), route.clone())
-        .run(&client(&fake), &activity_ctx())
-        .await
-        .unwrap();
-    let watch_routes = client(&fake)
-        .get_issue_property(watched.clone(), ROUTES_PROPERTY)
-        .await
-        .unwrap()
-        .unwrap();
-    let _ = fake.take_deliveries();
-
-    // B and D: copies of the entries of A and C, with the tracked label.
-    for copied in [routes, watch_routes] {
-        let copy = tracked_issue(&fake, vec![]).await;
-        client(&fake)
-            .set_issue_property(copy.clone(), ROUTES_PROPERTY, &copied)
+        // A: made by the create activity with a route.
+        let mut create = autumn_jira_harvest::CreateIssueInput::new(
+            ProjectKey::parse("OPS").unwrap(),
+            IssueTypeRef::Name("Task".into()),
+            "Disk full",
+        );
+        create.route = Some(route.clone());
+        let made = create.run(&client(&fake), &activity_ctx()).await.unwrap();
+        let _ = fake.take_deliveries();
+        let routes = client(&fake)
+            .get_issue_property(made.key.clone(), ROUTES_PROPERTY)
+            .await
+            .unwrap()
+            .unwrap();
+        // C: a person's issue that the watch activity tracks.
+        let watched = tracked_issue(&fake, vec![]).await;
+        autumn_jira_harvest::WatchIssueInput::new(watched.clone(), route.clone())
+            .run(&client(&fake), &activity_ctx())
             .await
             .unwrap();
-        let delivery = status_change(&fake, &copy);
-        assert_eq!(
-            bridge.route(&delivery).await.unwrap(),
-            vec![RouteOutcome::BadTag],
-            "{copied}"
-        );
-    }
-    let mut conn = pool.get().await.unwrap();
-    let signals = autumn_harvest::signal::load_pending_signals(&mut conn, started.handle.exec_id())
-        .await
-        .unwrap();
-    assert!(signals.is_empty(), "a copy gives no signal");
+        let watch_routes = client(&fake)
+            .get_issue_property(watched.clone(), ROUTES_PROPERTY)
+            .await
+            .unwrap()
+            .unwrap();
+        let _ = fake.take_deliveries();
 
-    // The issues of the route still signal the run.
-    for own in [made.key.clone(), watched] {
-        let delivery = status_change(&fake, &own);
-        assert_eq!(
-            bridge.route(&delivery).await.unwrap(),
-            vec![RouteOutcome::Signalled],
-            "{own}"
-        );
-    }
+        // B and D: copies of the entries of A and C, with the tracked label.
+        for copied in [routes, watch_routes] {
+            let copy = tracked_issue(&fake, vec![]).await;
+            client(&fake)
+                .set_issue_property(copy.clone(), ROUTES_PROPERTY, &copied)
+                .await
+                .unwrap();
+            let delivery = status_change(&fake, &copy);
+            assert_eq!(
+                bridge.route(&delivery).await.unwrap(),
+                vec![RouteOutcome::BadTag],
+                "{copied}"
+            );
+        }
+        let mut conn = pool.get().await.unwrap();
+        let signals =
+            autumn_harvest::signal::load_pending_signals(&mut conn, started.handle.exec_id())
+                .await
+                .unwrap();
+        assert!(signals.is_empty(), "a copy gives no signal");
+
+        // The issues of the route still signal the run.
+        for own in [made.key.clone(), watched] {
+            let delivery = status_change(&fake, &own);
+            assert_eq!(
+                bridge.route(&delivery).await.unwrap(),
+                vec![RouteOutcome::Signalled],
+                "{own}"
+            );
+        }
+    });
 }
 
 /// R2C-harvest-4: an issue can pass a status in a few seconds, for example
 /// when an automation moves it on. The bridge can get the delivery of that
 /// status after the next move. A delivery of the own site of the bridge
 /// then gives the status that it reports, not the status of a later read.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_late_delivery_of_this_site_keeps_its_reported_status() {
-    let Some(url) = database_url() else { return };
-    migrated(&url).await;
-    let pool = pool(&url);
-    let workflow_id = format!("incident:{}", nonce());
-    let started = start_run(&pool, &url, &workflow_id).await;
-    let fake = fake();
-    let route = SignalRoute::new(WORKFLOW, &workflow_id).unwrap();
-    let key = tracked_issue(
-        &fake,
-        vec![route.property_entry(&route_key(), &test_binding())],
-    )
-    .await;
-    let first = status_change(&fake, &key);
-    // The issue moves on to Done before the bridge gets the first delivery.
-    fake.human_transition(key.as_str(), "Done", ANN).unwrap();
-    let _ = fake.take_deliveries();
-    let bridge = make_bridge(pool.clone(), &fake);
-    assert_eq!(
-        bridge.route(&first).await.unwrap(),
-        vec![RouteOutcome::Signalled]
-    );
-    let mut conn = pool.get().await.unwrap();
-    let signals = autumn_harvest::signal::load_pending_signals(&mut conn, started.handle.exec_id())
-        .await
-        .unwrap();
-    assert_eq!(signals.len(), 1);
-    let payload: IssueSignal = serde_json::from_value(signals[0].payload.clone()).unwrap();
-    assert_eq!(payload.status.unwrap().name, "In Progress");
-    assert_eq!(payload.issue_key.as_ref(), Some(&key));
+#[test]
+fn a_late_delivery_of_this_site_keeps_its_reported_status() {
+    runtime().block_on(async {
+        let Some(url) = database_url() else { return };
+        migrated(&url).await;
+        let pool = pool(&url);
+        let workflow_id = format!("incident:{}", nonce());
+        let started = start_run(&pool, &url, &workflow_id).await;
+        let fake = fake();
+        let route = SignalRoute::new(WORKFLOW, &workflow_id).unwrap();
+        let key = tracked_issue(
+            &fake,
+            vec![route.property_entry(&route_key(), &test_binding())],
+        )
+        .await;
+        let first = status_change(&fake, &key);
+        // The issue moves on to Done before the bridge gets the first delivery.
+        fake.human_transition(key.as_str(), "Done", ANN).unwrap();
+        let _ = fake.take_deliveries();
+        let bridge = make_bridge(pool.clone(), &fake);
+        assert_eq!(
+            bridge.route(&first).await.unwrap(),
+            vec![RouteOutcome::Signalled]
+        );
+        let mut conn = pool.get().await.unwrap();
+        let signals =
+            autumn_harvest::signal::load_pending_signals(&mut conn, started.handle.exec_id())
+                .await
+                .unwrap();
+        assert_eq!(signals.len(), 1);
+        let payload: IssueSignal = serde_json::from_value(signals[0].payload.clone()).unwrap();
+        assert_eq!(payload.status.unwrap().name, "In Progress");
+        assert_eq!(payload.issue_key.as_ref(), Some(&key));
+    });
 }
