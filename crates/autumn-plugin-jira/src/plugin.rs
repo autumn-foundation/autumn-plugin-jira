@@ -1,7 +1,11 @@
 //! `JiraPlugin`: the builder and the autumn `Plugin` impl.
 
 use std::borrow::Cow;
+use std::future::Future;
 use std::sync::{Arc, Mutex, PoisonError};
+
+use autumn_jira::san_mateo::transport::HttpTransport;
+use autumn_jira::{Delivery, EventSink, HandlerError, JiraClient};
 
 use autumn_web::app::AppBuilder;
 use autumn_web::plugin::Plugin;
@@ -11,6 +15,7 @@ use autumn_web::{AppState, AutumnError, ProcessRole};
 use crate::config::JiraConfig;
 use crate::error::PluginError;
 use crate::mount;
+use crate::runtime::JiraRuntime;
 use crate::webhook_config::check_webhook_endpoint;
 use crate::{AUTUMN_WEB_REQUIREMENT, DEFAULT_PREFIX, PLUGIN_NAME, SECTION};
 
@@ -89,6 +94,69 @@ impl JiraPlugin {
             format!("/{trimmed}")
         };
         self
+    }
+
+    /// Uses this transport in API token mode.
+    #[must_use]
+    pub fn transport(self, transport: Arc<dyn HttpTransport>) -> Self {
+        let _ = transport;
+        self
+    }
+
+    /// Uses this prebuilt client.
+    #[must_use]
+    pub fn client(self, client: JiraClient) -> Self {
+        let _ = client;
+        self
+    }
+
+    /// Adds a sink.
+    #[must_use]
+    pub fn sink(self, sink: impl EventSink) -> Self {
+        let _ = sink;
+        self
+    }
+
+    /// Adds a closure handler.
+    #[must_use]
+    pub fn on_event<F, Fut>(self, f: F) -> Self
+    where
+        F: Fn(Arc<Delivery>, AppState) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<(), HandlerError>> + Send + 'static,
+    {
+        let _ = f;
+        self
+    }
+
+    /// Uses `value` for the env var `name`.
+    #[doc(hidden)]
+    #[cfg(feature = "testing")]
+    #[must_use]
+    pub fn secret_env(self, name: &str, value: &str) -> Self {
+        let _ = (name, value);
+        self
+    }
+
+    /// Starts the plugin outside an app build.
+    ///
+    /// # Errors
+    /// A [`PluginError`].
+    pub fn start(self, state: &AppState) -> Result<JiraRuntime, PluginError> {
+        let role = state.role();
+        self.start_with_role(state, role)
+    }
+
+    /// Starts the plugin as if the process has `role`.
+    ///
+    /// # Errors
+    /// A [`PluginError`].
+    pub fn start_with_role(
+        self,
+        state: &AppState,
+        role: ProcessRole,
+    ) -> Result<JiraRuntime, PluginError> {
+        let _ = (state, role);
+        Err(PluginError::config("stub"))
     }
 
     /// Mounts the webhook route at [`webhook_path`](Self::webhook_path).

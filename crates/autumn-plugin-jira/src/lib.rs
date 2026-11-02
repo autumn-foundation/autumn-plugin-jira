@@ -30,13 +30,24 @@
 
 pub mod config;
 mod error;
+mod health;
 mod mount;
 mod plugin;
+mod runtime;
+mod service;
 pub mod webhook_config;
 
+pub use autumn_jira as jira;
+pub use autumn_jira::{
+    Adf, Delivery, EventSink, HandlerError, IssueKey, JiraClient, JiraError, JiraEvent, Jql,
+    StatusTarget,
+};
 pub use config::JiraConfig;
 pub use error::PluginError;
+pub use health::JiraHealth;
 pub use plugin::{JiraPlugin, plugin_contract};
+pub use runtime::{JiraRuntime, WebhookCounters};
+pub use service::{JiraResultExt, JiraService, autumn_error};
 pub use webhook_config::{webhook_endpoint, webhook_endpoint_toml};
 
 /// The plugin name. autumn uses it to find a plugin that is added two times.

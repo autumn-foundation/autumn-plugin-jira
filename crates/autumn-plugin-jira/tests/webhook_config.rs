@@ -2,6 +2,8 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
 
+mod common;
+
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use autumn_plugin_jira::config::JiraWebhookConfig;
@@ -29,8 +31,9 @@ fn check(endpoint: WebhookEndpointConfig) -> Result<Vec<String>, PluginError> {
     check_webhook_endpoint(&[endpoint], PATH, &JiraWebhookConfig::default(), false)
 }
 
-fn jira_config() -> JiraConfig {
-    JiraConfig::from_toml_str("[jira.api_token]\nsite = \"acme\"\n").unwrap()
+/// A plugin with a prebuilt client: the start needs no secret.
+fn plugin() -> JiraPlugin {
+    common::plugin(&autumn_jira_fake::FakeJira::new())
 }
 
 fn autumn_config(endpoint: WebhookEndpointConfig, role: ProcessRole) -> AutumnConfig {
@@ -165,7 +168,7 @@ fn each_wrong_field_fails_with_the_fix() {
     let mut endpoint = good();
     endpoint.signature_header = None;
     let text = boot(
-        JiraPlugin::with_config(jira_config()).webhook_route(),
+        plugin().webhook_route(),
         autumn_config(endpoint, ProcessRole::Combined),
     )
     .unwrap_err();
@@ -191,7 +194,7 @@ fn small_body_cap_only_warns() {
     // The start passes.
     endpoint.max_body_bytes = 1024 * 1024;
     boot(
-        JiraPlugin::with_config(jira_config()).webhook_route(),
+        plugin().webhook_route(),
         autumn_config(endpoint, ProcessRole::Combined),
     )
     .unwrap();
@@ -268,7 +271,7 @@ fn helper_endpoint_passes() {
 
     // The start passes with the helper entry.
     boot(
-        JiraPlugin::with_config(jira_config()).webhook_route(),
+        plugin().webhook_route(),
         autumn_config(good(), ProcessRole::Combined),
     )
     .unwrap();
@@ -288,13 +291,13 @@ fn replay_off_needs_the_opt_in() {
 
     // The start: it fails without the opt-in and passes with it.
     let text = boot(
-        JiraPlugin::with_config(jira_config()).webhook_route(),
+        plugin().webhook_route(),
         autumn_config(endpoint.clone(), ProcessRole::Combined),
     )
     .unwrap_err();
     assert!(text.contains("replay_protection"), "{text}");
     boot(
-        JiraPlugin::with_config(jira_config())
+        plugin()
             .webhook_route()
             .allow_webhooks_without_replay_protection(),
         autumn_config(endpoint, ProcessRole::Combined),
@@ -308,20 +311,20 @@ fn worker_role_skips_the_check() {
     wrong.signature_header = None;
     // A worker serves no user routes, so it does not check the endpoint.
     boot(
-        JiraPlugin::with_config(jira_config()).webhook_route(),
+        plugin().webhook_route(),
         autumn_config(wrong.clone(), ProcessRole::Worker),
     )
     .unwrap();
     // No route: no check.
     boot(
-        JiraPlugin::with_config(jira_config()),
+        plugin(),
         autumn_config(wrong.clone(), ProcessRole::Combined),
     )
     .unwrap();
     // The web role checks.
     assert!(
         boot(
-            JiraPlugin::with_config(jira_config()).webhook_route(),
+            plugin().webhook_route(),
             autumn_config(wrong, ProcessRole::Web),
         )
         .is_err()

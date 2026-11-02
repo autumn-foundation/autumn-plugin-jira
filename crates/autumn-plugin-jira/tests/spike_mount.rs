@@ -5,10 +5,13 @@
 //! `merge` at the full path sees the full path, so the lookup works. A route
 //! mounted with `nest` sees the path without the prefix, so the lookup
 //! fails and autumn answers 500. The plugin therefore mounts with `merge`.
+//!
+//! The `merge` case on the real plugin is
+//! `install.rs::signed_delivery_reaches_the_handler_not_500`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
 
-use autumn_plugin_jira::{JiraConfig, JiraPlugin, webhook_endpoint};
+use autumn_plugin_jira::webhook_endpoint;
 use autumn_web::app::AppBuilder;
 use autumn_web::config::AutumnConfig;
 use autumn_web::plugin::Plugin;
@@ -70,35 +73,6 @@ impl Plugin for MountPlugin {
             app.merge(Router::new().route("/jira/webhook", post(handler)))
         }
     }
-}
-
-/// AC24 and spike S1: a signed delivery reaches the plugin handler.
-#[tokio::test(flavor = "multi_thread")]
-async fn signed_delivery_reaches_the_handler_not_500() {
-    // The spike: a bare plugin route, mounted with `merge`.
-    let client = TestApp::new()
-        .config(config())
-        .plugin(MountPlugin { nest: false })
-        .build();
-    deliver(&client, "spike-1", &good_signature())
-        .await
-        .assert_status(200);
-    deliver(&client, "spike-2", "sha256=00")
-        .await
-        .assert_status(401);
-
-    // The Jira plugin: the same mount at the full path.
-    let jira = JiraConfig::from_toml_str("[jira.api_token]\nsite = \"acme\"\n").unwrap();
-    let client = TestApp::new()
-        .config(config())
-        .plugin(JiraPlugin::with_config(jira).webhook_route())
-        .build();
-    deliver(&client, "jira-1", &good_signature())
-        .await
-        .assert_status(200);
-    deliver(&client, "jira-2", "sha256=00")
-        .await
-        .assert_status(401);
 }
 
 /// Evidence for the plan: `nest` strips the prefix, so the endpoint lookup
