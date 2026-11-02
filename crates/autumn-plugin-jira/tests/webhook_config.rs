@@ -344,3 +344,70 @@ fn a_bad_jira_config_fails_the_start() {
         "{text}"
     );
 }
+
+/// R2-webhook-security-3: an event can be up to `max_future_skew_secs`
+/// in the future. So a copy is fresh up to `max_age_secs` +
+/// `max_future_skew_secs` after the receipt, and the replay window must be
+/// longer than that.
+#[test]
+fn max_age_and_skew_stay_inside_the_replay_window() {
+    let mut e = good();
+    e.replay_window_secs = 1000;
+    let mut s = JiraWebhookConfig::default();
+    s.max_future_skew_secs = 300;
+    s.max_age_secs = 1000;
+    let err = check_webhook_endpoint(&[e.clone()], PATH, &s, false).unwrap_err();
+    let PluginError::WebhookEndpoint { fix } = &err else {
+        panic!("{err:?}");
+    };
+    let problem = fix.lines().next().unwrap();
+    assert!(
+        problem.contains("max_age_secs") && problem.contains("max_future_skew_secs"),
+        "{problem}"
+    );
+    s.max_age_secs = 700;
+    assert!(check_webhook_endpoint(&[e.clone()], PATH, &s, false).is_err());
+    s.max_age_secs = 699;
+    check_webhook_endpoint(&[e], PATH, &s, false).unwrap();
+}
+
+/// R10-plugin-ecosystem-6, R2-webhook-security-8: Jira sends a delivery
+/// again after a 503 with the first timestamp, for up to about 90 minutes.
+/// A smaller `max_age_secs` makes the copy stale, and the route drops it.
+/// The app owns the choice, so the start only warns.
+#[test]
+fn a_max_age_below_the_jira_retry_horizon_warns() {
+    let mut s = JiraWebhookConfig::default();
+    s.max_age_secs = 600;
+    let warnings = check_webhook_endpoint(&[good()], PATH, &s, false).unwrap();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(
+        warnings[0].contains("max_age_secs") && warnings[0].contains("5400"),
+        "{warnings:?}"
+    );
+    s.max_age_secs = 5400;
+    assert_eq!(
+        check_webhook_endpoint(&[good()], PATH, &s, false).unwrap(),
+        Vec::<String>::new()
+    );
+}
+
+/// R5-spec-proof-9: `policy::MAX_FUTURE_SKEW_MS` is the default and the
+/// upper bound of `max_future_skew_secs`.
+#[test]
+fn max_future_skew_has_the_policy_bound() {
+    let bound = autumn_plugin_jira::jira::policy::MAX_FUTURE_SKEW_MS / 1000;
+    assert_eq!(JiraWebhookConfig::default().max_future_skew_secs, bound);
+    JiraConfig::from_toml_str(&format!("[jira.webhook]\nmax_future_skew_secs = {bound}\n"))
+        .unwrap();
+    let e = JiraConfig::from_toml_str(&format!(
+        "[jira.webhook]\nmax_future_skew_secs = {}\n",
+        bound + 1
+    ))
+    .unwrap_err()
+    .to_string();
+    assert!(
+        e.contains("max_future_skew_secs") && e.contains("MAX_FUTURE_SKEW_MS"),
+        "{e}"
+    );
+}
