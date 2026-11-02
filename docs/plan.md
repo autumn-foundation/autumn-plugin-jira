@@ -1020,7 +1020,8 @@ impl JiraEvent {
     pub fn name(&self) -> &str;                      // "jira:issue_updated", ...
     pub fn issue(&self) -> Option<&WebhookIssue>;
     pub fn status_change(&self) -> Option<StatusChange>;   // from the changelog item with field "status"
-    pub fn comment(&self) -> Option<&WebhookComment>;     // V56: a comment event, or an issue_commented update
+    pub fn comment(&self) -> Option<&WebhookComment>;     // V56: a comment event, or an issue_commented update.
+                                                     // One comment add gives two deliveries: dedupe by the comment id.
     pub fn has_comment_marker(&self) -> bool;        // V58: the last non-empty line is a full marker (loop guard, B9)
     pub fn site(&self) -> Option<&SiteHost>;         // V102: the issue and comment site; None for none or two sites
 }

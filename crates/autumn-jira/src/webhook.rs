@@ -323,6 +323,12 @@ impl JiraEvent {
 
     /// Returns the comment of the event: the comment of a comment event,
     /// or the comment of an `issue_commented` update.
+    ///
+    /// One comment add comes in two deliveries: a `comment_created` event
+    /// and a `jira:issue_updated` event with type `issue_commented`. The
+    /// two deliveries have different delivery ids, so a dedupe by delivery
+    /// id does not join them. A sink that acts once for each comment
+    /// dedupes by the comment id, or acts only on `CommentCreated`.
     #[must_use]
     pub const fn comment(&self) -> Option<&WebhookComment> {
         match self {
