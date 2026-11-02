@@ -391,3 +391,89 @@ async fn discover_cloud_id_resets_the_cached_prefix() {
     assert_eq!(backend.send(myself()).await.unwrap().status, 404);
     assert_eq!(fake.count(FakeOp::Myself), 0);
 }
+
+/// R2G-fixcheck-b-1: `JiraClient::refresh_site` reads the site again at
+/// once. The next call goes to the new site with no wait for
+/// `CLOUD_ID_RECHECK_INTERVAL`.
+#[tokio::test(start_paused = true)]
+async fn refresh_site_reads_the_new_site_at_once() {
+    let sites = moving();
+    let san = san_mateo(sites.clone());
+    let key = oauth_connection(&san, Map::new()).await;
+    let client = autumn_jira::JiraClient::san_mateo(san.clone(), SanMateoTarget::new(ENV, key));
+    // The first call discovers site A. The discovery counts as a check.
+    client.myself().await.unwrap();
+    assert_eq!(sites.a.count(FakeOp::AccessibleResources), 1);
+    // The tenant moves. In the interval, a 404 makes no check.
+    sites.moved.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(client.myself().await.is_err());
+    assert_eq!(sites.b.count(FakeOp::AccessibleResources), 0);
+    // A clone shares the backend, so it also uses the new site.
+    let id = client.clone().refresh_site().await.unwrap();
+    assert_eq!(
+        id.map(|id| id.as_str().to_owned()).as_deref(),
+        Some(NEW_SITE)
+    );
+    assert_eq!(sites.b.count(FakeOp::AccessibleResources), 1);
+    client.myself().await.unwrap();
+    let last = sites.b.requests().pop().unwrap();
+    assert_eq!(last.path, format!("/ex/jira/{NEW_SITE}/rest/api/3/myself"));
+}
+
+/// R2G-fixcheck-b-1: a fixed site reads nothing. `refresh_site` gives
+/// `None` and makes no call.
+#[tokio::test(start_paused = true)]
+async fn refresh_site_of_a_fixed_site_makes_no_call() {
+    // `jira-basic`: the site comes from the connection.
+    let transport = MemoryTransport::new();
+    let san = san_mateo(Arc::new(transport.clone()));
+    let key = basic_connection(&san).await;
+    let basic = autumn_jira::JiraClient::san_mateo(san, SanMateoTarget::new(ENV, key));
+    assert_eq!(basic.refresh_site().await.unwrap(), None);
+    assert!(transport.requests().is_empty());
+
+    // A cloud id in the target stays fixed.
+    let fake = with_oauth(FakeJira::new());
+    let san = san_mateo(Arc::new(fake.clone()));
+    let key = oauth_connection(&san, Map::new()).await;
+    let fixed =
+        autumn_jira::JiraClient::san_mateo(san, SanMateoTarget::new(ENV, key).cloud_id(cloud_id()));
+    assert_eq!(fixed.refresh_site().await.unwrap(), None);
+    assert_eq!(fake.count(FakeOp::AccessibleResources), 0);
+
+    // An API token client has a fixed site.
+    let direct = autumn_jira::JiraClient::api_token(
+        autumn_jira::JiraSite::Subdomain(autumn_jira::ids::SiteName::parse("acme").unwrap()),
+        autumn_jira::BasicAuth::new(
+            autumn_jira_fake::DEFAULT_EMAIL,
+            autumn_jira::san_mateo::Secret::new(autumn_jira_fake::DEFAULT_API_TOKEN),
+        )
+        .unwrap(),
+        Arc::new(fake.clone()),
+    );
+    assert_eq!(direct.refresh_site().await.unwrap(), None);
+    assert!(fake.requests().is_empty());
+
+    // A provider that is not a Jira provider is a config error.
+    let san = san_mateo(Arc::new(MemoryTransport::new()));
+    let _ = san
+        .create_integration(
+            ENV,
+            autumn_jira::san_mateo::NewIntegration {
+                unique_key: "gh".to_owned(),
+                provider: "github".to_owned(),
+                ..autumn_jira::san_mateo::NewIntegration::default()
+            },
+        )
+        .await;
+    let other = autumn_jira::JiraClient::san_mateo(
+        san,
+        SanMateoTarget::new(ENV, autumn_jira::san_mateo::ConnectionKey::new("gh", "x")),
+    );
+    assert!(matches!(
+        other.refresh_site().await,
+        Err(autumn_jira::JiraError::Config {
+            code: "not_a_jira_provider"
+        })
+    ));
+}

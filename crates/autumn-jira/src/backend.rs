@@ -218,6 +218,21 @@ pub trait JiraBackend: Send + Sync + 'static {
 
     /// Returns the mode and the site for health details. No secrets.
     fn info(&self) -> BackendInfo;
+
+    /// Reads the site of the backend again, at once. Use it when a tenant
+    /// connects to another site.
+    ///
+    /// It returns the new cloud id that the next attempt uses. `None` means
+    /// that the backend has a fixed site, so it reads nothing. The default
+    /// gives `None` and makes no call: an API token backend has a fixed
+    /// site.
+    ///
+    /// # Errors
+    ///
+    /// The errors of the read.
+    async fn refresh_site(&self) -> Result<Option<CloudId>> {
+        Ok(None)
+    }
 }
 
 /// Picks the cloud id of a Jira site from `accessible-resources`.

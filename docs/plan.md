@@ -114,8 +114,8 @@ Each row is one change from design v2. The section column names the part
 of this file that now shows the change. The waves of section 17.1 found
 the changes V1 to V53. Review round 1 found V54 to V96, and each of these
 rows names its finding id. Review round 2 found V97 to V116. Review
-round 3, the last round, found V117 and the later rows. The wave and fixer
-reports give the full text.
+round 3, the last round, found V117 to V122. V123 closes an open item of
+round 2 after round 3. The wave and fixer reports give the full text.
 
 | # | Change | Reason | Section |
 |---|---|---|---|
@@ -241,6 +241,7 @@ reports give the full text.
 | V120 | `SanMateoBackend::discover_cloud_id` also resets the cached prefix when the target has no cloud id. The signature does not change. | An explicit discovery stored the new id, but the requests went to the old id for up to 300 s (R3-webhooks-site-auth-2). | 4.4 |
 | V121 | The proof escape scan skips an escape word as a longer name only when a letter, a digit or `_` comes just before it in the source, with no white space between them. | The scan removed the white space first, so `pub assume_specification[f]` read as a longer name and passed the guard (R3-tests-docs-guards-2). | 6 |
 | V122 | The AC39 update check skips a shell keyword (`then`, `do`, `else`, `elif`, `if`, `while`, `until`), `!`, a wrapper (`time`, `env`) and `NAME=value` assignments at the start of a segment before it looks for `cargo update`. | `if ...; then cargo update; fi` escaped the one-version check (R3-tests-docs-guards-4). | 13, 16 |
+| V123 | New `JiraBackend::refresh_site` with a default that gives `Ok(None)`. `SanMateoBackend` overrides it: for `atlassian` with no target cloud id it runs the discovery of `discover_cloud_id` and resets the prefix (V120). New `JiraClient::refresh_site` and `JiraService::refresh_default`. | The plugin had no manual refresh for the default client: `JiraService::forget` acts on `for_connection` clients only. A moved tenant waited up to `CLOUD_ID_RECHECK_INTERVAL` (R2G-fixcheck-b-1). | 4.4, 4.5, 8, ADR 0002 |
 
 ---
 
@@ -528,6 +529,9 @@ pub trait JiraBackend: Send + Sync + 'static {
     async fn send(&self, request: ApiRequest) -> Result<ApiResponse, BackendError>;
     /// Mode and site for health details. No secrets.
     fn info(&self) -> BackendInfo;
+    /// V123: reads the site again, at once. Gives the new cloud id, or `None`
+    /// for a fixed site. The default gives `Ok(None)` and makes no call.
+    async fn refresh_site(&self) -> Result<Option<CloudId>> { Ok(None) }
 }
 
 pub struct DirectBackend { /* site, auth, Arc<dyn HttpTransport> */ }
@@ -687,6 +691,7 @@ impl JiraClient {
     #[must_use] pub fn durable(self) -> Self;                       // settings.durable()
     pub fn settings(&self) -> &ClientSettings;
     pub fn info(&self) -> BackendInfo;
+    pub async fn refresh_site(&self) -> Result<Option<CloudId>>;   // V123: backend.refresh_site()
 
     // Account and site
     pub async fn myself(&self) -> Result<User>;                     // always calls Jira; fills the cache
@@ -1684,6 +1689,11 @@ impl JiraService {
     /// `for_connection` reads the site of the connection again. Use it when
     /// a tenant connects to another site. API token mode: it does nothing.
     pub fn forget(&self, connection_id: &str);
+    /// V123: `client().refresh_site()`. The default client reads its site
+    /// again at once, with no wait for `CLOUD_ID_RECHECK_INTERVAL`. `None`
+    /// for a fixed site: API token mode, `jira-basic`, a configured
+    /// `cloud_id`, or no `connection_id`.
+    pub async fn refresh_default(&self) -> Result<Option<CloudId>, JiraError>;
 }
 // V28: san_mateo mode without `connection_id`: `client()` (and `Deref`) is a
 // client over a private backend that never sends. Each call gives
