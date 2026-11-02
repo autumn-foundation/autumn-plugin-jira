@@ -860,7 +860,7 @@ impl Display for Op  // name()
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnknownCause { ServerError(u16), Network, Timeout, BadReply }
 
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, PartialEq, Eq, thiserror::Error)]   // Debug is a manual impl (AC13)
 #[non_exhaustive]
 pub enum JiraError {
     #[error("invalid {what}: {reason}")] InvalidInput { what: &'static str, reason: String },
@@ -942,6 +942,11 @@ The class table (one `match`, tested over every variant):
 Rules:
 - `Display` never holds a body, a header value, a query string or a secret
   (F11, F53). `Decode.reason` holds a serde error kind and a JSON path only.
+- `Debug` is a manual impl, not a derive. It has the shape of the derive,
+  with two changes: `Validation.messages` shows as a count
+  (`messages: 2`), and `RateLimited.reason` shows as a length
+  (`reason: Some(13 chars)`). Both hold text of the reply, so `{err:?}`
+  in a log holds no body text (AC13).
 - `Unauthorized.hint` names the needed scopes for 401 and 403:
   `"needs read:jira-work write:jira-work read:jira-user (OAuth) or a valid API token"` (F30).
 - `X-Seraph-LoginReason: AUTHENTICATION_DENIED` gives `CaptchaRequired` (F32).
