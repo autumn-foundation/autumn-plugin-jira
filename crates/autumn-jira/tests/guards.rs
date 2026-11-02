@@ -1741,6 +1741,85 @@ mod check {
         out
     }
 
+    /// The EX ids that a text names. `EX5 to EX8` names EX5, EX6, EX7 and
+    /// EX8.
+    pub fn ex_ids(text: &str) -> Vec<u32> {
+        let words: Vec<&str> = text.split_whitespace().collect();
+        let num = |w: &str| -> Option<u32> {
+            let w = w.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+            w.strip_prefix("EX")?.parse().ok()
+        };
+        let mut out = Vec::new();
+        for (i, w) in words.iter().enumerate() {
+            let Some(from) = num(w) else { continue };
+            match (words.get(i + 1), words.get(i + 2).and_then(|w| num(w))) {
+                (Some(&"to"), Some(to)) if to >= from => out.extend(from..=to),
+                _ => out.push(from),
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// The EX ids whose section in `docs/examples-plan.md` says
+    /// `Status: done`.
+    pub fn done_ex_ids(examples_plan: &str) -> Vec<u32> {
+        let mut out = Vec::new();
+        for section in examples_plan.split("\n### ").skip(1) {
+            let heading = section.lines().next().unwrap_or_default();
+            if section.lines().any(|l| l.contains("Status: done")) {
+                out.extend(ex_ids(heading));
+            }
+        }
+        out
+    }
+
+    /// The units of a Markdown text: each table row and each paragraph,
+    /// with its first line.
+    fn units(md: &str) -> Vec<(usize, String)> {
+        let mut out: Vec<(usize, String)> = Vec::new();
+        let mut open = false;
+        for (n, line) in md.lines().enumerate() {
+            let t = line.trim();
+            if t.is_empty() {
+                open = false;
+            } else if t.starts_with('|') {
+                out.push((n + 1, t.to_owned()));
+                open = false;
+            } else if open && let Some(last) = out.last_mut() {
+                last.1.push(' ');
+                last.1.push_str(t);
+            } else {
+                out.push((n + 1, t.to_owned()));
+                open = true;
+            }
+        }
+        out
+    }
+
+    /// R2G-fixcheck-b-2: no table row or paragraph says "in progress" for
+    /// an EX id whose section in `docs/examples-plan.md` says done.
+    pub fn ex_status_violations(path: &str, text: &str, done: &[u32]) -> Vec<String> {
+        units(text)
+            .into_iter()
+            .filter(|(_, unit)| unit.to_lowercase().contains("in progress"))
+            .filter_map(|(n, unit)| {
+                let stale: Vec<String> = ex_ids(&unit)
+                    .into_iter()
+                    .filter(|id| done.contains(id))
+                    .map(|id| format!("EX{id}"))
+                    .collect();
+                (!stale.is_empty()).then(|| {
+                    format!(
+                        "{path}:{n}: says \"in progress\" for {}, which examples-plan says is done",
+                        stale.join(", ")
+                    )
+                })
+            })
+            .collect()
+    }
+
     /// Each `The docs say "..."` of a text cites words that `corpus` has.
     pub fn cited_doc_violations(path: &str, text: &str, corpus: &str) -> Vec<String> {
         const MARK: &str = "The docs say \"";
@@ -2756,6 +2835,50 @@ fn adrs_cite_real_doc_text_reads_no_adr() {
         "{corpus:?}"
     );
     assert!(corpus.iter().any(|p| rel(p) == "README.md"), "{corpus:?}");
+}
+
+#[test]
+fn ex_status_agrees() {
+    let done = check::done_ex_ids(&read("docs/examples-plan.md"));
+    let mut found = Vec::new();
+    for path in ["docs/examples-plan.md", "docs/ac-evidence.md"] {
+        found.extend(check::ex_status_violations(path, &read(path), &done));
+    }
+    assert!(found.is_empty(), "{}", found.join("\n"));
+}
+
+#[test]
+fn ex_status_agrees_sees_a_gap() {
+    assert_eq!(
+        check::ex_ids("EX1, EX5 to EX8 and (EX9)."),
+        [1, 5, 6, 7, 8, 9]
+    );
+    let plan = "# P\n\n### 7.5 `eco` (EX5, EX6)\n\n- Status: done (WP7).\n\n\
+                ### 7.6 Guard (EX8)\n\n- Status: in progress.\n";
+    let done = check::done_ex_ids(plan);
+    assert_eq!(done, [5, 6]);
+    for bad in [
+        "- Status: Accepted (EX1 to EX4; EX5 to EX8 in progress, wave 4).\n",
+        "| EX6 Failures | In progress (wave 4) | t |\n",
+        "Status: DRAFT. Wave 4 is in\nprogress. The rows of EX5 to EX8 say so.\n",
+    ] {
+        assert_eq!(
+            check::ex_status_violations("p", bad, &done).len(),
+            1,
+            "{bad}"
+        );
+    }
+    for good in [
+        "| EX8 Guard | In progress | t |\n",
+        "| EX5 Happy path | Done | t |\n",
+        "EX5 is done.\n\nThe rest is in progress.\n",
+    ] {
+        assert_eq!(
+            check::ex_status_violations("p", good, &done),
+            NONE,
+            "{good}"
+        );
+    }
 }
 
 #[test]
