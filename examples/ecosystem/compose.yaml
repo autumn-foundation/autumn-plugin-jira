@@ -1,0 +1,16 @@
+# Postgres 16 for the ecosystem example. scripts/run-ecosystem.sh starts it
+# when DATABASE_URL is not set.
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: jira
+      POSTGRES_PASSWORD: jira
+      POSTGRES_DB: jira_test
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jira -d jira_test"]
+      interval: 2s
+      timeout: 5s
+      retries: 30

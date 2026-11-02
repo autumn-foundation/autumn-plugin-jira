@@ -1,0 +1,92 @@
+# The ecosystem example: alert to ticket to resolution, with every crate of
+# the ecosystem. It is a separate workspace (plan D14, ADR 0008):
+# harvest-camel needs autumn-harvest-plugin with `connectors`, which turns on
+# the autumn-web default features and the C builds `pq-src` and
+# `libsqlite3-sys`. In the main workspace, these builds would go into every
+# build.
+#
+# After a change to a crate of the main workspace, update the lock file of
+# this workspace:
+#   cargo update --manifest-path examples/ecosystem/Cargo.toml -p autumn-jira -p autumn-plugin-jira -p autumn-jira-harvest -p autumn-jira-camel -p autumn-jira-fake
+[package]
+name = "ecosystem"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.89"
+license = "Apache-2.0"
+publish = false
+
+[workspace]
+
+[[bin]]
+name = "ecosystem"
+path = "src/main.rs"
+test = true
+
+[dependencies]
+# This repository.
+autumn-jira = { path = "../../crates/autumn-jira" }
+autumn-jira-fake = { path = "../../crates/autumn-jira-fake" }
+autumn-plugin-jira = { path = "../../crates/autumn-plugin-jira", features = ["testing"] }
+autumn-jira-harvest = { path = "../../crates/autumn-jira-harvest" }
+autumn-jira-camel = { path = "../../crates/autumn-jira-camel" }
+# The ecosystem. Keep one version of each in the lock (CI job `deps`).
+san-mateo = "0.1"
+autumn-plugin-san-mateo = "0.2"
+san-mateo-harvest = "0.2"
+san-mateo-camel = "0.1"
+# harvest-camel 0.2 uses camel 0.57 and autumn-harvest 0.8.
+harvest-camel = "0.2.0"
+# The macros expand to `::autumn_harvest::...`. Do not rename this dependency.
+autumn-harvest = "0.8.0"
+autumn-harvest-plugin = { version = "0.8.0", features = ["connectors"] }
+autumn-web = "0.9"
+camel-api = "0.57"
+camel-builder = "0.57"
+camel-component-api = "0.57"
+camel-component-direct = "0.57"
+camel-core = "0.57"
+# Others.
+# Spike S3: the graph turns on two rustls crypto providers, `ring` and
+# `aws-lc-rs`. With two, rustls cannot pick one, so `main` and the tests
+# install `ring` once (plan B18, R2).
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+deadpool = "0.13"
+diesel-async = { version = "0.9", features = ["deadpool", "postgres"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio-util = "0.7"
+
+[dev-dependencies]
+# The inbound test POST over real HTTP (boot_three_plugins_real_http).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
+# Keep equal to `[workspace.lints]` in the root Cargo.toml. The guard test
+# `ecosystem_lints_equal_the_root` compares them.
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+# `pub(crate)` marks crate-internal items on purpose.
+redundant_pub_crate = "allow"
+# Names such as `autumn_jira::client::JiraClient` are clear.
+module_name_repetitions = "allow"
+
+# The same as the root Cargo.toml. Small debug info keeps the build
+# directory small.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false

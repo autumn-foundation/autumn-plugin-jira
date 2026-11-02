@@ -1,0 +1,18 @@
+# The autumn app of the ecosystem example. It holds names, never secrets.
+# `TestApp` reads the `[san_mateo]` and `[jira]` sections of this file. The
+# boot test adds the webhook endpoint and `[harvest]` to a copy, and runs the
+# app with `run()`.
+
+[san_mateo]
+# It ends with the route prefix of the plugin.
+server_url = "https://ops.example/san-mateo"
+
+[jira.san_mateo]
+environment = "ops"
+integration = "jira"
+connection_id = "acme"
+
+[jira.webhook]
+# The bot account makes the API writes of the flow. Its own deliveries give
+# 200 and a counter, and no sink runs.
+ignore_actor_account_ids = ["acct-bot"]
