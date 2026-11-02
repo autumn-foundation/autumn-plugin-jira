@@ -1,0 +1,38 @@
+[package]
+name = "autumn-jira"
+description = "Typed, safe Jira Cloud REST v3 client: issues, transitions, comments, JQL search, webhooks. Direct API token or San Mateo auth."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+keywords = ["jira", "atlassian", "autumn", "client", "webhook"]
+categories = ["api-bindings", "web-programming::http-client"]
+
+[dependencies]
+san-mateo.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+data-encoding.workspace = true
+hmac.workspace = true
+percent-encoding.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+autumn-jira-fake.workspace = true
+proptest.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+tracing-subscriber.workspace = true
+
+[[example]]
+name = "embedded"
+test = true
+
+[lints]
+workspace = true

@@ -1,0 +1,28 @@
+[package]
+name = "autumn-jira-fake"
+description = "A stateful in-memory fake of Jira Cloud for tests: issues, workflow, JQL subset, OAuth, faults, signed webhooks."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["jira", "fake", "testing", "atlassian"]
+categories = ["development-tools::testing"]
+
+# No dependency on autumn-jira (ADR 0007). A guard test checks it.
+[dependencies]
+san-mateo.workspace = true
+async-trait.workspace = true
+base64.workspace = true
+chrono.workspace = true
+hmac.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true
