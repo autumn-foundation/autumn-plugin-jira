@@ -2,35 +2,43 @@
 //!
 //! The reply goes into `input` as `Body::Json`, and `output` stays `None`
 //! (the san-mateo-camel convention). The out headers carry the issue key,
-//! the issue id, the outcome and the next page token.
+//! the issue id, the outcome and the next page token. The producer first
+//! removes the out headers of an earlier step, so each out header belongs
+//! to this step.
 
 use std::sync::Arc;
 
 use autumn_jira::client::{CommentOutcome, CreateOutcome, IssuePage, TransitionOutcome};
+use autumn_jira::error::Op;
 use autumn_jira::ids::{IssueRef, PageToken};
-use autumn_jira::policy::{self, PageStep, Previous, host_may_send};
+use autumn_jira::policy::{self, PageStep, host_may_send};
 use autumn_jira::request::{EditOptions, NewIssue, SearchRequest};
-use autumn_jira::{Adf, IdempotencyKey, JiraClient, JiraError, Jql};
+use autumn_jira::{Adf, JiraClient, JiraError};
 use camel_api::{Body, CamelError, Exchange, Message, Value};
 use serde_json::json;
 
 use crate::error::to_camel_error;
+use crate::headers::{self, Marked};
 use crate::input;
-use crate::options::{EndpointOptions, Operation, parse_status};
-use crate::{
-    HEADER_ISSUE_ID, HEADER_ISSUE_KEY, HEADER_JQL, HEADER_NEXT_TOKEN, HEADER_OUTCOME, HEADER_STATUS,
-};
-
-/// The harvest-camel header with the activity idempotency key. It is the
-/// same for each attempt of one activity.
-pub(crate) const HEADER_HARVEST_KEY: &str = "HarvestIdempotencyKey";
-/// The harvest-camel header with the 1-based activity attempt.
-pub(crate) const HEADER_HARVEST_ATTEMPT: &str = "HarvestActivityAttempt";
+use crate::options::{EndpointOptions, Operation};
+use crate::{HEADER_ISSUE_ID, HEADER_ISSUE_KEY, HEADER_NEXT_TOKEN, HEADER_OUTCOME};
 
 /// The outcome of a write that made the issue or the comment.
 const CREATED: &str = "created";
 /// The outcome of a write that a marker lookup found.
 const FOUND: &str = "found";
+/// The outcome of a transition that this call sent.
+const MOVED: &str = "moved";
+/// The outcome of a transition that found the issue at the target.
+const ALREADY_THERE: &str = "already_there";
+
+/// The out headers. The producer removes them before each call.
+const OUT_HEADERS: [&str; 4] = [
+    HEADER_ISSUE_KEY,
+    HEADER_ISSUE_ID,
+    HEADER_OUTCOME,
+    HEADER_NEXT_TOKEN,
+];
 
 /// Sends the exchanges of one endpoint to Jira.
 #[derive(Debug, Clone)]
@@ -50,480 +58,62 @@ struct Reply {
 }
 
 impl Reply {
-    /// A reply with the key or the id of an issue ref.
-    fn for_issue(issue: &IssueRef, body: Value) -> Self {
-        let mut reply = Self {
+    /// A reply with the key or the id of an issue ref, and an outcome.
+    fn for_issue(issue: &IssueRef, body: Value, outcome: Option<&'static str>) -> Self {
+        let (key, id) = match issue {
+            IssueRef::Key(key) => (Some(key.as_str().to_owned()), None),
+            IssueRef::Id(id) => (None, Some(id.as_str().to_owned())),
+        };
+        Self {
             body,
-            ..Self::default()
-        };
-        match issue {
-            IssueRef::Key(key) => reply.key = Some(key.as_str().to_owned()),
-            IssueRef::Id(id) => reply.id = Some(id.as_str().to_owned()),
-        }
-        reply
-    }
-}
-
-impl Producer {
-    /// Makes the producer of one endpoint.
-    pub(crate) const fn new(client: JiraClient, options: Arc<EndpointOptions>) -> Self {
-        Self { client, options }
-    }
-
-    /// Sends one exchange and puts the reply into it.
-    pub(crate) async fn send(&self, mut exchange: Exchange) -> Result<Exchange, CamelError> {
-        let options = &self.options;
-        let op = options.operation;
-        let body = std::mem::take(&mut exchange.input.body);
-        let result = self.call(&exchange.input, body).await;
-        let message = &mut exchange.input;
-        for name in [
-            HEADER_ISSUE_KEY,
-            HEADER_ISSUE_ID,
-            HEADER_OUTCOME,
-            HEADER_NEXT_TOKEN,
-        ] {
-            message.headers.remove(name);
-        }
-        let reply = match result {
-            Ok(reply) => reply,
-            Err(Failure::Jira(error)) if !options.throw_exception_on_failure => {
-                message.body = Body::Json(json!({"error": {
-                    "code": error.code(),
-                    "retryable": error.is_retryable(),
-                    "message": error.to_string(),
-                }}));
-                return Ok(exchange);
-            }
-            Err(Failure::Jira(error)) => return Err(to_camel_error(&error, op.name())),
-            Err(Failure::Camel(error)) => return Err(error),
-        };
-        apply(message, reply);
-        Ok(exchange)
-    }
-
-    /// Reads the request and makes the Jira call.
-    async fn call(&self, message: &Message, body: Body) -> Result<Reply, Failure> {
-        let options = &self.options;
-        let op = options.operation;
-        let max = options.max_body_size;
-        match op {
-            Operation::CreateIssue => {
-                let body = input::create(input::read(body, op, max).await?)?;
-                let marked = marked(message, options)?;
-                self.create(body, marked).await
-            }
-            Operation::GetIssue => self.get(&self.issue(message)?).await,
-            Operation::EditIssue => {
-                let edit = input::edit(input::read(body, op, max).await?)?;
-                let issue = self.issue(message)?;
-                let edit_options = options
-                    .notify_users
-                    .map_or_else(EditOptions::default, EditOptions::notify_users);
-                self.client
-                    .edit_issue(issue.clone(), &edit, edit_options)
-                    .await?;
-                Ok(Reply::for_issue(
-                    &issue,
-                    json!({"issue": issue.to_string()}),
-                ))
-            }
-            Operation::TransitionToStatus => {
-                let fields = input::transition(input::read(body, op, max).await?)?;
-                let issue = self.issue(message)?;
-                let parse = |value: &Value| match value {
-                    Value::String(text) => parse_status(text).map_err(|_| {
-                        bad_header(
-                            HEADER_STATUS,
-                            "must be a status name, id:<n> or category:<key>",
-                        )
-                    }),
-                    _ => Err(bad_header(HEADER_STATUS, "must be a string")),
-                };
-                let target = overridden(
-                    message,
-                    options,
-                    Override::new(HEADER_STATUS, "status"),
-                    options.status.as_ref(),
-                    parse,
-                )?;
-                let outcome = self
-                    .client
-                    .transition_to_status_with(issue.clone(), &target, &fields)
-                    .await?;
-                let (kind, status) = match outcome {
-                    TransitionOutcome::AlreadyThere(status) => ("already_there", status),
-                    TransitionOutcome::Moved { to, .. } => ("moved", to),
-                };
-                let body = json!({
-                    "issue": issue.to_string(),
-                    "outcome": kind,
-                    "status": serde_json::to_value(&status).map_err(unserializable)?,
-                });
-                let mut reply = Reply::for_issue(&issue, body);
-                reply.outcome = Some(kind);
-                Ok(reply)
-            }
-            Operation::AddComment => {
-                let text = input::comment(input::read(body, op, max).await?)?;
-                let issue = self.issue(message)?;
-                match marked(message, options)? {
-                    None => {
-                        let comment = self.client.add_comment(issue.clone(), &text).await?;
-                        Ok(comment_reply(&issue, comment.id.as_str(), CREATED))
-                    }
-                    Some(marked) => self.comment_marked(&issue, &text, &marked).await,
-                }
-            }
-            Operation::Search => self.search(message).await,
+            key,
+            id,
+            outcome,
+            next_token: None,
         }
     }
 
-    /// The issue of the call: the `issueKey` option or the `JiraIssueKey`
-    /// header.
-    fn issue(&self, message: &Message) -> Result<IssueRef, Failure> {
-        let parse = |value: &Value| {
-            let text = match value {
-                Value::String(text) => text.clone(),
-                Value::Number(n) => n.to_string(),
-                _ => String::new(),
-            };
-            IssueRef::parse(&text).map_err(|_| {
-                bad_header(
-                    HEADER_ISSUE_KEY,
-                    "must be an issue key or a numeric issue id",
-                )
-            })
-        };
-        Ok(overridden(
-            message,
-            &self.options,
-            Override::new(HEADER_ISSUE_KEY, "issueKey"),
-            self.options.issue_key.as_ref(),
-            parse,
-        )?)
+    /// The reply of a create.
+    fn issue(id: &str, key: &str, outcome: &'static str) -> Self {
+        Self {
+            body: json!({"id": id, "key": key, "outcome": outcome}),
+            key: Some(key.to_owned()),
+            id: Some(id.to_owned()),
+            outcome: Some(outcome),
+            next_token: None,
+        }
     }
 
-    /// `createIssue`.
-    async fn create(
-        &self,
-        body: input::CreateBody,
-        marked: Option<Marked>,
-    ) -> Result<Reply, Failure> {
-        let options = &self.options;
-        let op = options.operation;
-        let project = options
-            .project
-            .clone()
-            .ok_or_else(|| missing(op, "the project option"))?;
-        let issue_type = options
-            .issue_type
-            .clone()
-            .ok_or_else(|| missing(op, "the issueType option"))?;
-        let mut issue = NewIssue::new(project, issue_type, body.summary).labels(body.labels);
-        if let Some(description) = body.description {
-            issue = issue.description(description);
-        }
-        for (id, value) in body.fields {
-            issue = issue.field(id, value);
-        }
-        let Some(marked) = marked else {
-            let created = self.client.create_issue(&issue).await?;
-            return Ok(issue_reply(
-                created.id.as_str(),
-                created.key.as_str(),
-                CREATED,
-            ));
-        };
-        if !host_may_send(marked.previous, options.resend_after_negative_lookup) {
-            let project = issue.project_key();
-            return match self
-                .client
-                .find_by_idempotency_key(project, &marked.key)
-                .await?
-            {
-                Some(found) => Ok(issue_reply(found.id.as_str(), found.key.as_str(), FOUND)),
-                None => Err(outcome_unknown(op)),
-            };
-        }
-        Ok(
-            match self
-                .client
-                .create_issue_idempotent(&issue, &marked.key)
-                .await?
-            {
-                CreateOutcome::Created(created) => {
-                    issue_reply(created.id.as_str(), created.key.as_str(), CREATED)
-                }
-                CreateOutcome::Found(found) => {
-                    issue_reply(found.id.as_str(), found.key.as_str(), FOUND)
-                }
-            },
-        )
+    /// The reply of a comment.
+    fn comment(issue: &IssueRef, id: &str, outcome: &'static str) -> Self {
+        let body = json!({"issue": issue.to_string(), "id": id, "outcome": outcome});
+        Self::for_issue(issue, body, Some(outcome))
     }
 
-    /// `addComment` with an idempotency key.
-    async fn comment_marked(
-        &self,
-        issue: &IssueRef,
-        text: &Adf,
-        marked: &Marked,
-    ) -> Result<Reply, Failure> {
-        let client = &self.client;
-        if !host_may_send(marked.previous, self.options.resend_after_negative_lookup) {
-            return match client
-                .find_comment_by_idempotency_key(issue.clone(), &marked.key)
-                .await?
-            {
-                Some(found) => Ok(comment_reply(issue, found.id.as_str(), FOUND)),
-                None => Err(outcome_unknown(Operation::AddComment)),
-            };
-        }
-        Ok(
-            match client
-                .add_comment_idempotent(issue.clone(), text, &marked.key)
-                .await?
-            {
-                CommentOutcome::Created(comment) => {
-                    comment_reply(issue, comment.id.as_str(), CREATED)
-                }
-                CommentOutcome::Found(comment) => comment_reply(issue, comment.id.as_str(), FOUND),
-            },
-        )
-    }
-
-    /// `getIssue`.
-    async fn get(&self, issue: &IssueRef) -> Result<Reply, Failure> {
-        let fields = self.options.fields.clone().unwrap_or_default();
-        let issue = self.client.get_issue_with(issue.clone(), &fields).await?;
-        Ok(Reply {
-            key: Some(issue.key.as_str().to_owned()),
-            id: Some(issue.id.as_str().to_owned()),
-            body: serde_json::to_value(&issue).map_err(unserializable)?,
-            ..Reply::default()
-        })
-    }
-
-    /// `search`: at most `maxPages` pages. When more pages exist, the reply
-    /// has the token of the next page.
-    async fn search(&self, message: &Message) -> Result<Reply, Failure> {
-        let options = &self.options;
-        let jql = match &options.project {
-            Some(project) if options.allow_header_overrides => {
-                if header(message, HEADER_JQL).is_some() {
-                    return Err(Failure::Camel(bad_header(
-                        HEADER_JQL,
-                        "cannot replace the project option: the JQL is raw, so the \
-                         component does not add a project clause to it",
-                    )));
-                }
-                Jql::project(project)
-            }
-            Some(project) => {
-                // Without the flag, a JiraJql header fails: no option gives
-                // that query.
-                if header(message, HEADER_JQL).is_some() {
-                    return Err(Failure::Camel(not_allowed(HEADER_JQL, "jql")));
-                }
-                Jql::project(project)
-            }
-            None => {
-                let parse = |value: &Value| match value {
-                    Value::String(text) if !text.trim().is_empty() => Ok(text.clone()),
-                    _ => Err(bad_header(HEADER_JQL, "must be a non-empty JQL string")),
-                };
-                let jql = overridden(
-                    message,
-                    options,
-                    Override::new(HEADER_JQL, "jql"),
-                    options.jql.as_ref(),
-                    parse,
-                )?;
-                Jql::raw(jql)
-            }
-        };
-        let mut request = SearchRequest::new(jql).max_results(options.max_results);
-        if let Some(fields) = &options.fields {
-            request = request.fields(fields.clone());
-        }
-        let mut issues = Vec::new();
-        let mut token: Option<PageToken> = None;
-        let mut seen: Vec<PageToken> = Vec::new();
-        let mut pages = 0_u32;
-        loop {
-            let page: IssuePage = self.client.search_page_at(&request, token.as_ref()).await?;
-            let next_token = page.next_token;
-            pages += 1;
-            issues.extend(page.issues);
-            let repeated = next_token.as_ref().is_some_and(|t| seen.contains(t));
-            match policy::token_page_step(
-                pages,
-                options.max_pages,
-                next_token.is_none(),
-                next_token.is_some(),
-                repeated,
-            ) {
-                PageStep::Fetch => {
-                    if let Some(next) = next_token {
-                        seen.push(next.clone());
-                        token = Some(next);
-                    }
-                }
-                PageStep::Done => {
-                    token = None;
-                    break;
-                }
-                // `maxPages` is the limit of one exchange, not an error.
-                // The token lets the next exchange go on.
-                PageStep::Limit => {
-                    token = next_token;
-                    break;
-                }
-                PageStep::Stalled => {
-                    return Err(Failure::Jira(JiraError::PaginationStalled {
-                        op: autumn_jira::error::Op::Search,
-                        pages,
-                    }));
-                }
+    /// Puts the reply into the message.
+    fn apply(self, message: &mut Message) {
+        message.body = Body::Json(self.body);
+        let headers = [
+            (HEADER_ISSUE_KEY, self.key),
+            (HEADER_ISSUE_ID, self.id),
+            (HEADER_OUTCOME, self.outcome.map(str::to_owned)),
+            (HEADER_NEXT_TOKEN, self.next_token),
+        ];
+        for (name, value) in headers {
+            if let Some(value) = value {
+                message.set_header(name, value);
             }
         }
-        let next = token.map(|t| t.as_str().to_owned());
-        Ok(Reply {
-            body: json!({"issues": serde_json::to_value(&issues).map_err(unserializable)?, "nextPageToken": next}),
-            next_token: next,
-            ..Reply::default()
-        })
     }
 }
 
-/// The key and the previous attempt of a marked write.
-#[derive(Debug)]
-struct Marked {
-    key: IdempotencyKey,
-    previous: Previous,
-}
-
-/// Returns a header value. The match is exact first and then with no
-/// regard to case. A null value counts as no value.
-fn header<'a>(message: &'a Message, name: &str) -> Option<&'a Value> {
-    message
-        .header(name)
-        .or_else(|| message.header_ic(name))
-        .filter(|v| !v.is_null())
-}
-
-/// A `ValidationError` for a bad header.
-fn bad_header(name: &str, rule: &str) -> CamelError {
-    CamelError::ValidationError(format!("the {name} header {rule}"))
-}
-
-/// Reads the harvest-camel headers of a marked write (plan D7).
-///
-/// `HarvestIdempotencyKey` is the only source of the key (W12). An attempt
-/// above 1 gives `Previous::Unknown`: the camel route cannot see the
-/// failure of the previous attempt, so it must assume that the write can
-/// have run. No key header gives `None`: the write is sent at most once.
-fn marked(message: &Message, options: &EndpointOptions) -> Result<Option<Marked>, CamelError> {
-    let op = options.operation;
-    let key = match header(message, HEADER_HARVEST_KEY) {
-        None if options.require_idempotency_key => {
-            return Err(CamelError::ValidationError(format!(
-                "{op} needs the {HEADER_HARVEST_KEY} header: the route sets \
-                 requireIdempotencyKey=true"
-            )));
-        }
-        None => return Ok(None),
-        Some(Value::String(text)) if !text.trim().is_empty() => {
-            IdempotencyKey::parse(text).unwrap_or_else(|_| IdempotencyKey::derive(&[text.as_str()]))
-        }
-        Some(_) => return Err(bad_header(HEADER_HARVEST_KEY, "must be a non-empty string")),
-    };
-    let attempt = match header(message, HEADER_HARVEST_ATTEMPT) {
-        None => Some(1),
-        Some(Value::Number(n)) => n.as_u64(),
-        Some(Value::String(text)) => text.trim().parse::<u64>().ok(),
-        Some(_) => None,
-    }
-    .filter(|n| *n >= 1)
-    .ok_or_else(|| bad_header(HEADER_HARVEST_ATTEMPT, "must be a whole number from 1"))?;
-    let previous = if attempt > 1 {
-        Previous::Unknown
-    } else {
-        Previous::First
-    };
-    Ok(Some(Marked { key, previous }))
-}
-
-/// An in header that can replace an option.
-#[derive(Debug, Clone, Copy)]
-struct Override {
-    /// The header name, for example `JiraIssueKey`.
-    header: &'static str,
-    /// The option name, for example `issueKey`.
-    option: &'static str,
-}
-
-impl Override {
-    const fn new(header: &'static str, option: &'static str) -> Self {
-        Self { header, option }
-    }
-}
-
-/// The error of an override header without `allowHeaderOverrides` (R18).
-/// It does not hold the header value.
-fn not_allowed(header: &str, option: &str) -> CamelError {
-    CamelError::ValidationError(format!(
-        "the {header} header can replace the {option} option only with \
-         allowHeaderOverrides=true; the endpoint does not set it, so the \
-         header must not be there or must equal the option"
-    ))
-}
-
-/// Returns the value of an option that a header can replace.
-///
-/// With `allowHeaderOverrides`, the header wins over the option. Without
-/// it, a header that differs from the option fails the exchange, and does
-/// not stay silent (R18). A header equal to the option changes nothing, so
-/// it passes: it is often the out header of an earlier `jira:` step on the
-/// same issue.
-fn overridden<T: Clone + PartialEq>(
-    message: &Message,
-    options: &EndpointOptions,
-    rule: Override,
-    option: Option<&T>,
-    parse: impl Fn(&Value) -> Result<T, CamelError>,
-) -> Result<T, CamelError> {
-    match header(message, rule.header) {
-        Some(value) if options.allow_header_overrides => parse(value),
-        Some(value) => match (parse(value).ok(), option) {
-            (Some(parsed), Some(option)) if parsed == *option => Ok(parsed),
-            _ => Err(not_allowed(rule.header, rule.option)),
-        },
-        None => option.cloned().ok_or_else(|| {
-            CamelError::ValidationError(format!(
-                "{} needs the {} header: the endpoint has no {} option",
-                options.operation, rule.header, rule.option
-            ))
-        }),
-    }
-}
-
-/// The failure of a negative lookup on a retry attempt. It is not
-/// retryable: a resend can make a duplicate (ADR 0003).
-fn outcome_unknown(op: Operation) -> Failure {
-    Failure::Camel(CamelError::ValidationError(format!(
-        "jira outcome_unknown: an earlier attempt of {op} can have run, and the marker \
-         lookup found nothing; set resendAfterNegativeLookup=true to send it again (ADR 0003)"
-    )))
-}
-
-/// A failure of one exchange: a Jira error, or a camel error before the
-/// call.
+/// A failure of one exchange.
 #[derive(Debug)]
 enum Failure {
     /// The Jira call failed. `throwExceptionOnFailure` applies.
     Jira(JiraError),
-    /// The request is bad. The exchange always fails.
+    /// The request is bad, or the host must not send the write. The
+    /// exchange always fails.
     Camel(CamelError),
 }
 
@@ -539,9 +129,267 @@ impl From<CamelError> for Failure {
     }
 }
 
-/// A required value is missing.
-fn missing(op: Operation, what: &str) -> Failure {
-    Failure::Camel(CamelError::ValidationError(format!("{op} needs {what}")))
+impl Producer {
+    /// Makes the producer of one endpoint.
+    pub(crate) const fn new(client: JiraClient, options: Arc<EndpointOptions>) -> Self {
+        Self { client, options }
+    }
+
+    /// Sends one exchange and puts the reply into it.
+    pub(crate) async fn send(&self, mut exchange: Exchange) -> Result<Exchange, CamelError> {
+        let op = self.options.operation;
+        let body = std::mem::take(&mut exchange.input.body);
+        let result = self.call(&exchange.input, body).await;
+        let message = &mut exchange.input;
+        for name in OUT_HEADERS {
+            message.headers.remove(name);
+        }
+        match result {
+            Ok(reply) => {
+                tracing::debug!(operation = %op, outcome = reply.outcome, "jira: camel call done");
+                reply.apply(message);
+                Ok(exchange)
+            }
+            Err(Failure::Jira(error)) if !self.options.throw_exception_on_failure => {
+                tracing::debug!(operation = %op, code = error.code(), "jira: camel call failed");
+                // The Display of a JiraError holds no body and no secret.
+                message.body = Body::Json(json!({"error": {
+                    "code": error.code(),
+                    "retryable": error.is_retryable(),
+                    "message": error.to_string(),
+                }}));
+                Ok(exchange)
+            }
+            Err(Failure::Jira(error)) => Err(to_camel_error(&error, op.name())),
+            Err(Failure::Camel(error)) => Err(error),
+        }
+    }
+
+    /// Reads the request and makes the Jira call. Every check of the body
+    /// and the headers comes before the first call.
+    async fn call(&self, message: &Message, body: Body) -> Result<Reply, Failure> {
+        let op = self.options.operation;
+        let max = self.options.max_body_size;
+        match op {
+            Operation::CreateIssue => {
+                self.create(message, input::read(body, op, max).await?)
+                    .await
+            }
+            Operation::GetIssue => self.get(message).await,
+            Operation::EditIssue => self.edit(message, input::read(body, op, max).await?).await,
+            Operation::TransitionToStatus => {
+                self.transition(message, input::read(body, op, max).await?)
+                    .await
+            }
+            Operation::AddComment => {
+                self.comment(message, input::read(body, op, max).await?)
+                    .await
+            }
+            Operation::Search => self.search(message).await,
+        }
+    }
+
+    /// `createIssue`: a plain create without a key, else a marked create.
+    async fn create(&self, message: &Message, raw: input::Raw) -> Result<Reply, Failure> {
+        let options = &self.options;
+        let op = options.operation;
+        let body = input::create(raw)?;
+        let marked = headers::marked(message, options)?;
+        let (Some(project), Some(issue_type)) = (&options.project, &options.issue_type) else {
+            // The parse makes both options required, so this is a guard.
+            return Err(Failure::Camel(CamelError::ValidationError(format!(
+                "{op} needs the project and issueType options"
+            ))));
+        };
+        let mut issue =
+            NewIssue::new(project.clone(), issue_type.clone(), body.summary).labels(body.labels);
+        if let Some(description) = body.description {
+            issue = issue.description(description);
+        }
+        for (id, value) in body.fields {
+            issue = issue.field(id, value);
+        }
+        let Some(marked) = marked else {
+            let created = self.client.create_issue(&issue).await?;
+            return Ok(Reply::issue(
+                created.id.as_str(),
+                created.key.as_str(),
+                CREATED,
+            ));
+        };
+        if !self.may_send(&marked) {
+            return match self
+                .client
+                .find_by_idempotency_key(project, &marked.key)
+                .await?
+            {
+                Some(found) => Ok(Reply::issue(found.id.as_str(), found.key.as_str(), FOUND)),
+                None => Err(outcome_unknown(op)),
+            };
+        }
+        Ok(
+            match self
+                .client
+                .create_issue_idempotent(&issue, &marked.key)
+                .await?
+            {
+                CreateOutcome::Created(created) => {
+                    Reply::issue(created.id.as_str(), created.key.as_str(), CREATED)
+                }
+                CreateOutcome::Found(found) => {
+                    Reply::issue(found.id.as_str(), found.key.as_str(), FOUND)
+                }
+            },
+        )
+    }
+
+    /// `getIssue`. The body is ignored.
+    async fn get(&self, message: &Message) -> Result<Reply, Failure> {
+        let issue = headers::issue(message, &self.options)?;
+        let fields = self.options.fields.clone().unwrap_or_default();
+        let issue = self.client.get_issue_with(issue, &fields).await?;
+        Ok(Reply {
+            key: Some(issue.key.as_str().to_owned()),
+            id: Some(issue.id.as_str().to_owned()),
+            body: serde_json::to_value(&issue).map_err(unserializable)?,
+            ..Reply::default()
+        })
+    }
+
+    /// `editIssue`.
+    async fn edit(&self, message: &Message, raw: input::Raw) -> Result<Reply, Failure> {
+        let edit = input::edit(raw)?;
+        let issue = headers::issue(message, &self.options)?;
+        let edit_options = self
+            .options
+            .notify_users
+            .map_or_else(EditOptions::default, EditOptions::notify_users);
+        self.client
+            .edit_issue(issue.clone(), &edit, edit_options)
+            .await?;
+        let body = json!({"issue": issue.to_string()});
+        Ok(Reply::for_issue(&issue, body, None))
+    }
+
+    /// `transitionToStatus`: a checked write, so a retry is safe.
+    async fn transition(&self, message: &Message, raw: input::Raw) -> Result<Reply, Failure> {
+        let fields = input::transition(raw)?;
+        let issue = headers::issue(message, &self.options)?;
+        let target = headers::status(message, &self.options)?;
+        let outcome = self
+            .client
+            .transition_to_status_with(issue.clone(), &target, &fields)
+            .await?;
+        let (kind, status) = match outcome {
+            TransitionOutcome::AlreadyThere(status) => (ALREADY_THERE, status),
+            TransitionOutcome::Moved { to, .. } => (MOVED, to),
+        };
+        let body = json!({
+            "issue": issue.to_string(),
+            "outcome": kind,
+            "status": serde_json::to_value(&status).map_err(unserializable)?,
+        });
+        Ok(Reply::for_issue(&issue, body, Some(kind)))
+    }
+
+    /// `addComment`: a plain comment without a key, else a marked comment.
+    async fn comment(&self, message: &Message, raw: input::Raw) -> Result<Reply, Failure> {
+        let text: Adf = input::comment(raw)?;
+        let issue = headers::issue(message, &self.options)?;
+        let Some(marked) = headers::marked(message, &self.options)? else {
+            let comment = self.client.add_comment(issue.clone(), &text).await?;
+            return Ok(Reply::comment(&issue, comment.id.as_str(), CREATED));
+        };
+        if !self.may_send(&marked) {
+            return match self
+                .client
+                .find_comment_by_idempotency_key(issue.clone(), &marked.key)
+                .await?
+            {
+                Some(found) => Ok(Reply::comment(&issue, found.id.as_str(), FOUND)),
+                None => Err(outcome_unknown(Operation::AddComment)),
+            };
+        }
+        Ok(
+            match self
+                .client
+                .add_comment_idempotent(issue.clone(), &text, &marked.key)
+                .await?
+            {
+                CommentOutcome::Created(comment) => {
+                    Reply::comment(&issue, comment.id.as_str(), CREATED)
+                }
+                CommentOutcome::Found(comment) => {
+                    Reply::comment(&issue, comment.id.as_str(), FOUND)
+                }
+            },
+        )
+    }
+
+    /// `search`: at most `maxPages` pages. When more pages exist, the reply
+    /// has the token of the next page. The body is ignored.
+    async fn search(&self, message: &Message) -> Result<Reply, Failure> {
+        let options = &self.options;
+        let jql = headers::search_jql(message, options)?;
+        let mut request = SearchRequest::new(jql).max_results(options.max_results);
+        if let Some(fields) = &options.fields {
+            request = request.fields(fields.clone());
+        }
+        let mut issues = Vec::new();
+        let mut token: Option<PageToken> = None;
+        let mut seen: Vec<PageToken> = Vec::new();
+        let mut pages = 0_u32;
+        let next = loop {
+            let page: IssuePage = self.client.search_page_at(&request, token.as_ref()).await?;
+            pages += 1;
+            issues.extend(page.issues);
+            let next = page.next_token;
+            let repeated = next.as_ref().is_some_and(|t| seen.contains(t));
+            match policy::token_page_step(
+                pages,
+                options.max_pages,
+                next.is_none(),
+                next.is_some(),
+                repeated,
+            ) {
+                PageStep::Fetch => {
+                    seen.extend(next.clone());
+                    token = next;
+                }
+                PageStep::Done => break None,
+                // `maxPages` is the limit of one exchange, not an error.
+                // The token lets the next exchange go on.
+                PageStep::Limit => break next,
+                PageStep::Stalled => {
+                    return Err(Failure::Jira(JiraError::PaginationStalled {
+                        op: Op::Search,
+                        pages,
+                    }));
+                }
+            }
+        };
+        let next = next.map(|t| t.as_str().to_owned());
+        let issues = serde_json::to_value(&issues).map_err(unserializable)?;
+        Ok(Reply {
+            body: json!({"issues": issues, "nextPageToken": next}),
+            next_token: next,
+            ..Reply::default()
+        })
+    }
+
+    /// `true` when policy lets the host send a marked write now.
+    fn may_send(&self, marked: &Marked) -> bool {
+        host_may_send(marked.previous, self.options.resend_after_negative_lookup)
+    }
+}
+
+/// The failure of a negative lookup on a retry attempt. It is not
+/// retryable: a resend can make a duplicate (ADR 0003).
+fn outcome_unknown(op: Operation) -> Failure {
+    Failure::Camel(CamelError::ValidationError(format!(
+        "jira outcome_unknown: an earlier attempt of {op} can have run, and the marker \
+         lookup found nothing; set resendAfterNegativeLookup=true to send it again (ADR 0003)"
+    )))
 }
 
 /// A reply value that does not serialize. The models of the client always
@@ -550,39 +398,4 @@ fn unserializable(_: serde_json::Error) -> Failure {
     Failure::Camel(CamelError::TypeConversionFailed(
         "jira: the reply does not serialize to JSON".to_owned(),
     ))
-}
-
-/// The reply of a create.
-fn issue_reply(id: &str, key: &str, outcome: &'static str) -> Reply {
-    Reply {
-        body: json!({"id": id, "key": key, "outcome": outcome}),
-        key: Some(key.to_owned()),
-        id: Some(id.to_owned()),
-        outcome: Some(outcome),
-        next_token: None,
-    }
-}
-
-/// The reply of a comment.
-fn comment_reply(issue: &IssueRef, id: &str, outcome: &'static str) -> Reply {
-    let body = json!({"issue": issue.to_string(), "id": id, "outcome": outcome});
-    let mut reply = Reply::for_issue(issue, body);
-    reply.outcome = Some(outcome);
-    reply
-}
-
-/// Puts a reply into the message.
-fn apply(message: &mut Message, reply: Reply) {
-    message.body = Body::Json(reply.body);
-    let headers = [
-        (HEADER_ISSUE_KEY, reply.key),
-        (HEADER_ISSUE_ID, reply.id),
-        (HEADER_OUTCOME, reply.outcome.map(str::to_owned)),
-        (HEADER_NEXT_TOKEN, reply.next_token),
-    ];
-    for (name, value) in headers {
-        if let Some(value) = value {
-            message.set_header(name, value);
-        }
-    }
 }
