@@ -40,7 +40,7 @@ a column with "test" in its header is a `fn` in the named file or module.
 | AC1 Newtypes | Done | u: `ids::{strict_rules_table, deserialize_is_strict, display_round_trip_proptest, no_panic_proptest, issue_key_parts, issue_ref_picks_by_shape, idempotency_markers}`; u: `model::response_ids_are_lenient`; `core/t/pure.rs::{idempotency_key_derive_is_stable, root_re_exports_work}` |
 | AC2 Fixed hosts, no redirects | Done (WP1, WP3). The guard is done (WP8a). | `core/t/client.rs::{a_redirect_is_not_followed, path_segments_are_encoded}`; u: `site::{base_urls, site_name_rejects_hosts}`; `core/t/guards.rs::{one_base_url_builder, one_base_url_builder_sees_a_second_builder}` |
 | AC3 API token auth | Done | `core/t/client.rs::{basic_header_is_sent, unauthorized_is_not_retried, captcha_is_typed, debug_has_no_token}`; u: `backend::direct::{transport_error_map, debug_hides_the_token, one_attempt_with_basic_auth}`; u: `site::{basic_auth_rules, debug_hides_the_email_and_the_token}` |
-| AC4 san-mateo backend | Done | u: `backend::san_mateo::{error_map_covers_every_variant, prefix_by_provider}`; u: `backend::{resolve_cloud_id_picks_jira, resolve_cloud_id_needs_a_site_when_many, requests_and_replies}`; `core/t/san_mateo.rs::{discovery_stores_the_cloud_id, metadata_cloud_id_skips_discovery, one_send_for_a_503_and_for_a_429, a_401_refreshes_once, backend_errors_are_typed}`; `core/t/san_mateo.rs::{a_reconnect_after_confirmation_is_seen, a_reconnect_after_discovery_is_seen}` (round 2); `core/t/guards.rs::{proxy_requests_set_zero_retries, proxy_requests_set_zero_retries_sees_a_default}` (mutation M5) |
+| AC4 san-mateo backend | Done | u: `backend::san_mateo::{error_map_covers_every_variant, prefix_by_provider}`; u: `backend::{resolve_cloud_id_picks_jira, resolve_cloud_id_needs_a_site_when_many, requests_and_replies}`; `core/t/san_mateo.rs::{discovery_stores_the_cloud_id, metadata_cloud_id_skips_discovery, one_send_for_a_503_and_for_a_429, a_401_refreshes_once, backend_errors_are_typed}`; `core/t/san_mateo.rs::{a_reconnect_after_confirmation_is_seen, a_reconnect_after_discovery_is_seen}` (round 2); `core/t/san_mateo.rs::{refresh_site_reads_the_new_site_at_once, refresh_site_of_a_fixed_site_makes_no_call}` (after round 3); `core/t/guards.rs::{proxy_requests_set_zero_retries, proxy_requests_set_zero_retries_sees_a_default}` (mutation M5) |
 | AC5 One suite, three setups | Done. 20 suite cases on each setup. The OAuth setup expires the first token, so each case does one refresh and one cloud id discovery. | `core/t/conformance.rs::{suite_on_api_token, suite_on_san_mateo_basic, suite_on_san_mateo_oauth}` |
 | AC6 Issue CRUD | Done | suite cases `{create_get_edit_delete, notify_users_only_when_set, delete_gone_after_retry, properties_round_trip, myself_and_server_info, projects_and_one_project}`; `core/t/client.rs::{moved_issue_key_is_kept, empty_204_is_not_parsed_and_statuses_are_checked}`; u: `error::op_expected_table` |
 | AC7 Lists | Done (WP3). The guard is done (WP8a). | suite cases `{search_pages_to_the_end, search_stalls_on_a_repeated_token, search_page_limit, comments_offset_pages, projects_list_all_pages, issue_types_of_a_project, approximate_count}`; `core/t/client.rs::{short_non_last_comment_page, one_search_page_at_a_token}`; `core/t/guards.rs::{no_legacy_search_path, no_legacy_search_path_sees_the_old_path}` |
@@ -62,7 +62,7 @@ a column with "test" in its header is a `fn` in the named file or module.
 | AC23 FakeJira matches the spec | Done. The test walks more than 100 objects. A mutation in a scratch clone (an unknown key and a wrong type in Project) gave 10 shape errors. | `fake/t/spec_shapes.rs::fake_replies_match_the_spec_shapes` |
 | AC24 Plugin install | Done | `plugin/t/install.rs::{plugin_installs_with_one_call, name_contract_and_config_section, plugin_passes_the_autumn_conformance_checks, webhook_route_is_public_and_attributed, signed_delivery_reaches_the_handler_not_500, duplicate_plugin_is_a_no_op}`; u: `plugin::{contract_matches_cargo_toml, prefix_and_webhook_path}`; `plugin/t/spike_mount.rs::nest_strips_the_prefix_and_breaks_the_lookup`; u: `plugin::contract_is_compatible` (round 1) |
 | AC25 Plugin config | Done | u: `config::{layers, mode_from_table, both_tables_fail, token_key_names_token_env, debug_hides_values, validation_rules}`; `plugin/t/lifecycle.rs::{client_and_mode_table_conflict, transport_in_san_mateo_mode_conflicts}`; u: `config::the_timeout_cap_applies_in_api_token_mode_only` (round 2) |
-| AC26 Service and lifecycle | Done | `plugin/t/lifecycle.rs::{service_is_503_before_start, startup_makes_no_network_call, san_mateo_missing_has_a_fix, san_mateo_after_jira_has_a_fix, for_connection_caches_clients, handler_uses_the_service, a_missing_secret_names_the_variable, autumn_error_keeps_the_status_and_hides_internal_text, the_runtime_and_the_role, debug_hides_secret_values}`; u: `secrets::overrides_win_and_empty_values_count_as_missing`; `plugin/t/lifecycle.rs::{san_mateo_startup_makes_no_network_call, the_configured_cloud_id_is_for_the_default_connection_only, a_prebuilt_client_with_a_jira_http_table_conflicts}`; u: `service::{the_cache_has_a_bound_and_drops_the_least_recently_used, forget_drops_one_client}` (round 1) |
+| AC26 Service and lifecycle | Done | `plugin/t/lifecycle.rs::{service_is_503_before_start, startup_makes_no_network_call, san_mateo_missing_has_a_fix, san_mateo_after_jira_has_a_fix, for_connection_caches_clients, handler_uses_the_service, a_missing_secret_names_the_variable, autumn_error_keeps_the_status_and_hides_internal_text, the_runtime_and_the_role, debug_hides_secret_values}`; u: `secrets::overrides_win_and_empty_values_count_as_missing`; `plugin/t/lifecycle.rs::{san_mateo_startup_makes_no_network_call, the_configured_cloud_id_is_for_the_default_connection_only, a_prebuilt_client_with_a_jira_http_table_conflicts}`; u: `service::{the_cache_has_a_bound_and_drops_the_least_recently_used, forget_drops_one_client}` (round 1); `plugin/t/lifecycle.rs::refresh_default_reads_the_new_site_at_once` (after round 3) |
 | AC27 Health | Done | `plugin/t/health.rs::{health_only_group, cached_for_cache_secs, jira_down_is_down_not_unready, details_have_no_pii}`; u: `health::down_before_start_and_after_a_failed_start`; `plugin/t/health.rs::no_default_connection_is_not_down` (round 1) |
 | AC28 Webhook boot check | Done | `plugin/t/webhook_config.rs::{each_wrong_field_fails_with_the_fix, small_body_cap_only_warns, helper_endpoint_passes, worker_role_skips_the_check, replay_off_needs_the_opt_in, a_bad_jira_config_fails_the_start}`; `plugin/t/lifecycle.rs::the_runtime_and_the_role`; `plugin/t/webhook_config.rs::{max_age_and_skew_stay_inside_the_replay_window, a_max_age_below_the_jira_retry_horizon_warns, max_future_skew_has_the_policy_bound, the_fix_never_prints_a_secret_env_value_that_is_not_a_name}` (round 1) |
 | AC29 Webhook route | Done | `plugin/t/webhook.rs::{signed_is_200, missing_signature_is_400, bad_signature_is_401, duplicate_is_409_without_dispatch, ignored_cases_are_200_and_counted, transient_is_503_then_redelivery_succeeds, timeout_is_503, permanent_is_200, two_mib_body_passes, over_cap_is_400, csrf_on_still_passes, the_route_reads_the_retry_and_flow_headers, a_fake_delivery_reaches_the_sink, deliveries_in_one_millisecond_are_all_accepted}`; `plugin/t/webhook.rs::{hung_handlers_have_a_bound, a_hung_task_stops_at_abandon_after_ms, a_request_timeout_still_counts_the_delivery, a_sink_for_all_actors_gets_the_ignored_actor, a_panicking_sink_is_503}` (round 1); `plugin/t/webhook.rs::a_full_slot_starts_no_task`; u: `runtime::the_slot_count_stays_at_the_semaphore_cap` (round 2) |
@@ -201,9 +201,11 @@ and a GREEN commit. A doc-only fix has a DOCS commit. Plan section 2.1
 (V54 to V95) gives the design change of each fix, with its finding id.
 
 The severity is the severity after the verifier. The status comes from the
-fixer reports and the follow-up commits after them: 77 fixed, 1
-partially fixed, 1 skipped. "none" in the tests
-column means a doc fix with no test of its own.
+fixer reports and the follow-up commits after them. After round 1, 77 were
+fixed, 1 was partially fixed and 1 was skipped. Round 2 closed the two
+open items: R2F-fixcheck-a-2 closed R2-webhook-security-1, and
+R2F-fixcheck-a-3 closed R2-webhook-security-6. So all 79 are fixed now.
+"none" in the tests column means a doc fix with no test of its own.
 
 | Id | Severity | Finding | Status | Tests | Commits |
 |---|---|---|---|---|---|
@@ -217,12 +219,12 @@ column means a doc fix with no test of its own.
 | R1-write-safety-8 | low | An unexpected 2xx on a marked write skipped the marker lookup. | fixed | `core/t/idempotency.rs::marked_write_with_an_unexpected_2xx_looks_up_the_marker` | 4f4dc75, 57c043c |
 | R1-write-safety-9 | low | The comment lookup read only the 100 newest comments. | fixed | `core/t/idempotency.rs::comment_lookup_finds_marker_beyond_100` | 04705d4, fa5fb0d, d158c70 |
 | R1-write-safety-10 | low | The camel lookup-only create had no settle wait for the search index. | fixed | `camel/t/route.rs::retry_attempt_lookup_waits_for_index_lag`; u: `options::{settle_ms_takes_0_to_the_max, uri_options_match_the_parser}`; u: `settle::the_wait_ends_after_the_time` | 2c132cb (RED), dd5d031 (GREEN) |
-| R2-webhook-security-1 | low | A delivery of another site with the same issue id could move a wait. | partially fixed | `harvest/t/bridge_pg.rs::a_delivery_of_another_site_gives_the_status_of_this_site`; ex: `harvest_workflow::lifecycle_resolves_by_webhook` | faf1fcb (RED), 9541505 (GREEN) |
+| R2-webhook-security-1 | low | A delivery of another site with the same issue id could move a wait. | fixed (closed in round 2 by R2F-fixcheck-a-2) | `harvest/t/bridge_pg.rs::a_delivery_of_another_site_gives_the_status_of_this_site`; ex: `harvest_workflow::lifecycle_resolves_by_webhook`; round 2: `core/t/webhook.rs::{a_delivery_keeps_the_host_of_its_site, a_site_host_has_a_strict_rule, each_fake_delivery_names_its_site}`; `harvest/t/bridge_pg.rs::a_delivery_of_another_site_is_refused`; eco u: `tests::a_delivery_of_another_site_is_refused` | faf1fcb (RED), 9541505 (GREEN); round 2: 2193479 (RED), 66042f6 (GREEN), f63a94d (RED), 9c30715 (GREEN, harvest), 8384844 (RED), ecaa7bd (GREEN, the ecosystem bridge) |
 | R2-webhook-security-2 | low | The comment actor filter used the author for an update or a delete. | fixed | u: `webhook::{comment_actor_follows_the_event, parses_all_events}` | e638c6b, 2824822 |
 | R2-webhook-security-3 | low | The boot check left out max_future_skew_secs. | fixed | `plugin/t/webhook_config.rs::max_age_and_skew_stay_inside_the_replay_window` | f6bd05c, 5d16fa0 |
 | R2-webhook-security-4 | low | ADR 0004 did not name the crash case of the replay store. | fixed | `core/t/guards.rs::docs_make_no_stale_claims` | 193a4af (RED), 28c5d04 (GREEN) |
 | R2-webhook-security-5 | low | The self filter hid the own status changes from the bridge. | fixed | `plugin/t/webhook.rs::a_sink_for_all_actors_gets_the_ignored_actor`; eco u: `tests::webhook_negatives` | 29184b4 (RED), 3fc3cbf (GREEN), 578b33b (RED), 57f861c (GREEN, the ecosystem bridge) |
-| R2-webhook-security-6 | low | The route tag does not bind the issue, so a copied route entry works. | skipped | none (limit documented) | e68504a (DOCS) |
+| R2-webhook-security-6 | low | The route tag does not bind the issue, so a copied route entry works. | fixed (skipped in round 1, closed in round 2 by R2F-fixcheck-a-3) | round 2: `harvest/t/bridge_pg.rs::a_copied_route_does_not_signal`; u: `route::{tag_is_hmac_of_the_versioned_input, v1_tags_verify_only_as_v1}`; u: `bridge::routes_need_tag_and_allowlist` | e68504a (DOCS); round 2: f0da7f2 (RED), 62e6e42 (GREEN) |
 | R2-webhook-security-7 | low | A typed or quoted comment marker counted, and the lookup did not check the author. | fixed | u: `webhook::only_a_full_last_line_marker_counts`; `core/t/idempotency.rs::a_marker_from_another_author_is_not_found` | e638c6b, 2824822, 04705d4, fa5fb0d, 4931958 |
 | R2-webhook-security-8 | low | A max_age_secs under the Jira retry horizon dropped the retries. | fixed | `plugin/t/webhook_config.rs::a_max_age_below_the_jira_retry_horizon_warns` | f6bd05c, 5d16fa0 |
 | R2-webhook-security-9 | low | The body cap is memory that an unsigned request can use. | fixed | none (doc only) | 5c13065 (DOCS), 1fea9b3 (DOCS, README and ADR 0004) |
@@ -289,14 +291,22 @@ column means a doc fix with no test of its own.
 
 Notes on the open items of round 1:
 
-- R2-webhook-security-1: the bridge reads the status from its own site.
-  `Delivery` has no site, because `parse_event` drops `issue.self`. So a
-  bridge cannot refuse a delivery of another site. The docs say that one
-  endpoint, secret and bridge serve one site (ADR 0004, ADR 0006).
-- R2-webhook-security-6: skipped. A tag with the issue id needs a property
-  PUT after the create. That breaks the one-call create
-  (`create_with_a_route_tracks_the_issue_in_one_call`). The limit and its
-  bounds are in plan 9.4 and ADR 0006. The lead decides on a v2 tag.
+- R2-webhook-security-1: fixed in round 2 by R2F-fixcheck-a-2. In round
+  1 the bridge read the status from its own site, but `Delivery` had no
+  site. Round 2 added `Delivery::site`, the host of the `self` URL of the
+  payload issue or comment, and `HarvestSignalBridge::site_host` (plan
+  V106). With a site host, the
+  bridge refuses a delivery of another site, makes no call, and counts it
+  in `other_site`. The ecosystem gives its bridge the host of
+  `transport::SITE_URL`. The check applies only when the bridge knows its
+  site host (see "Known limits").
+- R2-webhook-security-6: skipped in round 1, fixed in round 2 by
+  R2F-fixcheck-a-3. Round 1 kept the v1 tag, because a tag with the issue
+  id needs a property PUT after the create. The v2 tag binds the run and
+  the issue with no extra call (plan V107). A create binds its marker
+  label, and a watch binds the issue id. A v1 tag gives `BadTag` unless the
+  app calls `accept_unbound_v1_tags()`. A copy of the route entry together
+  with the marker label is still not seen (see "Known limits").
 - R2-webhook-security-9: fixed. The plugin fixer changed the rustdoc. The
   docs sync `1fea9b3` added the same note to the README and ADR 0004.
 - R5-spec-proof-10: fixed. ADR 0005 names each policy function, and a
@@ -341,6 +351,8 @@ GREEN commit. A doc-only fix has a DOCS commit. Plan section 2.1 (V97 to
 V116) gives the design change of each fix, with its finding id.
 
 The status comes from the fixer reports: 36 fixed, 1 partially fixed.
+After round 3, the manual refresh fixed the open item R2G-fixcheck-b-1,
+so all 37 are fixed now.
 "none" in the tests column means a doc fix with no test of its own.
 
 | Id | Severity | Finding | Status | Tests | Commits |
@@ -380,16 +392,22 @@ The status comes from the fixer reports: 36 fixed, 1 partially fixed.
 | R2F-fixcheck-a-4 | low | The stored cloud id was checked again only on the first 401 or 404. | fixed | `core/t/san_mateo.rs::a_reconnect_after_confirmation_is_seen` | e63753e (RED), 3f6d3d5 (GREEN) |
 | R2F-fixcheck-a-5 | low | outcome_pending made a sink answer 503, so a redelivery called the write again. | fixed | u: `sink::handler_error_from_jira_error` | c8407c2 (RED), 28b9066 (GREEN) |
 | R2F-fixcheck-a-6 | low | The escape scan matched raw text, so a spaced escape passed. | fixed | u: `policy::the_spec_has_no_proof_escape` | cb1a7c3 (RED), 253c139 (GREEN) |
-| R2G-fixcheck-b-1 | low | A tenant that moved to another site kept the stale site in the default client. | partially fixed | `core/t/san_mateo.rs::{a_reconnect_after_discovery_is_seen, a_reconnect_after_confirmation_is_seen}` | e63753e (RED), 3f6d3d5 (GREEN), 48b3df6 (DOCS, README and ADR 0002) |
+| R2G-fixcheck-b-1 | low | A tenant that moved to another site kept the stale site in the default client. | fixed (the manual refresh after round 3) | `core/t/san_mateo.rs::{a_reconnect_after_discovery_is_seen, a_reconnect_after_confirmation_is_seen, refresh_site_reads_the_new_site_at_once, refresh_site_of_a_fixed_site_makes_no_call}`; `plugin/t/lifecycle.rs::refresh_default_reads_the_new_site_at_once` | e63753e (RED), 3f6d3d5 (GREEN), 48b3df6 (DOCS, README and ADR 0002), a6b1343 (RED), 25c3ec6 (GREEN, `refresh_default`), f173c6b (DOCS, README and ADR 0002) |
 | R2G-fixcheck-b-2 | low | examples-plan and this file gave EX5 to EX8 a stale status, while the work was done. | fixed | `core/t/guards.rs::{ex_status_agrees, ex_status_agrees_sees_a_gap}` | 42c4592 (RED), 8d43054 (GREEN) |
 
 Notes on the open items of round 2:
 
-- R2G-fixcheck-b-1: partially fixed. The core checks a stored cloud id
-  again after a 401 or a 404, at most one time in each
+- R2G-fixcheck-b-1: fixed after round 3. The core checks a stored cloud
+  id again after a 401 or a 404, at most one time in each
   `CLOUD_ID_RECHECK_INTERVAL` (300 s). So the default client finds a new
-  site within that time. The plugin has no manual refresh for the default
-  client: `JiraService::forget` acts on `for_connection` clients only.
+  site within that time. The manual refresh closes the rest of the gap
+  (plan V123). `JiraService::refresh_default` calls
+  `JiraClient::refresh_site`, which calls `JiraBackend::refresh_site`.
+  `SanMateoBackend` then runs the discovery of `discover_cloud_id` and
+  resets the prefix, so the next call goes to the new site at once. The
+  test `refresh_default_reads_the_new_site_at_once` shows this in the
+  plugin. A fixed site gives `None` and makes no call.
+  `JiraService::forget` still serves the `for_connection` clients.
 - R2D-integration-2: the docs now say that an app takes the webhooks of
   one Jira site (plan V114). The `bridge.rs` module doc of
   `crates/autumn-jira-harvest` says the same.
