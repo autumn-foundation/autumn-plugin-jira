@@ -341,3 +341,41 @@ async fn forged_tag_makes_no_db_call() {
     let debug = format!("{bridge:?}");
     assert!(!debug.contains("bridge-route-key"), "{debug}");
 }
+
+/// R2-webhook-security-1: a delivery does not name its Jira site. Site B
+/// posts a status change of its issue 10000 to the endpoint of site A, and
+/// site A has a run that waits on its own issue 10000. The bridge reads the
+/// status from its own site, so the signal holds the status of the issue of
+/// site A, not the status in the payload of site B.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_delivery_of_another_site_gives_the_status_of_this_site() {
+    let Some(url) = database_url() else { return };
+    migrated(&url).await;
+    let pool = pool(&url);
+    let workflow_id = format!("incident:{}", nonce());
+    let started = start_run(&pool, &url, &workflow_id).await;
+    let site_a = fake();
+    let site_b = fake();
+    let route = SignalRoute::new(WORKFLOW, &workflow_id).unwrap();
+    let ours = tracked_issue(&site_a, vec![route.property_entry(&route_key())]).await;
+    let theirs = tracked_issue(&site_b, vec![]).await;
+    let our_id = client(&site_a).get_issue(ours.clone()).await.unwrap().id;
+    let their_id = client(&site_b).get_issue(theirs.clone()).await.unwrap().id;
+    assert_eq!(our_id, their_id, "the two sites use the same issue id");
+    let delivery = status_change(&site_b, &theirs);
+    let bridge = bridge(pool.clone(), &site_a);
+    assert_eq!(
+        bridge.route(&delivery).await.unwrap(),
+        vec![RouteOutcome::Signalled]
+    );
+    let mut conn = pool.get().await.unwrap();
+    let signals = autumn_harvest::signal::load_pending_signals(&mut conn, started.handle.exec_id())
+        .await
+        .unwrap();
+    assert_eq!(signals.len(), 1);
+    let payload: IssueSignal = serde_json::from_value(signals[0].payload.clone()).unwrap();
+    assert_eq!(payload.issue_id, our_id);
+    assert_eq!(payload.issue_key.as_ref(), Some(&ours));
+    // The issue of site A did not move.
+    assert_eq!(payload.status.unwrap().name, "To Do");
+}
