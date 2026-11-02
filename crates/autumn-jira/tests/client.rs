@@ -532,7 +532,11 @@ async fn refresh_site_reads_the_account_id_again() {
     let client = memory_client(&transport);
     assert_eq!(client.account_id().await.unwrap().as_str(), "acct-old");
     assert_eq!(client.account_id().await.unwrap().as_str(), "acct-old");
-    assert_eq!(transport.requests().len(), 1, "the second call uses the cache");
+    assert_eq!(
+        transport.requests().len(),
+        1,
+        "the second call uses the cache"
+    );
     client.refresh_site().await.unwrap();
     assert_eq!(client.account_id().await.unwrap().as_str(), "acct-new");
     assert_eq!(transport.requests().len(), 2);
