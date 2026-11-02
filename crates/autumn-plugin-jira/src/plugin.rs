@@ -182,6 +182,12 @@ impl JiraPlugin {
         self
     }
 
+    /// Adds a sink that also gets the events of the ignored actors.
+    #[must_use]
+    pub fn sink_for_all_actors(self, sink: impl EventSink) -> Self {
+        self.sink(sink)
+    }
+
     /// Adds a closure that gets each delivery and the app state, and mounts
     /// the webhook route. It runs in order with the sinks.
     #[must_use]

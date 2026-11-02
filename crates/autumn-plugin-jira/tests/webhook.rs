@@ -594,3 +594,32 @@ async fn a_request_timeout_still_counts_the_delivery() {
         .sum();
     assert_eq!((sum, c["timed_out"].as_u64()), (1, Some(1)), "{c}");
 }
+
+/// R2-webhook-security-5: a sink that waits for a state, for example
+/// `HarvestSignalBridge`, also gets the events of the ignored actors. A
+/// status that the app sets itself then still signals a waiting workflow.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sink_for_all_actors_gets_the_ignored_actor() {
+    let log = log();
+    let client = app(plugin_with(&FakeJira::new(), |c| {
+        c.webhook.ignore_actor_account_ids = vec!["acct-bot".to_owned()];
+    })
+    .sink(Scripted::new("filtered", &log))
+    .sink_for_all_actors(Scripted::new("all", &log)));
+    deliver(
+        &client,
+        "self-1",
+        &issue_updated(Some(now_ms()), "acct-bot"),
+    )
+    .await
+    .assert_status(200);
+    assert_eq!(entries(&log), ["all:self-1"]);
+    deliver(&client, "ann-1", &fresh()).await.assert_status(200);
+    assert_eq!(entries(&log), ["all:self-1", "filtered:ann-1", "all:ann-1"]);
+    let c = counters(&client).await;
+    assert_eq!(
+        (c["accepted"].as_u64(), c["ignored_self"].as_u64()),
+        (Some(2), Some(0)),
+        "{c}"
+    );
+}
