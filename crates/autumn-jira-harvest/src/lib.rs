@@ -26,7 +26,7 @@ pub mod wait;
 
 pub use activities::{GET_ISSUE, GetIssueInput};
 pub use bridge::{RouteOutcome, routes_from_property, wants};
-pub use clients::ClientRef;
+pub use clients::{ClientRef, JiraClients, client_for};
 pub use failure::{
     CONFIG_ERROR, ERROR_PREFIX, INVALID_INPUT_ERROR, OUTCOME_PENDING_ERROR, OUTCOME_UNKNOWN_ERROR,
     SETTLE_SECS, WORKFLOW_ERROR, failure_for, previous_attempt,

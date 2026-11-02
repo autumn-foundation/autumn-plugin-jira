@@ -10,13 +10,118 @@
 
 use std::time::Duration;
 
+use std::any::{Any, TypeId};
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use autumn_harvest::context::ActivityContext;
 use autumn_harvest::failure::{IntoActivityErrorString, parse_typed_payload};
+use autumn_jira::backend::BackendMode;
+use autumn_jira::client::ClientSettings;
 use autumn_jira::error::{MarkerRef, Op, UnknownCause};
-use autumn_jira::{JiraError, ProjectKey};
+use autumn_jira::ids::SiteName;
+use autumn_jira::san_mateo::{EnvironmentConfig, KeyRing, SanMateo, Secret};
+use autumn_jira::{BasicAuth, JiraClient, JiraError, JiraSite, ProjectKey};
+use autumn_jira_fake::{DEFAULT_API_TOKEN, DEFAULT_EMAIL, FakeJira};
 use autumn_jira_harvest::{
-    ERROR_PREFIX, OUTCOME_PENDING_ERROR, OUTCOME_UNKNOWN_ERROR, SETTLE_SECS, failure_for,
+    CONFIG_ERROR, ClientRef, ERROR_PREFIX, JiraClients, OUTCOME_PENDING_ERROR,
+    OUTCOME_UNKNOWN_ERROR, SETTLE_SECS, client_for, failure_for,
 };
 use serde_json::{Value, json};
+
+/// A client of the fake at `site`, with the default (not durable) settings.
+fn client(fake: &FakeJira, site: &str) -> JiraClient {
+    JiraClient::api_token(
+        JiraSite::Subdomain(SiteName::parse(site).unwrap()),
+        BasicAuth::new(DEFAULT_EMAIL, Secret::new(DEFAULT_API_TOKEN)).unwrap(),
+        Arc::new(fake.clone()),
+    )
+}
+
+/// A san-mateo facade over the fake. It needs no integration to make a
+/// client: the backend reads san-mateo only when it sends.
+fn san_mateo(fake: &FakeJira) -> SanMateo {
+    SanMateo::builder()
+        .environment(EnvironmentConfig::new("dev", "sm-secret-key"))
+        .key_ring(KeyRing::new("k1", [42; 32]).unwrap())
+        .transport(Arc::new(fake.clone()))
+        .build()
+        .unwrap()
+}
+
+/// An activity context with these state values.
+fn ctx_with(values: Vec<(TypeId, Box<dyn Any + Send + Sync>)>) -> ActivityContext {
+    let state: HashMap<TypeId, Box<dyn Any + Send + Sync>> = values.into_iter().collect();
+    ActivityContext::new_test_with_state(Arc::new(state))
+}
+
+#[test]
+fn client_ref_named_and_connection() {
+    let fake = FakeJira::new();
+    let clients = JiraClients::new(client(&fake, "acme")).with("ops", client(&fake, "ops"));
+    assert!(!format!("{clients:?}").contains(DEFAULT_API_TOKEN));
+    let ctx = ctx_with(vec![
+        (TypeId::of::<JiraClients>(), Box::new(clients)),
+        (TypeId::of::<SanMateo>(), Box::new(san_mateo(&fake))),
+    ]);
+    let durable = ClientSettings::for_durable_host();
+
+    let default = client_for(&ctx, &ClientRef::Default).unwrap();
+    assert_eq!(default.info().site, "acme.atlassian.net");
+    assert_eq!(default.settings(), &durable);
+
+    let named = client_for(&ctx, &ClientRef::Named { name: "ops".into() }).unwrap();
+    assert_eq!(named.info().site, "ops.atlassian.net");
+    assert_eq!(named.settings(), &durable);
+
+    let connection = ClientRef::Connection {
+        environment: "dev".into(),
+        integration: "jira".into(),
+        connection_id: "acme".into(),
+    };
+    let over_san = client_for(&ctx, &connection).unwrap();
+    assert_eq!(over_san.info().mode, BackendMode::SanMateo);
+    assert_eq!(over_san.info().site, "san-mateo:jira/acme");
+    assert_eq!(over_san.settings(), &durable);
+
+    let missing = client_for(
+        &ctx,
+        &ClientRef::Named {
+            name: "nope".into(),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(missing.error_type, CONFIG_ERROR);
+    assert!(missing.non_retryable);
+    let bad = ClientRef::Connection {
+        environment: "dev".into(),
+        integration: "bad key".into(),
+        connection_id: "acme".into(),
+    };
+    let invalid = client_for(&ctx, &bad).unwrap_err();
+    assert_eq!(invalid.error_type, "jira.invalid_input");
+    assert!(invalid.non_retryable);
+}
+
+#[test]
+fn missing_state_is_config() {
+    let ctx = ActivityContext::new_test();
+    let connection = ClientRef::Connection {
+        environment: "dev".into(),
+        integration: "jira".into(),
+        connection_id: "acme".into(),
+    };
+    for client in [
+        ClientRef::Default,
+        ClientRef::Named { name: "ops".into() },
+        connection,
+    ] {
+        let failure = client_for(&ctx, &client).unwrap_err();
+        assert_eq!(failure.error_type, CONFIG_ERROR, "{client:?}");
+        assert!(failure.non_retryable, "{client:?}");
+        assert!(failure.message.contains("state"), "{}", failure.message);
+    }
+}
 
 /// One sample of each `JiraError` variant, with the `sent` value and the
 /// `retry_after` of its failure.
