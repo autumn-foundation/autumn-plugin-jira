@@ -50,7 +50,8 @@ const CREATE: &str = "jira:createIssue?project=OPS&issueType=Task";
 /// The move step. The `JiraIssueKey` out header of the create gives the
 /// issue, so the step needs `allowHeaderOverrides=true`. Use the flag only
 /// on a route that no outside caller can send headers to.
-const MOVE: &str = "jira:transitionToStatus?status=category:indeterminate&allowHeaderOverrides=true";
+const MOVE: &str =
+    "jira:transitionToStatus?status=category:indeterminate&allowHeaderOverrides=true";
 
 /// The idempotency key that harvest-camel sends for one activity.
 const ACTIVITY_KEY: &str = "incident-A-1001/open-ticket";
@@ -93,13 +94,25 @@ fn client_for(fake: &FakeJira) -> Result<JiraClient, Box<dyn Error>> {
     Ok(JiraClient::api_token(site, auth, Arc::new(fake.clone())).with_settings(settings))
 }
 
-/// Starts camel. RED stub: it adds no route yet.
+/// Starts camel with the route `direct:in` to `create` to [`MOVE`].
 ///
 /// # Errors
 ///
-/// Always, in the RED step.
-async fn start(_fake: &FakeJira, _create: &str) -> Result<CamelContext, Box<dyn Error>> {
-    Err("RED stub: no route yet".into())
+/// The error of the route add, for example an unknown `jira:` option.
+async fn start(fake: &FakeJira, create: &str) -> Result<CamelContext, Box<dyn Error>> {
+    let mut camel = CamelContext::builder().build().await?;
+    camel.register_component(DirectComponent::new());
+    camel.register_component(JiraComponent::new(client_for(fake)?));
+    let route = RouteBuilder::from("direct:in")
+        .route_id("open-ticket")
+        .to(create)
+        // The create reply is not a transition body.
+        .set_body(Body::Empty)
+        .to(MOVE)
+        .build()?;
+    camel.add_route_definition(route).await?;
+    camel.start().await?;
+    Ok(camel)
 }
 
 /// Sends one attempt to `direct:in`.
@@ -147,7 +160,11 @@ async fn run(fake: &FakeJira) -> Result<Summary, Box<dyn Error>> {
     stopped?;
     let status = fake
         .issue("OPS-1")
-        .and_then(|issue| issue["fields"]["status"]["name"].as_str().map(str::to_owned))
+        .and_then(|issue| {
+            issue["fields"]["status"]["name"]
+                .as_str()
+                .map(str::to_owned)
+        })
         .unwrap_or_default();
     Ok(Summary {
         first,
@@ -273,13 +290,19 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn unknown_option_fails_at_route_add() {
         let fake = FakeJira::new();
-        let err = start(&fake, "jira:createIssue?project=OPS&issueType=Task&summary=x")
-            .await
-            .map(|_| ())
-            .expect_err("an unknown option fails at the route add");
+        let err = start(
+            &fake,
+            "jira:createIssue?project=OPS&issueType=Task&summary=x",
+        )
+        .await
+        .map(|_| ())
+        .expect_err("an unknown option fails at the route add");
         let text = err.to_string();
         assert!(text.contains("unknown jira: option 'summary'"), "{text}");
-        assert!(text.contains("allowHeaderOverrides"), "it lists the names: {text}");
+        assert!(
+            text.contains("allowHeaderOverrides"),
+            "it lists the names: {text}"
+        );
         assert_eq!(fake.requests().len(), 0, "no call");
     }
 
