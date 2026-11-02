@@ -12,7 +12,8 @@
 //! 2. The route reads the retry and flow headers and parses the body.
 //! 3. It ignores a delivery with no timestamp, a stale or a future one, one
 //!    from an ignored actor, and an event that it does not dispatch. Each
-//!    gets 200 and a counter.
+//!    gets 200 and a counter. A delivery from an ignored actor goes to the
+//!    sinks for all actors only, when such sinks exist.
 //! 4. It runs each handler in order, each in its own task, under
 //!    `handler_timeout_ms`. A transient error or a timeout gives 503, and
 //!    the later handlers do not run. autumn then frees the replay keys, so
@@ -40,7 +41,7 @@ use autumn_web::reexports::http::{HeaderMap, StatusCode};
 use autumn_web::route_listing::{RouteClassification, RouteInfo};
 use autumn_web::webhook::SignedWebhook;
 
-use crate::runtime::{Cell, Counters, Runtime};
+use crate::runtime::{Cell, Counters, Handler, Runtime};
 
 /// The module name in the route listing.
 pub(crate) const MODULE: &str = "autumn_plugin_jira::webhook";
@@ -155,12 +156,13 @@ impl Runtime {
             Freshness::Future => return ignore(&c.ignored_future, "future"),
             Freshness::Fresh => {}
         }
-        if parsed.actor.as_ref().is_some_and(|actor| {
+        let ignored_actor = parsed.actor.as_ref().is_some_and(|actor| {
             settings
                 .ignore_actor_account_ids
                 .iter()
                 .any(|ignored| ignored == actor.as_str())
-        }) {
+        });
+        if ignored_actor && !self.handlers.iter().any(Handler::all_actors) {
             return ignore(&c.ignored_self, "ignored actor");
         }
         if matches!(parsed.event, JiraEvent::Other { .. }) {
@@ -173,7 +175,7 @@ impl Runtime {
         // autumn can drop this future at its request timeout. The guard
         // then counts the delivery as timed out.
         let mut cancelled = Cancelled(Some(&c.timed_out));
-        let verdict = self.dispatch(state, &delivery).await;
+        let verdict = self.dispatch(state, &delivery, ignored_actor).await;
         cancelled.0 = None;
         let counter = match verdict {
             Verdict::Accepted | Verdict::Ignored => &c.accepted,
@@ -191,12 +193,23 @@ impl Runtime {
     /// A task that times out continues until `abandon_after_ms`, and then
     /// the plugin stops it. With no free slot, the route answers 503 and
     /// starts no task.
-    async fn dispatch(&self, state: &AppState, delivery: &Arc<Delivery>) -> Verdict {
+    ///
+    /// For an event of an ignored actor, only the sinks for all actors run.
+    async fn dispatch(
+        &self,
+        state: &AppState,
+        delivery: &Arc<Delivery>,
+        ignored_actor: bool,
+    ) -> Verdict {
         let limit = Duration::from_millis(self.webhook.handler_timeout_ms);
         let abandon = Duration::from_millis(self.webhook.abandon_after_ms);
         let id = delivery.meta.id.as_str();
         let event = delivery.event.name();
-        for handler in &self.handlers {
+        let handlers = self
+            .handlers
+            .iter()
+            .filter(|h| !ignored_actor || h.all_actors());
+        for handler in handlers {
             let name = handler.name();
             let Ok(slot) = Arc::clone(&self.slots).try_acquire_owned() else {
                 tracing::warn!(

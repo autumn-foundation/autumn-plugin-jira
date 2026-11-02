@@ -175,17 +175,29 @@ impl JiraPlugin {
     /// Adds a sink, and mounts the webhook route.
     ///
     /// The sinks and the `on_event` closures run in the order that you add
-    /// them. Deliveries are at least once: make the sink idempotent.
+    /// them. Deliveries are at least once: make the sink idempotent. The
+    /// sink does not get the events of the actors in
+    /// `ignore_actor_account_ids`; see
+    /// [`sink_for_all_actors`](Self::sink_for_all_actors).
     #[must_use]
     pub fn sink(mut self, sink: impl EventSink) -> Self {
         self.handlers.push(Handler::Sink(Arc::new(sink)));
         self
     }
 
-    /// Adds a sink that also gets the events of the ignored actors.
+    /// Adds a sink that also gets the events of the actors in
+    /// `[jira.webhook] ignore_actor_account_ids`, and mounts the webhook
+    /// route.
+    ///
+    /// Use it for a sink that waits for a state, for example
+    /// `HarvestSignalBridge`. A status that the app sets with its own
+    /// account then still signals a waiting workflow. The other sinks do
+    /// not get those events. The sink runs in order with the other sinks.
+    /// Deliveries are at least once: make the sink idempotent.
     #[must_use]
-    pub fn sink_for_all_actors(self, sink: impl EventSink) -> Self {
-        self.sink(sink)
+    pub fn sink_for_all_actors(mut self, sink: impl EventSink) -> Self {
+        self.handlers.push(Handler::AllActors(Arc::new(sink)));
+        self
     }
 
     /// Adds a closure that gets each delivery and the app state, and mounts

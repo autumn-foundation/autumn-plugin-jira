@@ -30,21 +30,28 @@ pub(crate) enum Handler {
     Sink(Arc<dyn EventSink>),
     /// An `on_event` closure.
     OnEvent(OnEvent),
+    /// An [`EventSink`] that also gets the events of the ignored actors.
+    AllActors(Arc<dyn EventSink>),
 }
 
 impl Handler {
     /// A name for logs.
     pub(crate) fn name(&self) -> &str {
         match self {
-            Self::Sink(sink) => sink.name(),
+            Self::Sink(sink) | Self::AllActors(sink) => sink.name(),
             Self::OnEvent(_) => "on_event",
         }
+    }
+
+    /// `true` when the handler also gets the events of the ignored actors.
+    pub(crate) const fn all_actors(&self) -> bool {
+        matches!(self, Self::AllActors(_))
     }
 
     /// Runs the handler on one delivery.
     pub(crate) fn run(&self, delivery: Arc<Delivery>, state: AppState) -> HandlerFuture {
         match self {
-            Self::Sink(sink) => {
+            Self::Sink(sink) | Self::AllActors(sink) => {
                 let sink = Arc::clone(sink);
                 Box::pin(async move { sink.deliver(delivery).await })
             }
@@ -69,7 +76,9 @@ pub struct WebhookCounters {
     pub ignored_future: u64,
     /// Deliveries with no `timestamp`.
     pub ignored_no_timestamp: u64,
-    /// Deliveries from an actor in `ignore_actor_account_ids`.
+    /// Deliveries from an actor in `ignore_actor_account_ids`, when no
+    /// sink for all actors exists. With such a sink, the delivery goes to
+    /// that sink only, and it counts as the other deliveries do.
     pub ignored_self: u64,
     /// Deliveries of an event that the plugin does not dispatch.
     pub ignored_unknown: u64,
