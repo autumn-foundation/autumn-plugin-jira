@@ -446,3 +446,32 @@ async fn reset_after_write_is_maybe_sent() {
     );
     assert!(err.may_have_run());
 }
+
+#[tokio::test]
+async fn offset_pager_reads_the_first_page_like_the_token_pager() {
+    let transport = MemoryTransport::new();
+    let first = format!("{BASE}/project/search?startAt=0&maxResults=50");
+    let page = |is_last: bool| {
+        HttpResponse::json(
+            200,
+            &json!({"values": [{"id": "10000", "key": "OPS", "name": "Ops"}],
+                "startAt": 0, "maxResults": 50, "total": 2, "isLast": is_last}),
+        )
+    };
+    transport.reply("GET", &first, page(true));
+    let mut settings = fast_settings();
+    settings.max_pages = 0;
+    let client = memory_client(&transport).with_settings(settings.clone());
+    // One page that is the last page: no page limit.
+    let projects = client.all_projects().await.unwrap();
+    assert_eq!(projects.len(), 1);
+    // More pages after the cap: PageLimit after the first page.
+    let more = MemoryTransport::new();
+    more.reply("GET", &first, page(false));
+    let client = memory_client(&more).with_settings(settings);
+    assert!(matches!(
+        client.all_projects().await.unwrap_err(),
+        JiraError::PageLimit { max: 0, .. }
+    ));
+    assert_eq!(more.requests().len(), 1);
+}
