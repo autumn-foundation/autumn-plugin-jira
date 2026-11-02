@@ -38,6 +38,11 @@ pub(crate) struct Marked {
     pub(crate) key: IdempotencyKey,
     /// What the previous attempt did, as far as the route can know it.
     pub(crate) previous: Previous,
+    /// `true` when `HarvestActivityAttempt` is 1 and the message is no
+    /// camel redelivery. Then no earlier call used the key, because
+    /// harvest gives each activity its own key. With no attempt header,
+    /// the route cannot know this, so the value is `false`.
+    pub(crate) harvest_first: bool,
 }
 
 /// Returns a header value. The match is exact first and then with no
@@ -100,12 +105,19 @@ pub(crate) fn marked(
         }
         Some(_) => return Err(bad_header(HEADER_HARVEST_KEY, "must be a non-empty string")),
     };
-    let previous = if retried(message)? {
+    let retried = retried(message)?;
+    let previous = if retried {
         Previous::Unknown
     } else {
         Previous::First
     };
-    Ok(Some(Marked { key, previous }))
+    // `retried` checks the attempt header. So a header with no retry is 1.
+    let harvest_first = !retried && header(message, HEADER_HARVEST_ATTEMPT).is_some();
+    Ok(Some(Marked {
+        key,
+        previous,
+        harvest_first,
+    }))
 }
 
 /// Returns `true` when an earlier try of this step can have sent the
@@ -351,6 +363,9 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(first.previous, Previous::First);
+        // With no attempt header, the route cannot know that no earlier
+        // call used the key.
+        assert!(!first.harvest_first);
         // The case of the name does not matter.
         let again = marked(
             &message(&[
@@ -363,6 +378,7 @@ mod tests {
         .unwrap();
         assert_eq!(again.key, first.key, "the key is stable across attempts");
         assert_eq!(again.previous, Previous::Unknown);
+        assert!(!again.harvest_first);
         let one = marked(
             &message(&[
                 (HEADER_HARVEST_KEY, json!("k-1")),
@@ -373,6 +389,7 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(one.previous, Previous::First);
+        assert!(one.harvest_first);
         for bad in [json!(0), json!(1.5), json!("two"), json!([2])] {
             let m = message(&[
                 (HEADER_HARVEST_KEY, json!("k-1")),
@@ -404,6 +421,7 @@ mod tests {
             let m = message(&[key.clone(), first.clone(), redelivery.clone()]);
             let marked = marked(&m, &o).unwrap().unwrap();
             assert_eq!(marked.previous, Previous::Unknown, "{redelivery:?}");
+            assert!(!marked.harvest_first, "{redelivery:?}");
             // With no key, the write fails and names the key header.
             let err = super::marked(&message(std::slice::from_ref(&redelivery)), &o).unwrap_err();
             assert!(err.to_string().contains(HEADER_HARVEST_KEY), "{err}");
@@ -416,7 +434,9 @@ mod tests {
             (HEADER_REDELIVERY_COUNTER, json!("0")),
         ] {
             let m = message(&[key.clone(), first.clone(), none.clone()]);
-            assert_eq!(marked(&m, &o).unwrap().unwrap().previous, Previous::First);
+            let got = marked(&m, &o).unwrap().unwrap();
+            assert_eq!(got.previous, Previous::First);
+            assert!(got.harvest_first, "{none:?}");
             assert_eq!(
                 marked(&message(std::slice::from_ref(&none)), &o).unwrap(),
                 None

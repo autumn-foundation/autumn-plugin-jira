@@ -351,6 +351,13 @@ impl Producer {
     }
 
     /// `addComment`: a plain comment without a key, else a marked comment.
+    ///
+    /// On harvest attempt 1 with no camel redelivery, no earlier call used
+    /// the key. So the client sends with no lookup first
+    /// (`add_comment_idempotent_first`), and a busy issue does not stop
+    /// the comment at the page cap of the lookup (R2A-write-safety-3).
+    /// With no attempt header, or with `resendAfterNegativeLookup=true` on
+    /// a retry, the client looks up the marker before it sends.
     async fn comment(&self, read: In<'_>, raw: input::Raw) -> Result<Reply, Failure> {
         let text: Adf = input::comment(raw)?;
         let issue = headers::issue(read.message, read.own, &self.options)?;
@@ -368,20 +375,21 @@ impl Producer {
                 None => Err(outcome_unknown(Operation::AddComment)),
             };
         }
-        Ok(
-            match self
-                .client
+        let outcome = if marked.harvest_first {
+            self.client
+                .add_comment_idempotent_first(issue.clone(), &text, &marked.key)
+                .await?
+        } else {
+            self.client
                 .add_comment_idempotent(issue.clone(), &text, &marked.key)
                 .await?
-            {
-                CommentOutcome::Created(comment) => {
-                    Reply::comment(&issue, comment.id.as_str(), CREATED)
-                }
-                CommentOutcome::Found(comment) => {
-                    Reply::comment(&issue, comment.id.as_str(), FOUND)
-                }
-            },
-        )
+        };
+        Ok(match outcome {
+            CommentOutcome::Created(comment) => {
+                Reply::comment(&issue, comment.id.as_str(), CREATED)
+            }
+            CommentOutcome::Found(comment) => Reply::comment(&issue, comment.id.as_str(), FOUND),
+        })
     }
 
     /// `search`: at most `maxPages` pages. When more pages exist, the reply
