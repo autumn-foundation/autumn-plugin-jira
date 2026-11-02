@@ -239,6 +239,7 @@ text.
 | V118 | `jira_transition_to_status` maps the errors of `transition_to_status_with` with `marked_write_failure`: a status read or a transition list read that fails gives `sent = false`. After a "maybe sent" POST, the client turns each stop into `OutcomeUnknown`, so a read error comes before any POST. | A GetIssue 503 on attempt 1 gave `sent = true`, so attempt 2 only resumed and failed with `jira.outcome_unknown` (R3-write-safety-2). | 7.2, 9.2 |
 | V119 | A failed cloud id check of `SanMateoBackend` keeps its start time. The next check comes after `CLOUD_ID_RECHECK_INTERVAL`, also while the failure lasts. | A site URL that no site had, or a 429 of `accessible-resources`, made one more call for each 401 or 404 (R3-webhooks-site-auth-1). | 4.4, ADR 0002 |
 | V120 | `SanMateoBackend::discover_cloud_id` also resets the cached prefix when the target has no cloud id. The signature does not change. | An explicit discovery stored the new id, but the requests went to the old id for up to 300 s (R3-webhooks-site-auth-2). | 4.4 |
+| V121 | The proof escape scan skips an escape word as a longer name only when a letter, a digit or `_` comes just before it in the source, with no white space between them. | The scan removed the white space first, so `pub assume_specification[f]` read as a longer name and passed the guard (R3-tests-docs-guards-2). | 6 |
 
 ---
 
@@ -1373,7 +1374,10 @@ Tests in `policy::tests` (V67):
   `exec_allows_no_decreases_clause` outside comments. Verus still says
   "verified" with one of them. The scan reads the code with no white
   space, because Verus tokens can have spaces between them (V103).
-  Negative self-tests insert each one, also with spaces.
+  An escape word that follows a letter, a digit or `_` with no white space
+  in the source is part of a longer name, for example `my_assume(`. A
+  keyword before the escape, as in `pub assume_specification`, is not
+  (V121). Negative self-tests insert each one, also with spaces.
 - `the_drift_check_sees_changes`: an edited copy fails the body match. The
   extractor removes the comments before it finds the body and its proof
   blocks, so a brace in a comment hides no code (V103).

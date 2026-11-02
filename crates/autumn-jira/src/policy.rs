@@ -438,20 +438,35 @@ mod tests {
     ///
     /// Verus tokens can have white space between them, so the scan reads
     /// the code with no white space. An escape word must not follow a
-    /// letter, a digit or `_`: `my_assume(` is a name, not an escape.
+    /// letter, a digit or `_` with no white space between them:
+    /// `my_assume(` is a name, not an escape. The check uses the white
+    /// space of the source, so the keyword in `pub assume_specification`
+    /// is not part of the name (R3-tests-docs-guards-2).
     fn proof_escapes(spec: &str) -> Vec<String> {
-        let code: String = strip_comments(spec)
-            .chars()
-            .filter(|c| !c.is_whitespace())
-            .collect();
+        let mut code = String::new();
+        // The byte offsets in `code` where the source had white space.
+        let mut gaps = Vec::new();
+        let mut gap = false;
+        for c in strip_comments(spec).chars() {
+            if c.is_whitespace() {
+                gap = true;
+                continue;
+            }
+            if gap {
+                gaps.push(code.len());
+                gap = false;
+            }
+            code.push(c);
+        }
         let mut out = Vec::new();
         for escape in PROOF_ESCAPES {
             let word = escape.starts_with(|c: char| c.is_ascii_alphabetic());
             for (at, _) in code.match_indices(escape) {
-                let after_name = code[..at]
-                    .chars()
-                    .next_back()
-                    .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+                let after_name = gaps.binary_search(&at).is_err()
+                    && code[..at]
+                        .chars()
+                        .next_back()
+                        .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
                 if !(word && after_name) {
                     out.push(format!("at byte {at}: {escape}"));
                 }
