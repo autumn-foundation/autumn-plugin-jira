@@ -528,6 +528,10 @@ async fn hung_handlers_have_a_bound() {
     );
 }
 
+/// A stop of a busy runner between two steps of a test. A test with a
+/// wall-clock window must pass with it.
+const RUNNER_STALL: Duration = Duration::from_millis(120);
+
 /// R10-plugin-ecosystem-3: the plugin stops a task at `abandon_after_ms`,
 /// and the slot is free again. The health details show the live tasks.
 #[tokio::test(flavor = "multi_thread")]
@@ -552,6 +556,8 @@ async fn a_hung_task_stops_at_abandon_after_ms() {
         });
     let client = app(plugin);
     deliver(&client, "a-1", &fresh()).await.assert_status(503);
+    // R2E-tests-guards-1: a busy runner can stop the test for some time.
+    tokio::time::sleep(RUNNER_STALL).await;
     // The one slot is full: no new task.
     deliver(&client, "a-2", &fresh()).await.assert_status(503);
     assert_eq!(started.load(Ordering::SeqCst), 1);
@@ -560,6 +566,7 @@ async fn a_hung_task_stops_at_abandon_after_ms() {
     // The slot is free again.
     deliver(&client, "a-3", &fresh()).await.assert_status(503);
     assert_eq!(started.load(Ordering::SeqCst), 2);
+    tokio::time::sleep(RUNNER_STALL).await;
     // autumn caches the health report, so the test reads it one time.
     let health = json_of(&client.get("/actuator/health").send().await);
     let details = &health["components"]["jira"]["details"];
