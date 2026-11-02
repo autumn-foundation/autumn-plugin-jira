@@ -1,10 +1,20 @@
 //! Endpoint URI options: the parse and the metadata.
+//!
+//! One table ([`SPECS`]) holds each option: its name, kind, default and
+//! the operations that take it. [`uri_options`] and the parse both read
+//! it, so the metadata and the parser cannot drift apart.
 
 use autumn_jira::StatusTarget;
-use autumn_jira::ids::{FieldId, IssueRef, ProjectKey};
-use autumn_jira::request::{FieldSet, IssueTypeRef};
+use autumn_jira::ids::{FieldId, IssueRef, IssueTypeId, ProjectKey, StatusCategoryKey, StatusId};
+use autumn_jira::request::{FieldSet, IssueTypeRef, MAX_SEARCH_RESULTS};
 use camel_api::CamelError;
-use camel_component_api::UriOption;
+use camel_component_api::uri::parse_bool_param;
+use camel_component_api::{OptionKind, UriOption, parse_uri};
+
+use crate::{DEFAULT_MAX_BODY_SIZE, SCHEME};
+
+/// The largest `maxPages` value.
+pub(crate) const MAX_PAGES: u32 = 1000;
 
 /// One operation of the `jira:` component: the path of the URI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -38,19 +48,36 @@ impl Operation {
     /// Returns the URI name, for example `createIssue`.
     #[must_use]
     pub const fn name(self) -> &'static str {
-        ""
+        match self {
+            Self::CreateIssue => "createIssue",
+            Self::GetIssue => "getIssue",
+            Self::EditIssue => "editIssue",
+            Self::TransitionToStatus => "transitionToStatus",
+            Self::AddComment => "addComment",
+            Self::Search => "search",
+        }
     }
 
     /// Finds the operation with this URI name. The match is exact.
     #[must_use]
-    pub fn parse(_name: &str) -> Option<Self> {
-        None
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|op| op.name() == name)
+    }
+}
+
+impl std::fmt::Display for Operation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
     }
 }
 
 /// The options of one `jira:` endpoint, after the parse and the checks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each bool is one URI option of plan section 10"
+)]
 pub struct EndpointOptions {
     /// The operation: the URI path.
     pub operation: Operation,
@@ -63,7 +90,8 @@ pub struct EndpointOptions {
     /// The issue. `None` only with `allow_header_overrides`: then the
     /// `JiraIssueKey` header must give it.
     pub issue_key: Option<IssueRef>,
-    /// The target status of `transitionToStatus`.
+    /// The target status of `transitionToStatus`. `None` only with
+    /// `allow_header_overrides`: then the `JiraStatus` header must give it.
     pub status: Option<StatusTarget>,
     /// The raw JQL of `search`. The app owns it.
     pub jql: Option<String>,
@@ -105,15 +133,441 @@ impl EndpointOptions {
         dead_code,
         reason = "JiraComponent::endpoint_options (WP6 K1) calls it"
     )]
-    pub(crate) fn parse(_uri: &str, _connections: &[&str]) -> Result<Self, CamelError> {
-        Err(CamelError::InvalidUri(String::new()))
+    pub(crate) fn parse(uri: &str, connections: &[&str]) -> Result<Self, CamelError> {
+        let parts = parse_uri(uri)?;
+        if parts.scheme != SCHEME {
+            return Err(bad_uri(format!(
+                "expected the scheme {SCHEME}, got {}",
+                parts.scheme
+            )));
+        }
+        let operation = parse_operation(parts.path.trim_matches('/'))?;
+        let mut options = Self::defaults(operation);
+        // Sort the keys, so that the first error is the same on each run.
+        let mut params: Vec<(&String, &String)> = parts.params.iter().collect();
+        params.sort();
+        for (key, value) in params {
+            let spec = SPECS
+                .iter()
+                .find(|s| s.name == key.as_str())
+                .ok_or_else(|| unknown_option(key))?;
+            if !spec.ops.contains(&operation) {
+                return Err(bad_uri(format!(
+                    "option '{key}' does not apply to {operation}; it applies to {}",
+                    join(spec.ops.iter().map(|op| op.name()))
+                )));
+            }
+            options.set(key, value)?;
+        }
+        options.check_required()?;
+        if !connections.contains(&options.connection.as_str()) {
+            return Err(CamelError::Config(format!(
+                "no jira connection '{}' for {SCHEME}:{operation}; the connections are {}",
+                options.connection,
+                join(connections.iter().copied())
+            )));
+        }
+        Ok(options)
+    }
+
+    /// The options before the URI options apply.
+    fn defaults(operation: Operation) -> Self {
+        Self {
+            operation,
+            connection: "default".to_owned(),
+            project: None,
+            issue_type: None,
+            issue_key: None,
+            status: None,
+            jql: None,
+            fields: None,
+            max_results: 50,
+            max_pages: 1,
+            require_idempotency_key: false,
+            resend_after_negative_lookup: false,
+            notify_users: None,
+            allow_header_overrides: false,
+            throw_exception_on_failure: true,
+            max_body_size: DEFAULT_MAX_BODY_SIZE,
+        }
+    }
+
+    /// Sets one option from its URI value.
+    fn set(&mut self, key: &str, value: &str) -> Result<(), CamelError> {
+        match key {
+            "connection" => self.connection = non_empty(key, value)?,
+            "project" => self.project = Some(ProjectKey::parse(value).map_err(|e| field(key, &e))?),
+            "issueType" => self.issue_type = Some(parse_issue_type(value)?),
+            "issueKey" => {
+                self.issue_key = Some(IssueRef::parse(value).map_err(|e| field(key, &e))?);
+            }
+            "status" => self.status = Some(parse_status(value)?),
+            "jql" => self.jql = Some(parse_jql(value)?),
+            "fields" => self.fields = Some(parse_fields(value)?),
+            "maxResults" => self.max_results = parse_range(key, value, MAX_SEARCH_RESULTS)?,
+            "maxPages" => self.max_pages = parse_range(key, value, MAX_PAGES)?,
+            "requireIdempotencyKey" => self.require_idempotency_key = parse_bool(key, value)?,
+            "resendAfterNegativeLookup" => {
+                self.resend_after_negative_lookup = parse_bool(key, value)?;
+            }
+            "notifyUsers" => self.notify_users = Some(parse_bool(key, value)?),
+            "allowHeaderOverrides" => self.allow_header_overrides = parse_bool(key, value)?,
+            "throwExceptionOnFailure" => {
+                self.throw_exception_on_failure = parse_bool(key, value)?;
+            }
+            "maxBodySize" => self.max_body_size = parse_max_body_size(value)?,
+            // A name in SPECS with no arm here. The test
+            // `uri_options_match_the_parser` finds it.
+            other => return Err(unknown_option(other)),
+        }
+        Ok(())
+    }
+
+    /// Checks the options that an operation needs.
+    ///
+    /// An option that a header can give is required only without
+    /// `allowHeaderOverrides`.
+    fn check_required(&self) -> Result<(), CamelError> {
+        let op = self.operation;
+        let by_header = self.allow_header_overrides;
+        let needs = |what: &str| bad_uri(format!("{op} needs {what}"));
+        match op {
+            Operation::CreateIssue if self.project.is_none() => {
+                return Err(needs("the project option"));
+            }
+            Operation::CreateIssue if self.issue_type.is_none() => {
+                return Err(needs("the issueType option"));
+            }
+            Operation::Search if self.project.is_some() && self.jql.is_some() => {
+                return Err(bad_uri(
+                    "search takes the project option or the jql option, not both: \
+                     the jql is raw, so the component does not add a project clause to it"
+                        .to_owned(),
+                ));
+            }
+            Operation::Search if self.project.is_none() && self.jql.is_none() && !by_header => {
+                return Err(needs(
+                    "the project option, the jql option, or allowHeaderOverrides=true \
+                     and the JiraJql header",
+                ));
+            }
+            _ => {}
+        }
+        let has_issue = !matches!(op, Operation::CreateIssue | Operation::Search);
+        if has_issue && self.issue_key.is_none() && !by_header {
+            return Err(needs(
+                "the issueKey option, or allowHeaderOverrides=true and the JiraIssueKey header",
+            ));
+        }
+        if op == Operation::TransitionToStatus && self.status.is_none() && !by_header {
+            return Err(needs(
+                "the status option, or allowHeaderOverrides=true and the JiraStatus header",
+            ));
+        }
+        Ok(())
     }
 }
 
+/// The kind of an option value, for the metadata.
+#[derive(Clone, Copy)]
+enum Kind {
+    Text,
+    Int,
+    Bool,
+    TextList,
+}
+
+/// One URI option.
+struct Spec {
+    name: &'static str,
+    kind: Kind,
+    default: Option<&'static str>,
+    ops: &'static [Operation],
+    description: &'static str,
+}
+
+const ALL_OPS: &[Operation] = &Operation::ALL;
+const ISSUE_OPS: &[Operation] = &[
+    Operation::GetIssue,
+    Operation::EditIssue,
+    Operation::TransitionToStatus,
+    Operation::AddComment,
+];
+const MARKED_OPS: &[Operation] = &[Operation::CreateIssue, Operation::AddComment];
+const SEARCH: &[Operation] = &[Operation::Search];
+
+/// The URI options, in the order of the metadata.
+const SPECS: [Spec; 15] = [
+    Spec {
+        name: "connection",
+        kind: Kind::Text,
+        default: Some("default"),
+        ops: ALL_OPS,
+        description: "The name of a client that the component has: `default` or a name of JiraComponent::connection.",
+    },
+    Spec {
+        name: "project",
+        kind: Kind::Text,
+        default: None,
+        ops: &[Operation::CreateIssue, Operation::Search],
+        description: "The project key. createIssue needs it. For search it gives the query project = \"<key>\" when there is no jql.",
+    },
+    Spec {
+        name: "issueType",
+        kind: Kind::Text,
+        default: None,
+        ops: &[Operation::CreateIssue],
+        description: "The issue type of createIssue: a name or a numeric id. createIssue needs it.",
+    },
+    Spec {
+        name: "issueKey",
+        kind: Kind::Text,
+        default: None,
+        ops: ISSUE_OPS,
+        description: "The issue key or the numeric issue id. With allowHeaderOverrides, the JiraIssueKey header replaces it.",
+    },
+    Spec {
+        name: "status",
+        kind: Kind::Text,
+        default: None,
+        ops: &[Operation::TransitionToStatus],
+        description: "The target status: a name, id:<n> or category:<key>. With allowHeaderOverrides, the JiraStatus header replaces it.",
+    },
+    Spec {
+        name: "jql",
+        kind: Kind::Text,
+        default: None,
+        ops: SEARCH,
+        description: "The raw JQL of search, percent-encoded or in RAW(...). The app owns it. Do not use it with project. With allowHeaderOverrides, the JiraJql header replaces it.",
+    },
+    Spec {
+        name: "fields",
+        kind: Kind::TextList,
+        default: None,
+        ops: &[Operation::GetIssue, Operation::Search],
+        description: "The field ids to read, for example summary,status,customfield_10010. The default is the default field set of the client.",
+    },
+    Spec {
+        name: "maxResults",
+        kind: Kind::Int,
+        default: Some("50"),
+        ops: SEARCH,
+        description: "The page size of search, from 1 to 100.",
+    },
+    Spec {
+        name: "maxPages",
+        kind: Kind::Int,
+        default: Some("1"),
+        ops: SEARCH,
+        description: "The most pages that one search exchange reads, from 1 to 1000.",
+    },
+    Spec {
+        name: "requireIdempotencyKey",
+        kind: Kind::Bool,
+        default: Some("false"),
+        ops: MARKED_OPS,
+        description: "Fail the exchange when it has no HarvestIdempotencyKey header. Without the header, the write is sent at most once.",
+    },
+    Spec {
+        name: "resendAfterNegativeLookup",
+        kind: Kind::Bool,
+        default: Some("false"),
+        ops: MARKED_OPS,
+        description: "Unsafe opt-in: on a retry attempt, send the write again when the marker lookup finds nothing. Jira can then get the write two times.",
+    },
+    Spec {
+        name: "notifyUsers",
+        kind: Kind::Bool,
+        default: None,
+        ops: &[Operation::EditIssue],
+        description: "The notifyUsers flag of editIssue. Unset keeps the Jira default.",
+    },
+    Spec {
+        name: "allowHeaderOverrides",
+        kind: Kind::Bool,
+        default: Some("false"),
+        ops: ALL_OPS,
+        description: "Let the JiraIssueKey, JiraJql and JiraStatus headers replace the options. Use it only when no outside caller can set headers.",
+    },
+    Spec {
+        name: "throwExceptionOnFailure",
+        kind: Kind::Bool,
+        default: Some("true"),
+        ops: ALL_OPS,
+        description: "Fail the exchange when the Jira call fails.",
+    },
+    Spec {
+        name: "maxBodySize",
+        kind: Kind::Int,
+        // DEFAULT_MAX_BODY_SIZE. The test `uri_options_match_the_parser`
+        // compares the two.
+        default: Some("2097152"),
+        ops: ALL_OPS,
+        description: "The largest request body in bytes.",
+    },
+];
+
 /// Returns the URI options for the component metadata.
+///
+/// No option is `required` here: each operation needs other options, and
+/// the parse checks them.
 #[must_use]
 pub fn uri_options() -> Vec<UriOption> {
-    Vec::new()
+    SPECS
+        .iter()
+        .map(|spec| {
+            let kind = match spec.kind {
+                Kind::Text => OptionKind::String,
+                Kind::Int => OptionKind::Int,
+                Kind::Bool => OptionKind::Bool,
+                Kind::TextList => OptionKind::List(Box::new(OptionKind::String)),
+            };
+            let option = UriOption::new(spec.name, spec.description, kind);
+            match spec.default {
+                Some(default) => option.with_default(default),
+                None => option,
+            }
+        })
+        .collect()
+}
+
+const fn bad_uri(message: String) -> CamelError {
+    CamelError::InvalidUri(message)
+}
+
+fn join<'a>(names: impl Iterator<Item = &'a str>) -> String {
+    names.collect::<Vec<_>>().join(", ")
+}
+
+fn unknown_option(key: &str) -> CamelError {
+    bad_uri(format!(
+        "unknown {SCHEME}: option '{key}'; the options are {}",
+        join(SPECS.iter().map(|s| s.name))
+    ))
+}
+
+/// Wraps a parse error of the core. Its text holds the rule, not the value.
+fn field(key: &str, err: &autumn_jira::JiraError) -> CamelError {
+    bad_uri(format!("{key}: {err}"))
+}
+
+fn parse_operation(name: &str) -> Result<Operation, CamelError> {
+    let operations = join(Operation::ALL.iter().map(|op| op.name()));
+    if name.is_empty() {
+        return Err(bad_uri(format!(
+            "the operation is missing: use {SCHEME}:<operation>; the operations are {operations}"
+        )));
+    }
+    Operation::parse(name).ok_or_else(|| {
+        bad_uri(format!(
+            "unknown {SCHEME}: operation '{name}'; the operations are {operations}"
+        ))
+    })
+}
+
+fn non_empty(key: &str, value: &str) -> Result<String, CamelError> {
+    if value.trim().is_empty() {
+        return Err(bad_uri(format!("{key} must not be empty")));
+    }
+    Ok(value.to_owned())
+}
+
+fn parse_bool(key: &str, value: &str) -> Result<bool, CamelError> {
+    parse_bool_param(value).map_err(|e| bad_uri(format!("{key}: {e}")))
+}
+
+fn parse_range(key: &str, value: &str, max: u32) -> Result<u32, CamelError> {
+    value
+        .trim()
+        .parse::<u32>()
+        .ok()
+        .filter(|n| (1..=max).contains(n))
+        .ok_or_else(|| {
+            bad_uri(format!(
+                "{key} must be a whole number from 1 to {max}, got '{value}'"
+            ))
+        })
+}
+
+fn parse_max_body_size(value: &str) -> Result<usize, CamelError> {
+    value
+        .trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|n| *n > 0)
+        .ok_or_else(|| {
+            bad_uri(format!(
+                "maxBodySize must be a number of bytes above 0, got '{value}'"
+            ))
+        })
+}
+
+/// A numeric id gives `IssueTypeRef::Id`, other text a name.
+fn parse_issue_type(value: &str) -> Result<IssueTypeRef, CamelError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(bad_uri(
+            "issueType must be an issue type name or a numeric id".to_owned(),
+        ));
+    }
+    if value.bytes().all(|b| b.is_ascii_digit()) {
+        return IssueTypeId::parse(value)
+            .map(IssueTypeRef::Id)
+            .map_err(|e| field("issueType", &e));
+    }
+    Ok(IssueTypeRef::Name(value.to_owned()))
+}
+
+/// `id:<n>` gives a status id, `category:<key>` a category, other text a
+/// status name.
+fn parse_status(value: &str) -> Result<StatusTarget, CamelError> {
+    if let Some(id) = value.strip_prefix("id:") {
+        return StatusId::parse(id)
+            .map(StatusTarget::Id)
+            .map_err(|e| field("status", &e));
+    }
+    if let Some(key) = value.strip_prefix("category:") {
+        return StatusCategoryKey::parse(key)
+            .map(StatusTarget::Category)
+            .map_err(|e| field("status", &e));
+    }
+    let name = value.trim();
+    if name.is_empty() {
+        return Err(bad_uri(
+            "status must be a status name, id:<n> or category:<key>".to_owned(),
+        ));
+    }
+    Ok(StatusTarget::Name(name.to_owned()))
+}
+
+/// camel keeps a `RAW(...)` value as it is. The JQL is the text in the
+/// brackets, with no percent decode.
+fn parse_jql(value: &str) -> Result<String, CamelError> {
+    let jql = value
+        .strip_prefix("RAW(")
+        .and_then(|v| v.strip_suffix(')'))
+        .unwrap_or(value);
+    if jql.trim().is_empty() {
+        return Err(bad_uri("jql must not be empty".to_owned()));
+    }
+    Ok(jql.to_owned())
+}
+
+fn parse_fields(value: &str) -> Result<FieldSet, CamelError> {
+    let ids = value
+        .split(',')
+        .map(|id| {
+            let id = id.trim();
+            if id.is_empty() {
+                return Err(bad_uri(
+                    "fields must be a comma-separated list of field ids, with no empty item"
+                        .to_owned(),
+                ));
+            }
+            FieldId::parse(id).map_err(|e| field("fields", &e))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(FieldSet::new(ids))
 }
 
 #[cfg(test)]
