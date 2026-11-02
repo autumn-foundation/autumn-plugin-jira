@@ -98,6 +98,10 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 /// `JIRA_EXAMPLE_TIME_FACTOR` scales it, for example under coverage.
 const RUN_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// The extra time after the run timeout for the stops. Only a setup or a
+/// stop that hangs uses it.
+const STOP_GRACE: Duration = Duration::from_secs(30);
+
 /// The alert of the scenario.
 const ALERT: &str = "A-1001";
 /// The webhook secret of the Jira site. autumn needs 32 bytes or more in
@@ -383,16 +387,40 @@ async fn run_within(
     limit: Duration,
     stops: &StopLog,
 ) -> Result<Report, BoxError> {
+    let late = format!("the run did not end in {limit:?}");
+    // The deadline stops the drive, and then the run stops the connector,
+    // the worker and camel. A timeout that drops the run would skip these
+    // stops. The backstop is only for a setup or a stop that hangs.
+    let deadline = tokio::time::Instant::now() + limit;
+    let backstop = limit.saturating_add(STOP_GRACE.saturating_mul(time_factor()));
     // The future of the run is large, so it lives on the heap.
-    tokio::time::timeout(limit, Box::pin(run_unbounded(url, scenario, sites, stops)))
+    let run = run_unbounded(
+        url,
+        scenario,
+        sites,
+        Limit {
+            deadline,
+            late: &late,
+        },
+        stops,
+    );
+    tokio::time::timeout(backstop, Box::pin(run))
         .await
-        .map_err(|_| format!("the run did not end in {limit:?}"))?
+        .map_err(|_| late.clone())?
+}
+
+/// The deadline of the drive, and the error text when it passes.
+#[derive(Debug, Clone, Copy)]
+struct Limit<'a> {
+    deadline: tokio::time::Instant,
+    late: &'a str,
 }
 
 async fn run_unbounded(
     url: &str,
     scenario: &Scenario,
     sites: Sites,
+    limit: Limit<'_>,
     stops: &StopLog,
 ) -> Result<Report, BoxError> {
     migrate_once(url).await?;
@@ -457,7 +485,7 @@ async fn run_unbounded(
     });
 
     let mut runner = Some(runner);
-    let driven = drive(&mut Drive {
+    let mut work = Drive {
         url,
         state: &state,
         api: &api,
@@ -466,8 +494,11 @@ async fn run_unbounded(
         sites: &sites,
         scenario,
         runner: &mut runner,
-    })
-    .await;
+        deadline: limit.deadline,
+    };
+    let driven = tokio::time::timeout_at(limit.deadline, drive(&mut work))
+        .await
+        .unwrap_or_else(|_| Err(limit.late.into()));
 
     // Stop in all cases: the connector, the worker, then camel. The error
     // of the run comes first.
@@ -679,6 +710,8 @@ struct Drive<'a> {
     scenario: &'a Scenario,
     /// The worker that runs now: A, then B.
     runner: &'a mut Option<HarvestRunner>,
+    /// The end of the drive.
+    deadline: tokio::time::Instant,
 }
 
 /// What the driver saw.
@@ -755,7 +788,10 @@ async fn drive(d: &mut Drive<'_>) -> Result<Driven, BoxError> {
             .ok_or("the alert started no run")?
     };
     let handle = WorkflowHandleClient::single(d.state.pool.clone(), d.url).handle(run.exec_id);
-    let timeout = run_timeout();
+    // The result task ends at the deadline of the drive too.
+    let timeout = d
+        .deadline
+        .saturating_duration_since(tokio::time::Instant::now());
     let mut result = tokio::spawn(async move { handle.result_raw_with_timeout(timeout).await });
 
     // [6] When the run waits, stop worker A and start worker B.
