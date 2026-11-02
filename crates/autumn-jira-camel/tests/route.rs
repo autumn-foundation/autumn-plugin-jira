@@ -1190,3 +1190,67 @@ async fn the_out_header_of_an_earlier_step_is_not_an_override() {
     assert_eq!(reply(&ex)["key"], json!("OPS-1"));
     stop(camel).await;
 }
+
+// --- R1-write-safety-10: the settle wait of a lookup-only create --------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retry_attempt_lookup_waits_for_index_lag() {
+    // The default settle wait is 30 s, the SETTLE_SECS of the harvest
+    // activity. Only createIssue takes the option: the comment list is
+    // always current.
+    let settle = uri_options()
+        .into_iter()
+        .find(|o| o.name == "settleMs")
+        .expect("the settleMs option");
+    assert_eq!(settle.default_value.as_deref(), Some("30000"));
+
+    let fake = FakeJira::new();
+    fake.index_lag(std::time::Duration::from_secs(1));
+    fake.fault(FakeOp::CreateIssue, Fault::StatusAfterCommit(503));
+    let camel = start(
+        component(&fake),
+        &[(
+            "direct:create",
+            "jira:createIssue?project=OPS&issueType=Task&settleMs=1500",
+        )],
+    )
+    .await
+    .unwrap();
+    let body = json!({"summary": "Disk full"});
+    // Attempt 1: the POST commits, the reply is lost, the lookup misses.
+    let err = send(
+        &camel,
+        "direct:create",
+        attempt(body.clone(), "wf-1/a-1", json!(1)),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, CamelError::Io(_)), "{err:?}");
+    // Attempt 2 at once: the first lookup misses, and the lookup after the
+    // settle wait finds the issue.
+    let ex = send(
+        &camel,
+        "direct:create",
+        attempt(body.clone(), "wf-1/a-1", json!(2)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(reply(&ex)["outcome"], json!("found"));
+    assert_eq!(reply(&ex)["key"], json!("OPS-1"));
+    assert_eq!(fake.count(FakeOp::CreateIssue), 1);
+    stop(camel).await;
+
+    // settleMs=0 turns the wait off. The option takes 0 to 600000.
+    let err = route_add_error(
+        component(&fake),
+        "jira:createIssue?project=OPS&issueType=Task&settleMs=600001",
+    )
+    .await;
+    assert!(err.contains("settleMs"), "{err}");
+    let err = route_add_error(
+        component(&fake),
+        "jira:addComment?issueKey=OPS-1&settleMs=0",
+    )
+    .await;
+    assert!(err.contains("settleMs"), "{err}");
+}
