@@ -208,7 +208,11 @@ impl std::fmt::Debug for JiraWebhookConfig {
             .field("max_age_secs", &self.max_age_secs)
             .field("max_future_skew_secs", &self.max_future_skew_secs)
             .field("handler_timeout_ms", &self.handler_timeout_ms)
-            .field("ignore_actor_account_ids", &self.ignore_actor_account_ids)
+            // A count only: an account id identifies a person.
+            .field(
+                "ignore_actor_account_ids",
+                &self.ignore_actor_account_ids.len(),
+            )
             .finish()
     }
 }
@@ -250,8 +254,33 @@ impl JiraConfig {
         profile_file: Option<&str>,
         env: impl IntoIterator<Item = (String, String)>,
     ) -> Result<Self, PluginError> {
-        let _ = (base, profile_file, env.into_iter().count(), ENV_PREFIX, SECTION);
-        Ok(Self::default())
+        let mut table = toml::Table::new();
+        for text in [base, profile_file].into_iter().flatten() {
+            let parsed: toml::Table =
+                toml::from_str(text).map_err(|e| PluginError::config(format!("toml: {e}")))?;
+            if let Some(toml::Value::Table(section)) = parsed.get(SECTION) {
+                merge(&mut table, section.clone());
+            }
+        }
+        let schema = schema()?;
+        for (key, value) in env {
+            let Some(path) = key.strip_prefix(ENV_PREFIX) else {
+                continue;
+            };
+            let path: Vec<String> = path.split("__").map(str::to_ascii_lowercase).collect();
+            // The error names the variable, never the value.
+            let typed = typed_env_value(&schema, &path, &value)
+                .ok_or_else(|| PluginError::config(format!("{key}: the value is not valid")))?;
+            insert_path(&mut table, &path, typed);
+        }
+        reject_secret_keys(&table)?;
+        // A serde type error can quote a file value. The secret keys fail
+        // above, so such an error never quotes a secret.
+        let cfg: Self = toml::Value::Table(table)
+            .try_into()
+            .map_err(|e: toml::de::Error| PluginError::config(e.to_string()))?;
+        cfg.validate()?;
+        Ok(cfg)
     }
 
     /// Loads config from files in `manifest_dir` (else the current
@@ -268,8 +297,23 @@ impl JiraConfig {
         profile_names: &[String],
         env: impl IntoIterator<Item = (String, String)>,
     ) -> Result<Self, PluginError> {
-        let _ = (manifest_dir, profile_names, PathBuf::new());
-        Self::from_layers(None, None, env)
+        let find = |file: &str| {
+            let candidate = manifest_dir.join(file);
+            if candidate.exists() {
+                candidate
+            } else {
+                PathBuf::from(file)
+            }
+        };
+        let base = read_optional(&find("autumn.toml"))?;
+        let mut profile = None;
+        for name in profile_names {
+            if let Some(text) = read_optional(&find(&format!("autumn-{name}.toml")))? {
+                profile = Some(text);
+                break;
+            }
+        }
+        Self::from_layers(base.as_deref(), profile.as_deref(), env)
     }
 
     /// Loads config like autumn-web does: `$AUTUMN_MANIFEST_DIR` (else `.`),
@@ -278,8 +322,23 @@ impl JiraConfig {
     /// # Errors
     /// Returns [`PluginError::Config`] when loading or validation fails.
     pub fn load(profile: Option<&str>) -> Result<Self, PluginError> {
-        let _ = profile;
-        Ok(Self::default())
+        use autumn_web::config::Env as _;
+        let os = autumn_web::config::OsEnv;
+        let names = profile
+            .map(|p| {
+                // Same selector order as autumn-web: env vars, then `--profile`.
+                let selector = ["AUTUMN_ENV", "AUTUMN_PROFILE"]
+                    .iter()
+                    .find_map(|k| os.var(k).ok().filter(|v| !v.trim().is_empty()))
+                    .or_else(profile_flag)
+                    .map_or_else(|| p.to_owned(), |v| v.trim().to_owned());
+                autumn_web::config::profile_override_file_lookup_names(p, &selector)
+            })
+            .unwrap_or_default();
+        let dir = os
+            .var("AUTUMN_MANIFEST_DIR")
+            .map_or_else(|_| PathBuf::from("."), PathBuf::from);
+        Self::load_from_dir(&dir, &names, process_env()?)
     }
 
     /// Checks the values.
@@ -287,6 +346,50 @@ impl JiraConfig {
     /// # Errors
     /// Returns [`PluginError::Config`] with the first problem found.
     pub fn validate(&self) -> Result<(), PluginError> {
+        self.mode()?;
+        if let Some(api) = &self.api_token {
+            let site = api.site.as_deref().filter(|s| !s.trim().is_empty());
+            let cloud = api.cloud_id.as_deref().filter(|s| !s.trim().is_empty());
+            match (site, cloud) {
+                (None, None) => {
+                    return Err(PluginError::config(
+                        "set site or cloud_id in [jira.api_token]",
+                    ));
+                }
+                (Some(_), Some(_)) => {
+                    return Err(PluginError::config(
+                        "set site or cloud_id in [jira.api_token], not both",
+                    ));
+                }
+                _ => {}
+            }
+            require_text(&api.email_env, "[jira.api_token] email_env")?;
+            require_text(&api.token_env, "[jira.api_token] token_env")?;
+        }
+        if let Some(target) = &self.san_mateo {
+            require_text(&target.environment, "[jira.san_mateo] environment")?;
+            require_text(&target.integration, "[jira.san_mateo] integration")?;
+        }
+        let http = &self.http;
+        require_positive(u64::from(http.max_attempts), "[jira.http] max_attempts")?;
+        require_positive(u64::from(http.max_pages), "[jira.http] max_pages")?;
+        require_positive(
+            u64::from(http.lookup_attempts),
+            "[jira.http] lookup_attempts",
+        )?;
+        require_positive(http.timeout_secs, "[jira.http] timeout_secs")?;
+        if http.max_backoff_ms < http.base_backoff_ms {
+            return Err(PluginError::config(
+                "[jira.http] max_backoff_ms must be base_backoff_ms or more",
+            ));
+        }
+        require_text(&self.webhook.endpoint_name, "[jira.webhook] endpoint_name")?;
+        require_positive(self.webhook.max_age_secs, "[jira.webhook] max_age_secs")?;
+        require_positive(
+            self.webhook.handler_timeout_ms,
+            "[jira.webhook] handler_timeout_ms",
+        )?;
+        require_positive(self.health.timeout_ms, "[jira.health] timeout_ms")?;
         Ok(())
     }
 
@@ -294,8 +397,160 @@ impl JiraConfig {
     ///
     /// # Errors
     /// Returns [`PluginError::Config`] when both tables exist.
-    pub const fn mode(&self) -> Result<Option<JiraMode>, PluginError> {
-        Ok(None)
+    pub fn mode(&self) -> Result<Option<JiraMode>, PluginError> {
+        match (&self.api_token, &self.san_mateo) {
+            (Some(_), Some(_)) => Err(PluginError::config(
+                "set [jira.api_token] or [jira.san_mateo], not both",
+            )),
+            (Some(_), None) => Ok(Some(JiraMode::ApiToken)),
+            (None, Some(_)) => Ok(Some(JiraMode::SanMateo)),
+            (None, None) => Ok(None),
+        }
+    }
+}
+
+/// The keys that would hold a secret value. The config holds env var names.
+const SECRET_KEYS: [&str; 3] = ["token", "api_token", "password"];
+
+/// Fails when a table holds a secret value: a key `token`, `password`, or an
+/// `api_token` that is not the mode table. The text names `token_env`.
+fn reject_secret_keys(section: &toml::Table) -> Result<(), PluginError> {
+    let fail = |at: &str, key: &str| {
+        Err(PluginError::config(format!(
+            "{at} {key}: do not put a secret in the config; set [jira.api_token] token_env to the name of the env var that holds the API token"
+        )))
+    };
+    for (key, value) in section {
+        let mode_table = key == "api_token" && value.is_table();
+        if SECRET_KEYS.contains(&key.as_str()) && !mode_table {
+            return fail("[jira]", key);
+        }
+    }
+    for table in ["api_token", "san_mateo"] {
+        if let Some(toml::Value::Table(inner)) = section.get(table)
+            && let Some(key) = inner.keys().find(|k| SECRET_KEYS.contains(&k.as_str()))
+        {
+            return fail(&format!("[jira.{table}]"), key);
+        }
+    }
+    Ok(())
+}
+
+fn require_text(value: &str, what: &str) -> Result<(), PluginError> {
+    if value.trim().is_empty() {
+        return Err(PluginError::config(format!("{what} must not be empty")));
+    }
+    Ok(())
+}
+
+fn require_positive(value: u64, what: &str) -> Result<(), PluginError> {
+    if value == 0 {
+        return Err(PluginError::config(format!("{what} must be 1 or more")));
+    }
+    Ok(())
+}
+
+/// The schema for env values: the defaults, with both mode tables.
+fn schema() -> Result<toml::Table, PluginError> {
+    let sample = JiraConfig {
+        api_token: Some(ApiTokenConfig::default()),
+        san_mateo: Some(SanMateoTarget::default()),
+        ..JiraConfig::default()
+    };
+    toml::Table::try_from(sample).map_err(|e| PluginError::config(e.to_string()))
+}
+
+/// Returns `.env` values, then the process environment (later wins).
+///
+/// It skips a variable whose name or value is not UTF-8.
+fn process_env() -> Result<Vec<(String, String)>, PluginError> {
+    let mut vars = autumn_web::dotenv::resolve_process_dotenv()
+        .map_err(|e| PluginError::config(format!(".env: {e}")))?;
+    vars.extend(
+        std::env::vars_os()
+            .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?))),
+    );
+    Ok(vars)
+}
+
+/// The value of `--profile <name>` or `--profile=<name>` in the process args.
+fn profile_flag() -> Option<String> {
+    let args: Vec<String> = std::env::args_os()
+        .filter_map(|a| a.into_string().ok())
+        .collect();
+    args.iter()
+        .enumerate()
+        .find_map(|(i, a)| {
+            a.strip_prefix("--profile=").map(str::to_owned).or_else(|| {
+                (a == "--profile")
+                    .then(|| args.get(i + 1).cloned())
+                    .flatten()
+            })
+        })
+        // Like autumn-web: an empty value selects nothing.
+        .filter(|p| !p.trim().is_empty())
+}
+
+fn read_optional(path: &Path) -> Result<Option<String>, PluginError> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(PluginError::config(format!("{}: {e}", path.display()))),
+    }
+}
+
+/// Deep merge: tables merge by key; other values replace.
+fn merge(into: &mut toml::Table, from: toml::Table) {
+    for (key, value) in from {
+        match (into.get_mut(&key), value) {
+            (Some(toml::Value::Table(dst)), toml::Value::Table(src)) => merge(dst, src),
+            (_, value) => {
+                into.insert(key, value);
+            }
+        }
+    }
+}
+
+fn insert_path(table: &mut toml::Table, path: &[String], value: toml::Value) {
+    let Some((last, parents)) = path.split_last() else {
+        return;
+    };
+    let mut cur = table;
+    for key in parents {
+        let entry = cur
+            .entry(key.clone())
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+        if !entry.is_table() {
+            *entry = toml::Value::Table(toml::Table::new());
+        }
+        let toml::Value::Table(next) = entry else {
+            return;
+        };
+        cur = next;
+    }
+    cur.insert(last.clone(), value);
+}
+
+/// Converts an env value to the type of the schema value at the same path.
+/// A list is a comma-separated string.
+fn typed_env_value(schema: &toml::Table, path: &[String], raw: &str) -> Option<toml::Value> {
+    let mut node: Option<&toml::Value> = None;
+    let mut table = Some(schema);
+    for key in path {
+        node = table.and_then(|t| t.get(key));
+        table = node.and_then(toml::Value::as_table);
+    }
+    match node {
+        Some(toml::Value::Integer(_)) => raw.trim().parse().ok().map(toml::Value::Integer),
+        Some(toml::Value::Boolean(_)) => raw.trim().parse().ok().map(toml::Value::Boolean),
+        Some(toml::Value::Array(_)) => Some(toml::Value::Array(
+            raw.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| toml::Value::String(s.to_owned()))
+                .collect(),
+        )),
+        _ => Some(toml::Value::String(raw.to_owned())),
     }
 }
 
@@ -342,9 +597,15 @@ mod tests {
             ("OTHER_VAR", "ignored"),
         ]);
         let c = JiraConfig::load_from_dir(&dir, &["prod".to_owned()], vars).unwrap();
-        assert_eq!(c.http.max_attempts, 3, "the profile file wins over the base");
+        assert_eq!(
+            c.http.max_attempts, 3,
+            "the profile file wins over the base"
+        );
         assert_eq!(c.http.max_pages, 7, "the env wins over the files");
-        assert_eq!(c.http.base_backoff_ms, 2000, "a key not set keeps its default");
+        assert_eq!(
+            c.http.base_backoff_ms, 2000,
+            "a key not set keeps its default"
+        );
         let api = c.api_token.as_ref().unwrap();
         assert_eq!(api.site.as_deref(), Some("envsite"));
         assert_eq!(api.token_env, "JIRA_API_TOKEN");
@@ -417,9 +678,11 @@ mod tests {
             e.contains("set [jira.api_token] or [jira.san_mateo], not both"),
             "{e}"
         );
-        let mut c = JiraConfig::default();
-        c.api_token = Some(ApiTokenConfig::default());
-        c.san_mateo = Some(SanMateoTarget::default());
+        let c = JiraConfig {
+            api_token: Some(ApiTokenConfig::default()),
+            san_mateo: Some(SanMateoTarget::default()),
+            ..JiraConfig::default()
+        };
         let e = c.mode().unwrap_err().to_string();
         assert!(e.contains("not both"), "{e}");
     }
@@ -473,8 +736,14 @@ mod tests {
                 "not both",
             ),
             ("[jira.api_token]\nsite = \" \"\n", "site or cloud_id"),
-            ("[jira.api_token]\nsite = \"a\"\ntoken_env = \"\"\n", "token_env"),
-            ("[jira.api_token]\nsite = \"a\"\nemail_env = \"\"\n", "email_env"),
+            (
+                "[jira.api_token]\nsite = \"a\"\ntoken_env = \"\"\n",
+                "token_env",
+            ),
+            (
+                "[jira.api_token]\nsite = \"a\"\nemail_env = \"\"\n",
+                "email_env",
+            ),
             ("[jira.san_mateo]\nenvironment = \"\"\n", "environment"),
             ("[jira.san_mateo]\nintegration = \"\"\n", "integration"),
             ("[jira.http]\nmax_attempts = 0\n", "max_attempts"),
@@ -487,7 +756,10 @@ mod tests {
             ),
             ("[jira.webhook]\nendpoint_name = \"\"\n", "endpoint_name"),
             ("[jira.webhook]\nmax_age_secs = 0\n", "max_age_secs"),
-            ("[jira.webhook]\nhandler_timeout_ms = 0\n", "handler_timeout_ms"),
+            (
+                "[jira.webhook]\nhandler_timeout_ms = 0\n",
+                "handler_timeout_ms",
+            ),
             ("[jira.health]\ntimeout_ms = 0\n", "timeout_ms"),
         ];
         for (text, word) in bad {

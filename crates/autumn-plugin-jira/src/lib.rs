@@ -30,6 +30,7 @@
 
 pub mod config;
 mod error;
+mod mount;
 mod plugin;
 pub mod webhook_config;
 

@@ -1,13 +1,21 @@
 //! `JiraPlugin`: the builder and the autumn `Plugin` impl.
 
 use std::borrow::Cow;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use autumn_web::app::AppBuilder;
 use autumn_web::plugin::Plugin;
 use autumn_web::plugin_contract::PluginContract;
+use autumn_web::{AppState, AutumnError, ProcessRole};
 
 use crate::config::JiraConfig;
-use crate::{AUTUMN_WEB_REQUIREMENT, DEFAULT_PREFIX, PLUGIN_NAME};
+use crate::error::PluginError;
+use crate::mount;
+use crate::webhook_config::check_webhook_endpoint;
+use crate::{AUTUMN_WEB_REQUIREMENT, DEFAULT_PREFIX, PLUGIN_NAME, SECTION};
+
+/// The result of the state initializer. The startup hook reads it.
+type Started = Arc<Mutex<Option<Result<JiraConfig, PluginError>>>>;
 
 /// The contract that [`JiraPlugin`] declares to autumn.
 #[must_use]
@@ -70,8 +78,16 @@ impl JiraPlugin {
     /// The prefix is a builder value, not a config key: autumn mounts the
     /// routes before the config loads.
     #[must_use]
+    ///
+    /// The plugin adds a leading `/` and removes a trailing `/`. `""` and
+    /// `"/"` put the webhook route at `/webhook`.
     pub fn prefix(mut self, prefix: &str) -> Self {
-        self.prefix = prefix.to_owned();
+        let trimmed = prefix.trim().trim_matches('/');
+        self.prefix = if trimmed.is_empty() {
+            String::new()
+        } else {
+            format!("/{trimmed}")
+        };
         self
     }
 
@@ -102,7 +118,44 @@ impl JiraPlugin {
     /// The full path of the webhook route: `{prefix}/webhook`.
     #[must_use]
     pub fn webhook_path(&self) -> String {
-        String::new()
+        format!("{}/webhook", self.prefix)
+    }
+
+    /// The config: the one from [`with_config`](Self::with_config), else the
+    /// one that autumn files and the env give. Then the mode check.
+    fn resolve_config(&self, state: &AppState) -> Result<JiraConfig, PluginError> {
+        let config = match &self.config {
+            Some(config) => {
+                config.validate()?;
+                config.clone()
+            }
+            None => JiraConfig::load(Some(state.profile()).filter(|p| *p != "default"))?,
+        };
+        if config.mode()?.is_none() {
+            return Err(PluginError::config(
+                "set [jira.api_token] or [jira.san_mateo]",
+            ));
+        }
+        Ok(config)
+    }
+
+    /// The startup check. It runs the webhook boot check when this process
+    /// serves HTTP and the route is mounted. It returns the warnings.
+    fn startup_check(
+        &self,
+        state: &AppState,
+        config: &JiraConfig,
+        role: ProcessRole,
+    ) -> Result<Vec<String>, PluginError> {
+        if !(self.webhook_route && role.serves_http()) {
+            return Ok(Vec::new());
+        }
+        check_webhook_endpoint(
+            &state.config_arc().security.webhooks.endpoints,
+            &self.webhook_path(),
+            &config.webhook,
+            self.allow_without_replay_protection,
+        )
     }
 }
 
@@ -112,12 +165,43 @@ impl Plugin for JiraPlugin {
     }
 
     fn build(self, app: AppBuilder) -> AppBuilder {
-        let _ = (
-            self.config,
-            self.webhook_route,
-            self.allow_without_replay_protection,
-        );
-        app
+        let mut app = app.config_section(SECTION);
+        if self.webhook_route {
+            let path = self.webhook_path();
+            app = app
+                .declare_plugin_routes([mount::route_info(&path)])
+                .merge(mount::webhook_router(&path));
+        }
+        let started: Started = Arc::default();
+        let init_started = Arc::clone(&started);
+        let plugin = Arc::new(self);
+        let init_plugin = Arc::clone(&plugin);
+        // A state initializer cannot fail. So it stores the result, and the
+        // startup hook returns the error.
+        app.state_initializer(move |state| {
+            let result = init_plugin.resolve_config(state);
+            if let Err(e) = &result {
+                tracing::error!(error = %e, "jira plugin did not start");
+            }
+            *init_started.lock().unwrap_or_else(PoisonError::into_inner) = Some(result);
+        })
+        .on_startup(move |state| {
+            let taken = started
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take();
+            let result = match taken {
+                Some(Ok(config)) => plugin.startup_check(&state, &config, state.role()),
+                Some(Err(e)) => Err(e),
+                None => Err(PluginError::config("the jira plugin did not start")),
+            };
+            let result = result.map(|warnings| {
+                for warning in warnings {
+                    tracing::warn!("{warning}");
+                }
+            });
+            std::future::ready(result.map_err(AutumnError::internal_server_error))
+        })
     }
 
     fn contract(&self) -> Option<PluginContract> {
@@ -133,6 +217,7 @@ mod tests {
     /// The declared range is the `autumn-web` requirement of the workspace.
     #[test]
     fn contract_matches_cargo_toml() {
+        use autumn_web::plugin_contract::{AUTUMN_WEB_VERSION, ContractVerdict, evaluate};
         let manifest: toml::Table = toml::from_str(include_str!("../../../Cargo.toml")).unwrap();
         let requirement = manifest["workspace"]["dependencies"]["autumn-web"]["version"]
             .as_str()
@@ -145,7 +230,6 @@ mod tests {
             "the crate takes the workspace requirement"
         );
 
-        use autumn_web::plugin_contract::{AUTUMN_WEB_VERSION, ContractVerdict, evaluate};
         let contract = JiraPlugin::new().contract().unwrap();
         assert_eq!(contract, plugin_contract());
         assert_eq!(contract.plugin, PLUGIN_NAME);

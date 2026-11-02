@@ -55,6 +55,24 @@ fn boot(plugin: JiraPlugin, cfg: AutumnConfig) -> Result<(), String> {
     })
 }
 
+/// `err` is `WebhookEndpoint`. Its fix is a comment that names `field`,
+/// then the TOML `fix`. It holds no secret.
+fn assert_fix(label: &str, err: &PluginError, field: &str, fix: &str) {
+    let PluginError::WebhookEndpoint { fix: got } = err else {
+        panic!("{label}: wrong variant {err:?}");
+    };
+    assert!(got.ends_with(fix), "{label}: the fix TOML is in {got}");
+    let problem = got.lines().next().unwrap();
+    assert!(problem.starts_with("# "), "{label}: {problem}");
+    assert!(problem.contains(field), "{label}: {problem}");
+    let text = err.to_string();
+    assert!(
+        text.starts_with("the webhook endpoint does not fit Jira; use:\n"),
+        "{label}: {text}"
+    );
+    assert!(!text.contains(SECRET_VALUE), "{label}: {text}");
+}
+
 #[test]
 fn each_wrong_field_fails_with_the_fix() {
     type Edit = fn(&mut WebhookEndpointConfig);
@@ -105,26 +123,17 @@ fn each_wrong_field_fails_with_the_fix() {
             |e| e.replay_window_secs = 3600,
             "max_age_secs",
         ),
-        ("no entry with the name", |e| e.name = "other".to_owned(), "name"),
+        (
+            "no entry with the name",
+            |e| e.name = "other".to_owned(),
+            "name",
+        ),
     ];
     let fix = webhook_endpoint_toml(PATH, SECRET_ENV);
     for (label, edit, field) in cases {
         let mut endpoint = good();
         edit(&mut endpoint);
-        let err = check(endpoint).unwrap_err();
-        let PluginError::WebhookEndpoint { fix: got } = &err else {
-            panic!("{label}: wrong variant {err:?}");
-        };
-        assert!(got.ends_with(&fix), "{label}: the fix TOML is in {got}");
-        let problem = got.lines().next().unwrap();
-        assert!(problem.starts_with("# "), "{label}: {problem}");
-        assert!(problem.contains(field), "{label}: {problem}");
-        let text = err.to_string();
-        assert!(
-            text.starts_with("the webhook endpoint does not fit Jira; use:\n"),
-            "{label}: {text}"
-        );
-        assert!(!text.contains(SECRET_VALUE), "{label}: {text}");
+        assert_fix(label, &check(endpoint).unwrap_err(), field, &fix);
     }
 
     // The header names compare without case. `sha256=` and no prefix pass.
@@ -141,7 +150,10 @@ fn each_wrong_field_fails_with_the_fix() {
     let PluginError::WebhookEndpoint { fix: got } = check(endpoint).unwrap_err() else {
         panic!("wrong variant");
     };
-    assert!(got.contains(&format!("secret_env = \"{DEFAULT_SECRET_ENV}\"")), "{got}");
+    assert!(
+        got.contains(&format!("secret_env = \"{DEFAULT_SECRET_ENV}\"")),
+        "{got}"
+    );
 
     // A custom endpoint name goes into the fix.
     let mut settings = JiraWebhookConfig::default();
@@ -174,7 +186,7 @@ fn small_body_cap_only_warns() {
     );
     // At the bound: no warning.
     endpoint.max_body_bytes = MIN_MAX_BODY_BYTES;
-    assert!(check(endpoint.clone()).unwrap().is_empty());
+    assert_eq!(check(endpoint.clone()).unwrap(), Vec::<String>::new());
 
     // The start passes.
     endpoint.max_body_bytes = 1024 * 1024;
@@ -183,6 +195,20 @@ fn small_body_cap_only_warns() {
         autumn_config(endpoint, ProcessRole::Combined),
     )
     .unwrap();
+}
+
+/// The shape of an `autumn.toml` with webhook endpoints.
+#[derive(serde::Deserialize)]
+struct Doc {
+    security: Security,
+}
+#[derive(serde::Deserialize)]
+struct Security {
+    webhooks: Webhooks,
+}
+#[derive(serde::Deserialize)]
+struct Webhooks {
+    endpoints: Vec<WebhookEndpointConfig>,
 }
 
 #[test]
@@ -202,21 +228,9 @@ fn helper_endpoint_passes() {
     );
     assert!(e.replay_protection);
     assert_eq!(e.max_body_bytes, RECOMMENDED_MAX_BODY_BYTES);
-    assert!(check(e.clone()).unwrap().is_empty());
+    assert_eq!(check(e.clone()).unwrap(), Vec::<String>::new());
 
     // The TOML block reads back as the same entry.
-    #[derive(serde::Deserialize)]
-    struct Doc {
-        security: Security,
-    }
-    #[derive(serde::Deserialize)]
-    struct Security {
-        webhooks: Webhooks,
-    }
-    #[derive(serde::Deserialize)]
-    struct Webhooks {
-        endpoints: Vec<WebhookEndpointConfig>,
-    }
     let text = webhook_endpoint_toml(PATH, SECRET_ENV);
     let doc: Doc = toml::from_str(&text).unwrap();
     let [t] = doc.security.webhooks.endpoints.try_into().unwrap();
@@ -225,8 +239,16 @@ fn helper_endpoint_passes() {
         (&e.name, &e.path, e.provider, &e.secret, &e.secret_env)
     );
     assert_eq!(
-        (&t.signature_header, &t.signature_prefix, &t.timestamp_header),
-        (&e.signature_header, &e.signature_prefix, &e.timestamp_header)
+        (
+            &t.signature_header,
+            &t.signature_prefix,
+            &t.timestamp_header
+        ),
+        (
+            &e.signature_header,
+            &e.signature_prefix,
+            &e.timestamp_header
+        )
     );
     assert_eq!(
         (
@@ -242,7 +264,7 @@ fn helper_endpoint_passes() {
             e.max_body_bytes
         )
     );
-    assert!(check(t).unwrap().is_empty());
+    assert_eq!(check(t).unwrap(), Vec::<String>::new());
 
     // The start passes with the helper entry.
     boot(
@@ -259,10 +281,9 @@ fn replay_off_needs_the_opt_in() {
     let settings = JiraWebhookConfig::default();
     let err = check_webhook_endpoint(&[endpoint.clone()], PATH, &settings, false).unwrap_err();
     assert!(err.to_string().contains("replay_protection"), "{err}");
-    assert!(
-        check_webhook_endpoint(&[endpoint.clone()], PATH, &settings, true)
-            .unwrap()
-            .is_empty()
+    assert_eq!(
+        check_webhook_endpoint(&[endpoint.clone()], PATH, &settings, true).unwrap(),
+        Vec::<String>::new()
     );
 
     // The start: it fails without the opt-in and passes with it.

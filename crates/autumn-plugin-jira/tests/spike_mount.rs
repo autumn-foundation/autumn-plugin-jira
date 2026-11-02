@@ -42,7 +42,10 @@ async fn deliver(client: &TestClient, id: &str, signature: &str) -> TestResponse
 }
 
 fn good_signature() -> String {
-    format!("sha256={}", hmac_sha256_hex(SECRET.as_bytes(), BODY.as_bytes()))
+    format!(
+        "sha256={}",
+        hmac_sha256_hex(SECRET.as_bytes(), BODY.as_bytes())
+    )
 }
 
 /// A plugin route with `SignedWebhook`, mounted one of two ways.
@@ -80,7 +83,9 @@ async fn signed_delivery_reaches_the_handler_not_500() {
     deliver(&client, "spike-1", &good_signature())
         .await
         .assert_status(200);
-    deliver(&client, "spike-2", "sha256=00").await.assert_status(401);
+    deliver(&client, "spike-2", "sha256=00")
+        .await
+        .assert_status(401);
 
     // The Jira plugin: the same mount at the full path.
     let jira = JiraConfig::from_toml_str("[jira.api_token]\nsite = \"acme\"\n").unwrap();
@@ -91,7 +96,9 @@ async fn signed_delivery_reaches_the_handler_not_500() {
     deliver(&client, "jira-1", &good_signature())
         .await
         .assert_status(200);
-    deliver(&client, "jira-2", "sha256=00").await.assert_status(401);
+    deliver(&client, "jira-2", "sha256=00")
+        .await
+        .assert_status(401);
 }
 
 /// Evidence for the plan: `nest` strips the prefix, so the endpoint lookup
