@@ -178,7 +178,7 @@ fn send_failure(error: &JiraError, settle: Duration) -> ActivityFailure {
 ///
 /// [`previous_attempt`] reads only the attempt just before. So a failure
 /// that tells "not sent" here would hide the possible send of an earlier
-/// attempt, and the next attempt would send with no lookup. A retryable
+/// attempt. The next attempt would then send with no lookup. A retryable
 /// failure that tells "not sent" stays `jira.outcome_pending` instead. The
 /// next attempt then looks up first again (R3-write-safety-1).
 fn resend_failure(error: &JiraError, settle: Duration) -> ActivityFailure {

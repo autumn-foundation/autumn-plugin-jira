@@ -303,10 +303,10 @@ impl SanMateoBackend {
     /// When `accessible-resources` shows the id, nothing changes. Else the
     /// backend picks the site again, stores the new id in the metadata, and
     /// resets the prefix. A failed check changes nothing else, but it counts
-    /// as a check. So the next check comes after the interval. A failure
-    /// that lasts, for example a site URL that no site has or a rate limit
-    /// of `accessible-resources`, then makes at most one call in each
-    /// interval (R3-webhooks-site-auth-1).
+    /// as a check. So the next check comes after the interval. Examples of
+    /// a failure that lasts are a site URL that no site has and a rate limit
+    /// of `accessible-resources`. Such a failure makes at most one call in
+    /// each interval (R3-webhooks-site-auth-1).
     async fn recheck(&self, prefix: &str) {
         if !self.start_check() {
             return;
