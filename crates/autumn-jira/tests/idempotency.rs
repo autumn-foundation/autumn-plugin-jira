@@ -372,7 +372,8 @@ proptest! {
     #[test]
     fn chaos_at_most_one_issue_per_key(
         create in proptest::collection::vec(0_u8..7, 0..4),
-        search in proptest::collection::vec(0_u8..3, 0..4),
+        // More faults than the read attempts, so a lookup can fail.
+        search in proptest::collection::vec(0_u8..3, 0..12),
         limits in 0_usize..3,
         lag_ms in 0_u64..1_000,
         calls in 1_usize..4,
@@ -531,4 +532,93 @@ async fn a_bad_label_value_is_a_validation_error() {
         messages.iter().any(|m| m.contains("contains spaces")),
         "{messages:?}"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn failed_prelookup_sends_no_post() {
+    let fake = FakeJira::new();
+    let client = api_token_client(&fake);
+    let k = key(60);
+    let first = client
+        .create_issue_idempotent(&task("x"), &k)
+        .await
+        .unwrap();
+    assert!(matches!(first, CreateOutcome::Created(_)));
+    // A search outage: each read attempt fails.
+    for _ in 0..autumn_jira::policy::MAX_ATTEMPTS {
+        fake.fault(FakeOp::Search, Fault::Status(500));
+    }
+    let err = client
+        .create_issue_idempotent(&task("x"), &k)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        JiraError::Upstream {
+            op: Op::Search,
+            status: 500
+        }
+    );
+    assert_eq!(fake.count(FakeOp::CreateIssue), 1, "no second POST");
+    assert_eq!(marked(&fake, &k).len(), 1);
+
+    // The same for a comment.
+    let issue = client.create_issue(&task("c")).await.unwrap().key;
+    let ck = key(61);
+    client
+        .add_comment_idempotent(&issue, &Adf::text("one"), &ck)
+        .await
+        .unwrap();
+    for _ in 0..autumn_jira::policy::MAX_ATTEMPTS {
+        fake.fault(FakeOp::GetComments, Fault::Status(500));
+    }
+    let err = client
+        .add_comment_idempotent(&issue, &Adf::text("one"), &ck)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        JiraError::Upstream {
+            op: Op::ListComments,
+            status: 500
+        }
+    );
+    assert_eq!(fake.count(FakeOp::AddComment), 1, "no second POST");
+}
+
+#[tokio::test(start_paused = true)]
+async fn failed_comment_lookup_after_a_lost_reply_is_outcome_unknown() {
+    let fake = FakeJira::new();
+    let posted = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&posted);
+    let backend = Scripted::new(Arc::new(direct(Arc::new(fake.clone()))), move |r, _| {
+        if r.op == Op::AddComment {
+            flag.store(true, Ordering::SeqCst);
+            return None;
+        }
+        (r.op == Op::ListComments && flag.load(Ordering::SeqCst))
+            .then(|| Ok(json_reply(500, &json!({"errorMessages": ["down"]}))))
+    });
+    let client = JiraClient::new(backend.clone()).with_settings(fast_settings());
+    let issue = client.create_issue(&task("c")).await.unwrap().key;
+    let k = key(62);
+    fake.fault(FakeOp::AddComment, Fault::StatusAfterCommit(503));
+    let err = client
+        .add_comment_idempotent(&issue, &Adf::text("x"), &k)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        JiraError::OutcomeUnknown {
+            op: Op::AddComment,
+            cause: UnknownCause::ServerError(503),
+            marker: Some(MarkerRef::comment(k.comment_marker())),
+        }
+    );
+    let posts = backend
+        .requests()
+        .iter()
+        .filter(|r| r.op == Op::AddComment)
+        .count();
+    assert_eq!(posts, 1);
 }
