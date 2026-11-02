@@ -216,6 +216,7 @@ text.
 | V95 | ADR 0004 names the crash case of the replay store. | A crash after the keys are stored loses the event (R2-webhook-security-4). | ADR 0004 |
 | V96 | `jira_add_comment` reads at most `COMMENT_LOOKUP_PAGES` (3) comment pages, and its `start_to_close` is 70m (`COMMENT_START_TO_CLOSE`). New `autumn_jira::client::MAX_TRANSPORT_TIMEOUT_SECS` (60), the cap of `timeout_secs`. | The paged lookup of V62 and the cold `GET /myself` did not fit the 42m budget (follow-up of R1-write-safety-9 and R9-test-quality-6). | 7.2, 8.1, 9.2 |
 | V97 | After a maybe-sent transition attempt, every stop off the target is a non-retryable `OutcomeUnknown`. New `JiraClient::resume_transition_to_status(issue, target, cause)`: one status read, no send. | A host retry after a stop with a retryable error started a new call and sent the transition again (R2A-write-safety-1, R2A-write-safety-2). | 4.5, 7.1 |
+| V98 | `Transition::is_global` and `Transition::looped` are `Option<bool>`. The resend rule counts a missing flag as `true`. | A reply with no flag made a global transition look safe to send again (R2A-write-safety-6). | 4.5, 7.1 |
 
 ---
 
@@ -778,7 +779,9 @@ are left after `max_pages`. So `max_pages = 0` reads one page.
 `Transition` (`#[non_exhaustive]`) has `id`, `name`, `to`, `has_screen`,
 `is_global` (`isGlobal`: the transition goes from every status) and
 `looped` (`looped`: the transition goes back to the same status). The
-resend rule of 7.1 reads the last two (V63).
+resend rule of 7.1 reads the last two (V63). Both are `Option<bool>`, and
+`None` means that the reply has no flag. The resend rule counts a missing
+flag as `true`, so it fails closed (V98).
 
 ```rust
 pub struct StatusSummary { pub id: StatusId, pub name: String, pub category: StatusCategoryKey }

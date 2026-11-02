@@ -998,6 +998,8 @@ async fn transition_with_no_is_global_after_maybe_sent_is_not_resent() {
         (r.op == Op::GetTransitions).then(|| Ok(json_reply(200, &bare)))
     });
     let client = JiraClient::new(backend.clone()).with_settings(fast_settings());
+    let list = client.transitions(&issue).await.unwrap();
+    assert_eq!((list[0].is_global, list[0].looped), (None, None));
     // The first attempt does not commit, and its outcome is not known.
     fake.fault(FakeOp::DoTransition, Fault::Timeout);
     let err = client

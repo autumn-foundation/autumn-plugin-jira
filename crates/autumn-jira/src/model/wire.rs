@@ -377,8 +377,8 @@ impl TransitionWire {
                 |to| to.into_model().summary(),
             ),
             has_screen: self.has_screen.unwrap_or(false),
-            is_global: self.is_global.unwrap_or(false),
-            looped: self.looped.unwrap_or(false),
+            is_global: self.is_global,
+            looped: self.looped,
         }
     }
 }

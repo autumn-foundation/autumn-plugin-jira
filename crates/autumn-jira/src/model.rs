@@ -301,9 +301,13 @@ pub struct Transition {
     /// `true` when the transition has a screen.
     pub has_screen: bool,
     /// `isGlobal`: `true` when the transition goes from every status.
-    pub is_global: bool,
+    /// `None` when the reply has no flag. The resend rule then counts the
+    /// transition as global, the safe side.
+    pub is_global: Option<bool>,
     /// `looped`: `true` when the transition goes back to the same status.
-    pub looped: bool,
+    /// `None` when the reply has no flag. The resend rule then counts the
+    /// transition as looped.
+    pub looped: Option<bool>,
 }
 
 /// The id and key of a new issue.

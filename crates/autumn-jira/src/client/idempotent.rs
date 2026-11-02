@@ -419,8 +419,9 @@ impl JiraClient {
                     available: list.iter().map(|t| t.name.clone()).collect(),
                 });
             };
+            // A missing flag counts as `true`: the safe side.
             if let Some(cause) = *unknown
-                && (transition.is_global || transition.looped)
+                && (transition.is_global != Some(false) || transition.looped != Some(false))
             {
                 return Err(transition_unknown(cause));
             }
