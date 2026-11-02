@@ -648,7 +648,11 @@ mod tests {
             let bridge = h.bridge.counters();
             h.stop().await.unwrap();
             let second = second.expect("the watch run ends");
-            assert_eq!(second["wait"]["Reached"]["source"], "Poll", "{second}");
+            // No print of the run output: CodeQL traces the client token into it.
+            assert_eq!(
+                second["wait"]["Reached"]["source"], "Poll",
+                "the watch ends by poll"
+            );
             assert_eq!(bridge.deliveries, 0, "no webhook");
         });
     }
