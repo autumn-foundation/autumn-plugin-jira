@@ -50,12 +50,15 @@ const TOKEN_ENV: &str = "JIRA_API_TOKEN";
 pub fn plugin_for(fake: &FakeJira) -> JiraPlugin {
     // The clones share the state, so this turns on the deliveries of `fake`.
     let fake = fake.clone().with_webhook_secret(TEST_WEBHOOK_SECRET);
-    let mut config = JiraConfig::default();
-    let mut api = ApiTokenConfig::default();
-    api.site = Some(DEFAULT_SITE.to_owned());
-    EMAIL_ENV.clone_into(&mut api.email_env);
-    TOKEN_ENV.clone_into(&mut api.token_env);
-    config.api_token = Some(api);
+    let config = JiraConfig {
+        api_token: Some(ApiTokenConfig {
+            site: Some(DEFAULT_SITE.to_owned()),
+            cloud_id: None,
+            email_env: EMAIL_ENV.to_owned(),
+            token_env: TOKEN_ENV.to_owned(),
+        }),
+        ..JiraConfig::default()
+    };
     JiraPlugin::with_config(config)
         .transport(Arc::new(fake))
         .secret_env(EMAIL_ENV, DEFAULT_EMAIL)
