@@ -316,3 +316,78 @@ async fn a_reconnect_after_discovery_is_seen() {
         .unwrap();
     assert_eq!(conn.metadata["cloudId"], json!(NEW_SITE));
 }
+
+/// R3-webhooks-site-auth-1: a failed check counts as a check. While the
+/// failure lasts, the 401 and 404 replies make at most one
+/// `accessible-resources` call in each interval.
+#[tokio::test(start_paused = true)]
+async fn a_failed_check_waits_for_the_interval() {
+    // Case 1: after the move, no site of the token has the site URL, so
+    // the pick fails.
+    let sites = moving();
+    let san = san_mateo(sites.clone());
+    let metadata = Map::from_iter([("cloudId".to_owned(), json!(DEFAULT_CLOUD_ID))]);
+    let key = oauth_connection(&san, metadata).await;
+    let target = SanMateoTarget::new(ENV, key).site_url("https://acme.atlassian.net");
+    let backend = SanMateoBackend::new(san, target);
+    assert_eq!(backend.send(myself()).await.unwrap().status, 200);
+    move_site(&sites).await;
+    for _ in 0..5 {
+        assert_eq!(backend.send(myself()).await.unwrap().status, 404);
+    }
+    assert_eq!(sites.b.count(FakeOp::AccessibleResources), 1);
+    tokio::time::advance(autumn_jira::backend::CLOUD_ID_RECHECK_INTERVAL).await;
+    assert_eq!(backend.send(myself()).await.unwrap().status, 404);
+    assert_eq!(sites.b.count(FakeOp::AccessibleResources), 2);
+
+    // Case 2: `accessible-resources` answers 503. The next check comes
+    // after the interval, and then it repairs the id.
+    let fake = with_oauth(FakeJira::new());
+    fake.fault(FakeOp::AccessibleResources, Fault::Status(503));
+    let san = san_mateo(Arc::new(fake.clone()));
+    let metadata = Map::from_iter([("cloudId".to_owned(), json!(OLD_SITE))]);
+    let key = oauth_connection(&san, metadata).await;
+    let backend = SanMateoBackend::new(san, SanMateoTarget::new(ENV, key));
+    for _ in 0..3 {
+        assert_eq!(backend.send(myself()).await.unwrap().status, 404);
+    }
+    assert_eq!(fake.count(FakeOp::AccessibleResources), 1);
+    tokio::time::advance(autumn_jira::backend::CLOUD_ID_RECHECK_INTERVAL).await;
+    assert_eq!(backend.send(myself()).await.unwrap().status, 404);
+    assert_eq!(fake.count(FakeOp::AccessibleResources), 2);
+    assert_eq!(backend.send(myself()).await.unwrap().status, 200);
+}
+
+/// R3-webhooks-site-auth-2: an explicit `discover_cloud_id` also resets the
+/// cached prefix. The next request goes to the new cloud id.
+#[tokio::test(start_paused = true)]
+async fn discover_cloud_id_resets_the_cached_prefix() {
+    let sites = moving();
+    let san = san_mateo(sites.clone());
+    let metadata = Map::from_iter([("cloudId".to_owned(), json!(DEFAULT_CLOUD_ID))]);
+    let key = oauth_connection(&san, metadata).await;
+    let backend = SanMateoBackend::new(san, SanMateoTarget::new(ENV, key));
+    assert_eq!(backend.send(myself()).await.unwrap().status, 200);
+    move_site(&sites).await;
+    let id = backend.discover_cloud_id().await.unwrap();
+    assert_eq!(id.as_str(), NEW_SITE);
+    assert_eq!(backend.send(myself()).await.unwrap().status, 200);
+    let last = sites.b.requests().pop().unwrap();
+    assert_eq!(last.path, format!("/ex/jira/{NEW_SITE}/rest/api/3/myself"));
+
+    // A cloud id of the target stays fixed: the discovery stores the id,
+    // and the requests keep the id of the target.
+    let fake = with_oauth(FakeJira::new());
+    let san = san_mateo(Arc::new(fake.clone()));
+    let key = oauth_connection(&san, Map::new()).await;
+    let target =
+        SanMateoTarget::new(ENV, key).cloud_id(autumn_jira::ids::CloudId::parse(OLD_SITE).unwrap());
+    let backend = SanMateoBackend::new(san, target);
+    assert_eq!(backend.send(myself()).await.unwrap().status, 404);
+    assert_eq!(
+        backend.discover_cloud_id().await.unwrap().as_str(),
+        DEFAULT_CLOUD_ID
+    );
+    assert_eq!(backend.send(myself()).await.unwrap().status, 404);
+    assert_eq!(fake.count(FakeOp::Myself), 0);
+}
