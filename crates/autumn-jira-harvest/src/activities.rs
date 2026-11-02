@@ -39,7 +39,7 @@ use crate::failure::{
     OUTCOME_PENDING_ERROR, OUTCOME_UNKNOWN_ERROR, SETTLE_SECS, config_failure, failure_for,
     marked_write_failure, previous_attempt,
 };
-use crate::route::{ROUTES_PROPERTY, RouteKey, SignalRoute, TRACKED_LABEL};
+use crate::route::{ROUTES_PROPERTY, RouteBinding, RouteKey, SignalRoute, TRACKED_LABEL};
 
 /// The name of the activity that reads one issue.
 pub const GET_ISSUE: &str = "jira_get_issue";
@@ -183,8 +183,13 @@ fn field_set(fields: Option<&[FieldId]>) -> FieldSet {
 /// Merges `route` into the route property. `None` when the property has
 /// the entry already, so no PUT is needed. An entry of the same run with
 /// another tag is replaced. Other entries stay.
-fn merge_route(current: Option<&Value>, route: &SignalRoute, key: &RouteKey) -> Option<Value> {
-    let entry = route.property_entry(key);
+fn merge_route(
+    current: Option<&Value>,
+    route: &SignalRoute,
+    key: &RouteKey,
+    binding: &RouteBinding,
+) -> Option<Value> {
+    let entry = route.property_entry(key, binding);
     let mut entries: Vec<Value> = current
         .and_then(|value| value.get("routes"))
         .and_then(Value::as_array)
@@ -314,7 +319,8 @@ impl CreateIssueInput {
         ctx: &ActivityContext,
     ) -> Result<CreateIssueOutput, ActivityFailure> {
         let key = activity_key(ctx)?;
-        let issue = self.new_issue(ctx)?;
+        let marker = key.marker_label(&client.settings().marker_label_prefix);
+        let issue = self.new_issue(ctx, marker)?;
         let settle = settle(self.settle_secs);
         if !host_may_send(previous_attempt(ctx), self.resend_after_negative_lookup) {
             return match client.find_by_idempotency_key(&self.project, &key).await {
@@ -334,8 +340,14 @@ impl CreateIssueInput {
         }
     }
 
-    /// Builds the create body, with the route when there is one.
-    fn new_issue(&self, ctx: &ActivityContext) -> Result<NewIssue, ActivityFailure> {
+    /// Builds the create body, with the route when there is one. The route
+    /// tag binds `marker`: the marker label that the client adds to the
+    /// create body (R2F-fixcheck-a-3).
+    fn new_issue(
+        &self,
+        ctx: &ActivityContext,
+        marker: String,
+    ) -> Result<NewIssue, ActivityFailure> {
         let mut issue = NewIssue::new(
             self.project.clone(),
             self.issue_type.clone(),
@@ -353,9 +365,10 @@ impl CreateIssueInput {
         }
         if let Some(route) = &self.route {
             let key = route_key(ctx)?;
+            let binding = RouteBinding::MarkerLabel(marker);
             issue = issue.labels([TRACKED_LABEL]).property(
                 ROUTES_PROPERTY,
-                json!({"routes": [route.property_entry(key)]}),
+                json!({"routes": [route.property_entry(key, &binding)]}),
             );
         }
         Ok(issue)
@@ -905,7 +918,9 @@ impl WatchIssueInput {
             .get_issue_property(self.issue.clone(), ROUTES_PROPERTY)
             .await
             .map_err(|e| failure_for(&e))?;
-        if let Some(merged) = merge_route(current.as_ref(), &self.route, key) {
+        // The tag binds the id of the issue that the watch read.
+        let binding = RouteBinding::Issue(issue.id.clone());
+        if let Some(merged) = merge_route(current.as_ref(), &self.route, key, &binding) {
             client
                 .set_issue_property(self.issue.clone(), ROUTES_PROPERTY, &merged)
                 .await

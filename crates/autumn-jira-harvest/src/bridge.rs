@@ -1,11 +1,12 @@
 //! The webhook-to-signal bridge (plan 9.4).
 //!
 //! [`HarvestSignalBridge`] is an [`EventSink`]. For a delivery that needs
-//! routing, the bridge reads the route property of the issue. It checks the
-//! tag and the allowlist of each route. Then it reads the status of the
-//! issue and sends [`SIGNAL`] to the run with `send_signal_idempotent`. The delivery
-//! id is the idempotency key, so a repeated delivery gives one signal.
-//! Webhooks are at least once.
+//! routing, the bridge reads the route property of the issue. Then it reads
+//! the status, the id and the labels of the issue. It checks the tag of
+//! each route against that issue, and the allowlist. It sends [`SIGNAL`] to
+//! the run with `send_signal_idempotent`. The delivery id is the
+//! idempotency key, so a repeated delivery gives one signal. Webhooks are at
+//! least once.
 //!
 //! Two sites can have the same issue id, and one webhook secret can serve
 //! two sites by mistake. So the bridge does not trust the payload for the
@@ -34,12 +35,13 @@ use autumn_harvest::signal::send_signal_idempotent;
 use autumn_harvest::worker::DbPool;
 use autumn_jira::backend::{BackendInfo, BackendMode};
 use autumn_jira::ids::{FieldId, SiteHost};
+use autumn_jira::model::Issue;
 use autumn_jira::request::FieldSet;
 use autumn_jira::{Delivery, EventSink, HandlerError, IssueId, JiraClient, JiraEvent};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::route::{ROUTES_PROPERTY, RouteKey, SignalRoute, TRACKED_LABEL};
+use crate::route::{ROUTES_PROPERTY, RouteBinding, RouteKey, SignalRoute, TRACKED_LABEL};
 use crate::wait::{IssueSignal, SIGNAL};
 
 /// The result of one route of one delivery.
@@ -135,6 +137,7 @@ pub struct HarvestSignalBridge {
     site: Option<SiteHost>,
     key: RouteKey,
     allowed: BTreeSet<String>,
+    accept_v1: bool,
     counters: Arc<Counters>,
 }
 
@@ -145,6 +148,7 @@ impl fmt::Debug for HarvestSignalBridge {
             .field("site", &self.site)
             .field("key", &self.key)
             .field("allowed", &self.allowed)
+            .field("accept_v1", &self.accept_v1)
             .field("counters", &self.counters.snapshot())
             .finish_non_exhaustive()
     }
@@ -166,6 +170,7 @@ impl HarvestSignalBridge {
             site,
             key,
             allowed: BTreeSet::new(),
+            accept_v1: false,
             counters: Arc::default(),
         }
     }
@@ -185,6 +190,19 @@ impl HarvestSignalBridge {
     #[must_use]
     pub fn site_host(mut self, host: SiteHost) -> Self {
         self.site = Some(host);
+        self
+    }
+
+    /// Opt-in for an upgrade: the bridge also takes a v1 tag.
+    ///
+    /// A v1 tag binds the run, not the issue. A person who can edit issue
+    /// properties can copy a v1 entry to another issue. Then each status
+    /// change of that issue signals the run (R2F-fixcheck-a-3). A run
+    /// that started before the upgrade has only v1 entries. Turn this on
+    /// until those runs end, then turn it off.
+    #[must_use]
+    pub const fn accept_unbound_v1_tags(mut self) -> Self {
+        self.accept_v1 = true;
         self
     }
 
@@ -240,8 +258,8 @@ impl HarvestSignalBridge {
         }
     }
 
-    /// Steps 1 to 6 of plan 9.4. The issue read comes only after a route
-    /// passes its checks, so a forged route makes no extra call.
+    /// Steps 1 to 6 of plan 9.4. The tag binds the issue, so the issue read
+    /// comes before the tag check. A forged route makes no database call.
     async fn route_inner(&self, delivery: &Delivery) -> Result<Vec<RouteOutcome>, HandlerError> {
         let event = &delivery.event;
         let Some(issue) = event.issue().filter(|_| wants(event)) else {
@@ -263,15 +281,21 @@ impl HarvestSignalBridge {
         else {
             return Ok(Vec::new());
         };
-        let routes = routes_from_property(&property, &self.key, &self.allowed);
-        let signal = if routes
+        if route_entries(&property).is_empty() {
+            return Ok(Vec::new());
+        }
+        let (current, bindings) = self.read_issue(&issue.id).await?;
+        let routes = routes_from_property(
+            &property,
+            &self.key,
+            &self.allowed,
+            &bindings,
+            self.accept_v1,
+        );
+        let signal = routes
             .iter()
             .any(|(_, checked)| *checked == RouteOutcome::Signalled)
-        {
-            Some(self.read_signal(delivery, &issue.id).await?)
-        } else {
-            None
-        };
+            .then(|| signal_of(delivery, &current));
         let payload = signal
             .as_ref()
             .map(serde_json::to_value)
@@ -297,26 +321,33 @@ impl HarvestSignalBridge {
         Ok(outcomes)
     }
 
-    /// Makes the signal of a delivery. The status and the key come from a
-    /// read of the issue on the site of the client, not from the payload.
-    async fn read_signal(
+    /// Reads the status and the labels of the issue on the site of the
+    /// client. Returns the issue and the bindings that a tag can have on it:
+    /// its id and each of its labels.
+    async fn read_issue(
         &self,
-        delivery: &Delivery,
         issue_id: &IssueId,
-    ) -> Result<IssueSignal, HandlerError> {
-        let fields = FieldSet::new(FieldId::parse("status").ok());
+    ) -> Result<(Issue, Vec<RouteBinding>), HandlerError> {
+        let fields = FieldSet::new(
+            ["status", "labels"]
+                .into_iter()
+                .filter_map(|f| FieldId::parse(f).ok()),
+        );
         let current = self
             .client
             .get_issue_with(issue_id.clone(), &fields)
             .await?;
-        Ok(IssueSignal {
-            delivery_id: delivery.meta.id.clone(),
-            event: delivery.event.name().to_owned(),
-            issue_id: current.id.clone(),
-            issue_key: Some(current.key.clone()),
-            status: current.status(),
-            timestamp_ms: delivery.timestamp.map(|t| t.epoch_ms()),
-        })
+        let bindings = std::iter::once(RouteBinding::Issue(current.id.clone()))
+            .chain(
+                current
+                    .fields
+                    .labels
+                    .iter()
+                    .cloned()
+                    .map(RouteBinding::MarkerLabel),
+            )
+            .collect();
+        Ok((current, bindings))
     }
 
     /// Steps 5 and 6: resolve the run and send the signal once for the
@@ -369,6 +400,19 @@ fn client_host(info: &BackendInfo) -> Option<SiteHost> {
     SiteHost::parse(&info.site).ok()
 }
 
+/// Makes the signal of a delivery. The status and the key come from a read
+/// of the issue on the site of the client, not from the payload.
+fn signal_of(delivery: &Delivery, current: &Issue) -> IssueSignal {
+    IssueSignal {
+        delivery_id: delivery.meta.id.clone(),
+        event: delivery.event.name().to_owned(),
+        issue_id: current.id.clone(),
+        issue_key: Some(current.key.clone()),
+        status: current.status(),
+        timestamp_ms: delivery.timestamp.map(|t| t.epoch_ms()),
+    }
+}
+
 /// Adds one to a counter.
 fn bump(counter: &AtomicU64) {
     counter.fetch_add(1, Ordering::Relaxed);
@@ -416,6 +460,10 @@ pub fn wants(event: &JiraEvent) -> bool {
 
 /// Pure: the routes in a property value, kept only when allowed and the tag verifies.
 ///
+/// `bindings` are the bindings of the issue that the bridge read: its id
+/// and its labels. A v2 tag verifies when it is the tag of one of them. A
+/// v1 tag binds no issue, so it verifies only with `accept_v1`.
+///
 /// Each item is a route and the result of its checks:
 ///
 /// - [`RouteOutcome::BadTag`]: the tag does not verify. This check comes
@@ -434,7 +482,32 @@ pub fn routes_from_property(
     value: &Value,
     key: &RouteKey,
     allowed: &BTreeSet<String>,
+    bindings: &[RouteBinding],
+    accept_v1: bool,
 ) -> Vec<(SignalRoute, RouteOutcome)> {
+    route_entries(value)
+        .into_iter()
+        .map(|(route, tag)| {
+            let verified = bindings
+                .iter()
+                .any(|binding| route.verify(key, binding, tag))
+                || (accept_v1 && route.verify_v1(key, tag));
+            let outcome = if !verified {
+                RouteOutcome::BadTag
+            } else if !allowed.contains(&route.workflow_name) {
+                RouteOutcome::NotAllowed
+            } else {
+                RouteOutcome::Signalled
+            };
+            (route, outcome)
+        })
+        .collect()
+}
+
+/// The route entries of a property value, with their tag text. An entry
+/// with no `wf`, `id` or `tag` string, or with a bad name or id, is left
+/// out.
+fn route_entries(value: &Value) -> Vec<(SignalRoute, &str)> {
     let Some(entries) = value.get("routes").and_then(Value::as_array) else {
         return Vec::new();
     };
@@ -444,15 +517,7 @@ pub fn routes_from_property(
             let name = entry.get("wf")?.as_str()?;
             let id = entry.get("id")?.as_str()?;
             let tag = entry.get("tag")?.as_str()?;
-            let route = SignalRoute::new(name, id).ok()?;
-            let outcome = if !route.verify(key, tag) {
-                RouteOutcome::BadTag
-            } else if !allowed.contains(&route.workflow_name) {
-                RouteOutcome::NotAllowed
-            } else {
-                RouteOutcome::Signalled
-            };
-            Some((route, outcome))
+            Some((SignalRoute::new(name, id).ok()?, tag))
         })
         .collect()
 }
@@ -502,36 +567,69 @@ mod tests {
         assert!(!wants(&event(&json!({"webhookEvent": "sprint_started"}))));
     }
 
+    fn bindings() -> Vec<RouteBinding> {
+        vec![
+            RouteBinding::Issue(IssueId::parse("99291").unwrap()),
+            RouteBinding::MarkerLabel("autumn-tracked".into()),
+            RouteBinding::MarkerLabel("autumn-idem-x".into()),
+        ]
+    }
+
     #[test]
     fn routes_need_tag_and_allowlist() {
         let key = key();
+        let issue = RouteBinding::Issue(IssueId::parse("99291").unwrap());
+        let marker = RouteBinding::MarkerLabel("autumn-idem-x".into());
         let good = SignalRoute::new("incident_flow", "A-1").unwrap();
         let other = SignalRoute::new("other_flow", "B-2").unwrap();
         let forged = SignalRoute::new("incident_flow", "A-9").unwrap();
         let allowed: BTreeSet<String> = ["incident_flow".to_owned()].into();
         let value = json!({"routes": [
-            good.property_entry(&key),
-            other.property_entry(&key),
-            {"wf": "incident_flow", "id": "A-9", "tag": good.tag(&key)},
+            good.property_entry(&key, &issue),
+            other.property_entry(&key, &marker),
+            {"wf": "incident_flow", "id": "A-9", "tag": good.tag(&key, &issue)},
             {"wf": "incident_flow", "id": "A-1"},
-            {"wf": "a b", "id": "A-1", "tag": good.tag(&key)},
-            {"wf": 7, "id": "A-1", "tag": good.tag(&key)},
+            {"wf": "a b", "id": "A-1", "tag": good.tag(&key, &issue)},
+            {"wf": 7, "id": "A-1", "tag": good.tag(&key, &issue)},
             "not an object"
         ]});
         assert_eq!(
-            routes_from_property(&value, &key, &allowed),
+            routes_from_property(&value, &key, &allowed, &bindings(), false),
             vec![
-                (good, RouteOutcome::Signalled),
+                (good.clone(), RouteOutcome::Signalled),
                 (other, RouteOutcome::NotAllowed),
                 (forged, RouteOutcome::BadTag),
             ]
         );
+        // A copy on another issue: no binding of that issue verifies.
+        let elsewhere = [
+            RouteBinding::Issue(IssueId::parse("99292").unwrap()),
+            RouteBinding::MarkerLabel("autumn-tracked".into()),
+        ];
+        assert!(
+            routes_from_property(&value, &key, &allowed, &elsewhere, false)
+                .iter()
+                .all(|(_, outcome)| *outcome == RouteOutcome::BadTag)
+        );
+        // A v1 tag verifies only with the opt-in.
+        let v1 = json!({"routes": [
+            {"wf": "incident_flow", "id": "A-1", "tag": "df60e928addb470f158ced8d9f527e82"}
+        ]});
+        assert_eq!(
+            routes_from_property(&v1, &key, &allowed, &bindings(), false),
+            vec![(good.clone(), RouteOutcome::BadTag)]
+        );
+        assert_eq!(
+            routes_from_property(&v1, &key, &allowed, &[], true),
+            vec![(good, RouteOutcome::Signalled)]
+        );
         // An empty allowlist allows no name. A bad tag is still a bad tag.
         let none = BTreeSet::new();
-        let outcomes: Vec<RouteOutcome> = routes_from_property(&value, &key, &none)
-            .into_iter()
-            .map(|(_, outcome)| outcome)
-            .collect();
+        let outcomes: Vec<RouteOutcome> =
+            routes_from_property(&value, &key, &none, &bindings(), false)
+                .into_iter()
+                .map(|(_, outcome)| outcome)
+                .collect();
         assert_eq!(
             outcomes,
             vec![
@@ -543,12 +641,15 @@ mod tests {
         // Another key makes every tag bad.
         let other_key = RouteKey::new(Secret::new("j".repeat(32))).unwrap();
         assert!(
-            routes_from_property(&value, &other_key, &allowed)
+            routes_from_property(&value, &other_key, &allowed, &bindings(), true)
                 .iter()
                 .all(|(_, outcome)| *outcome == RouteOutcome::BadTag)
         );
         for empty in [json!(null), json!({}), json!({"routes": {}}), json!([])] {
-            assert_eq!(routes_from_property(&empty, &key, &allowed), vec![]);
+            assert_eq!(
+                routes_from_property(&empty, &key, &allowed, &bindings(), true),
+                vec![]
+            );
         }
     }
 
@@ -604,15 +705,17 @@ mod tests {
         }
         let bridge = include_str!("bridge.rs");
         let code = bridge.split("#[cfg(test)]").next().unwrap();
-        assert!(code.contains("route.verify(key, tag)"));
+        assert!(code.contains("route.verify(key, binding, tag)"));
+        assert!(code.contains("route.verify_v1(key, tag)"));
         assert!(!code.contains("tag =="));
         assert!(!code.contains("== tag"));
         // The behaviour: a tag that differs in one char fails.
         let route = SignalRoute::new("incident_flow", "A-1").unwrap();
-        let tag = route.tag(&key());
+        let binding = RouteBinding::MarkerLabel("autumn-idem-x".into());
+        let tag = route.tag(&key(), &binding);
         let mut flipped = tag.clone().into_bytes();
         flipped[0] = if flipped[0] == b'a' { b'b' } else { b'a' };
-        assert!(!route.verify(&key(), std::str::from_utf8(&flipped).unwrap()));
-        assert!(route.verify(&key(), &tag));
+        assert!(!route.verify(&key(), &binding, std::str::from_utf8(&flipped).unwrap()));
+        assert!(route.verify(&key(), &binding, &tag));
     }
 }

@@ -43,9 +43,9 @@ use autumn_jira_harvest::activities::{
 use autumn_jira_harvest::{
     AddCommentInput, CONFIG_ERROR, ClientRef, CreateIssueInput, CreateIssueOutput, CreateKind,
     DeleteIssueInput, DeleteKind, ERROR_PREFIX, EditIssueInput, GetIssueInput, JiraClients,
-    OUTCOME_PENDING_ERROR, OUTCOME_UNKNOWN_ERROR, ROUTES_PROPERTY, RouteKey, SETTLE_SECS,
-    SearchPageInput, SignalRoute, TRACKED_LABEL, TransitionInput, TransitionKind, WatchIssueInput,
-    activities, client_for, failure_for, jira_create_issue_info,
+    OUTCOME_PENDING_ERROR, OUTCOME_UNKNOWN_ERROR, ROUTES_PROPERTY, RouteBinding, RouteKey,
+    SETTLE_SECS, SearchPageInput, SignalRoute, TRACKED_LABEL, TransitionInput, TransitionKind,
+    WatchIssueInput, activities, client_for, failure_for, jira_create_issue_info,
 };
 use serde_json::{Value, json};
 
@@ -727,15 +727,20 @@ async fn create_with_a_route_tracks_the_issue_in_one_call() {
     let mut input = create_input();
     let route = SignalRoute::new("incident_flow", "incident:A-1").unwrap();
     input.route = Some(route.clone());
-    let made = input.run(&client, &first_ctx()).await.unwrap();
+    let ctx = first_ctx();
+    let made = input.run(&client, &ctx).await.unwrap();
     let issue = fake.issue(made.key.as_str()).unwrap();
     let labels = issue["fields"]["labels"].as_array().unwrap();
     assert!(labels.contains(&json!(TRACKED_LABEL)), "{labels:?}");
     assert!(labels.contains(&json!("ops")), "{labels:?}");
+    // The tag binds the marker label of the create (R2F-fixcheck-a-3).
+    let key = autumn_jira::IdempotencyKey::parse(ctx.idempotency_key().unwrap().as_str()).unwrap();
+    let marker = key.marker_label("autumn-idem-");
+    assert!(labels.contains(&json!(marker)), "{labels:?}");
     let property = &issue["properties"][ROUTES_PROPERTY];
     assert_eq!(
         property,
-        &json!({"routes": [route.property_entry(&route_key())]})
+        &json!({"routes": [route.property_entry(&route_key(), &RouteBinding::MarkerLabel(marker))]})
     );
     assert_eq!(fake.count(FakeOp::SetProperty), 0, "no second call");
 
@@ -895,6 +900,8 @@ async fn watch_is_idempotent() {
     let ctx = first_ctx();
 
     let first = watch.run(&client, &ctx).await.unwrap();
+    // The tag binds the issue id (R2F-fixcheck-a-3).
+    let bound = RouteBinding::Issue(first.issue.id.clone());
     assert_eq!(first.issue.key, key);
     assert_eq!(first.issue.status.as_ref().unwrap().name, "To Do");
     assert!(first.issue.labels.contains(&TRACKED_LABEL.to_owned()));
@@ -925,7 +932,7 @@ async fn watch_is_idempotent() {
     );
     assert_eq!(
         issue["properties"][ROUTES_PROPERTY],
-        json!({"routes": [route.property_entry(&route_key())]})
+        json!({"routes": [route.property_entry(&route_key(), &bound)]})
     );
 
     // A second route merges. The first route stays.
@@ -937,7 +944,7 @@ async fn watch_is_idempotent() {
     let issue = fake.issue(key.as_str()).unwrap();
     assert_eq!(
         issue["properties"][ROUTES_PROPERTY],
-        json!({"routes": [route.property_entry(&route_key()), other.property_entry(&route_key())]})
+        json!({"routes": [route.property_entry(&route_key(), &bound), other.property_entry(&route_key(), &bound)]})
     );
     // A stale tag of the same route is replaced, not kept twice.
     client
@@ -952,7 +959,7 @@ async fn watch_is_idempotent() {
     let issue = fake.issue(key.as_str()).unwrap();
     assert_eq!(
         issue["properties"][ROUTES_PROPERTY],
-        json!({"routes": [route.property_entry(&route_key())]})
+        json!({"routes": [route.property_entry(&route_key(), &bound)]})
     );
 
     // No route key in the state: a config error.

@@ -2076,11 +2076,14 @@ pub struct SignalRoute { pub workflow_name: String, pub workflow_id: String }
 impl SignalRoute {
     /// Each part: 1..=200 chars of [A-Za-z0-9._:-] (no space, R5).
     pub fn new(workflow_name: &str, workflow_id: &str) -> Result<Self, JiraError>;
-    /// HMAC-SHA256(key, "v1\n" + name + "\n" + id), first 32 lower hex chars.
-    pub fn tag(&self, key: &RouteKey) -> String;
-    pub fn verify(&self, key: &RouteKey, tag: &str) -> bool;   // constant time
-    pub fn property_entry(&self, key: &RouteKey) -> Value;     // {"wf", "id", "tag"}
+    /// v2: HMAC-SHA256(key, "v2\n" + name + "\n" + id + "\n" + kind + "\n" + value),
+    /// first 32 lower hex chars. kind is "label" or "issue" (R2F-fixcheck-a-3).
+    pub fn tag(&self, key: &RouteKey, binding: &RouteBinding) -> String;
+    pub fn verify(&self, key: &RouteKey, binding: &RouteBinding, tag: &str) -> bool;   // constant time
+    pub fn property_entry(&self, key: &RouteKey, binding: &RouteBinding) -> Value;     // {"wf", "id", "tag"}
 }
+/// The issue that a v2 tag binds.
+pub enum RouteBinding { MarkerLabel(String), Issue(IssueId) }
 pub const MIN_ROUTE_KEY_BYTES: usize = 32;
 pub const TAG_LEN: usize = 32;
 pub const MAX_ROUTE_PART: usize = 200;
@@ -2090,7 +2093,9 @@ pub const TRACKED_LABEL: &str = "autumn-tracked";
 
 `jira_create_issue` with a route: the create body gets label
 `autumn-tracked` and property `autumn-jira-routes` (one route with its tag),
-so no second call is needed. The activity reads `RouteKey` from
+so no second call is needed. The tag binds the marker label of the create
+(`RouteBinding::MarkerLabel`). The client knows that label before the POST.
+`jira_watch_issue` binds the issue id that it reads (`RouteBinding::Issue`). The activity reads `RouteKey` from
 `ctx.state::<RouteKey>()`; none with a route gives `jira.config`.
 
 ### 9.3 The durable wait
@@ -2211,6 +2216,7 @@ impl HarvestSignalBridge {
     pub fn new(pool: autumn_harvest::worker::DbPool, client: JiraClient, key: RouteKey) -> Self;   // [V DbPool]; a subdomain client gives the site host
     #[must_use] pub fn allow_workflow(self, workflow_name: &str) -> Self;   // allowlist; empty = none
     #[must_use] pub fn site_host(self, host: SiteHost) -> Self;   // the site host for a san-mateo or cloud id client
+    #[must_use] pub const fn accept_unbound_v1_tags(self) -> Self;   // opt-in for an upgrade: v1 tags bind no issue
     pub fn counters(&self) -> BridgeCounters;
     /// The core of `deliver`, with an outcome per route, for tests.
     pub async fn route(&self, delivery: &Delivery) -> Result<Vec<RouteOutcome>, HandlerError>;
@@ -2227,7 +2233,10 @@ pub fn wants(event: &JiraEvent) -> bool;
 /// `Signalled` means "passes both checks; to signal" (V42). `BadTag` and
 /// `NotAllowed` are the rejects. The tag check comes first. A malformed entry
 /// (no wf, id or tag string, or a name that breaks R5) is left out.
-pub fn routes_from_property(value: &Value, key: &RouteKey, allowed: &BTreeSet<String>) -> Vec<(SignalRoute, RouteOutcome)>;
+/// `bindings`: the id and the labels of the issue that the bridge read. A v1
+/// tag verifies only with `accept_v1`.
+pub fn routes_from_property(value: &Value, key: &RouteKey, allowed: &BTreeSet<String>,
+    bindings: &[RouteBinding], accept_v1: bool) -> Vec<(SignalRoute, RouteOutcome)>;
 ```
 
 `deliver` steps:
@@ -2243,15 +2252,15 @@ pub fn routes_from_property(value: &Value, key: &RouteKey, allowed: &BTreeSet<St
    consistent GET, G10). A `JiraError` gives `HandlerError::from(err)`. A
    404 (no routes) gives `Ok` with nothing to route. A delivery with no
    outcomes counts as `skipped`.
-4. For each route: tag check in constant time (forged: `BadTag`, counted,
-   `warn`, no DB call, B10). Not in the allowlist: `NotAllowed`.
-4a. Status read (V88): when a route passes both checks, the bridge reads
-   the issue (`fields=status`) on the site of its own client. The signal
-   gets that status and key, not the payload values. A delivery does not
-   name its Jira site, and two sites can have the same issue id. So a
-   delivery of site B cannot give a wait on site A a false status. The
-   cost is one GET for each routed delivery. A forged route makes no
-   extra call.
+4. Issue read (V88, R2F-fixcheck-a-3): when the property has a route
+   entry, the bridge reads the issue (`fields=status,labels`) on the site of
+   its own client. Two sites can have the same issue id. So a delivery of
+   site B cannot give a wait on site A a false status. The cost is one GET
+   for each routed delivery.
+4a. For each route: tag check in constant time against the id and the
+   labels of the read issue (forged or copied: `BadTag`, counted, `warn`,
+   no DB call, B10). Not in the allowlist: `NotAllowed`. The signal gets the
+   status and key of the read, not the payload values.
 5. `resolve_execution_id_by_workflow_id(conn, name, id)` [V]. `None`:
    `NoRun`. `ResolvedRun.state` terminal: `Finished`.
 6. `signal::send_signal_idempotent(conn, exec_id, SIGNAL, payload,
@@ -2268,14 +2277,13 @@ pub fn routes_from_property(value: &Value, key: &RouteKey, allowed: &BTreeSet<St
    lookup. The workflow checks `issue_id` in each signal, so a route on
    another issue cannot move a workflow. One bridge serves one site: give
    each site its own webhook endpoint, secret and bridge (V88).
-9. Route tag scope (V89): the tag binds the run (workflow name and id),
-   not the issue. The create puts the route property in the create body,
-   and Jira gives the issue id only after that call, so a tag with the
-   issue id needs a second PUT. A copied route entry on another issue can
-   therefore make signals for the run. The bounds: the wait checks
-   `issue_id`, the bridge reads the status from its site, and
-   `MAX_SIGNAL_ROUNDS` bounds the rounds. A v2 tag with a PUT after the
-   create is an open decision for the lead.
+9. Route tag scope (V89, R2F-fixcheck-a-3): a v2 tag binds the run and the
+   issue. A create binds its marker label, which is known before the POST,
+   so no second PUT is necessary. A watch binds the issue id. A copied
+   entry on another issue gives `BadTag`. Limit: a person who copies the
+   entry together with the marker label is not seen. A v1 tag binds the run
+   only. The bridge refuses it unless the app calls
+   `accept_unbound_v1_tags` for an upgrade.
 10. Ignored actors (V71): register the bridge with
    `JiraPlugin::sink_for_all_actors` when the app moves issues with an
    account in `ignore_actor_account_ids`. Else a status change by that

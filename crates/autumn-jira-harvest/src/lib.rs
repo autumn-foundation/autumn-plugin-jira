@@ -47,7 +47,7 @@ pub use failure::{
     CONFIG_ERROR, ERROR_PREFIX, INVALID_INPUT_ERROR, OUTCOME_PENDING_ERROR, OUTCOME_UNKNOWN_ERROR,
     SETTLE_SECS, WORKFLOW_ERROR, failure_for, previous_attempt,
 };
-pub use route::{ROUTES_PROPERTY, RouteKey, SignalRoute, TRACKED_LABEL};
+pub use route::{ROUTES_PROPERTY, RouteBinding, RouteKey, SignalRoute, TRACKED_LABEL};
 pub use wait::{
     IssueSignal, LAST_READ_MARGIN, MAX_POLL_ROUNDS, MAX_SIGNAL_ROUNDS, MAX_WAIT, SIGNAL,
     StatusWait, WaitOptions, WaitSource, await_issue_status, drain_jira_signals,

@@ -36,8 +36,8 @@ use autumn_jira::{
 };
 use autumn_jira_fake::{ANN, DEFAULT_API_TOKEN, DEFAULT_EMAIL, FakeJira, FakeOp, Fault};
 use autumn_jira_harvest::{
-    HarvestSignalBridge, IssueSignal, ROUTES_PROPERTY, RouteKey, RouteOutcome, SIGNAL, SignalRoute,
-    TRACKED_LABEL,
+    HarvestSignalBridge, IssueSignal, ROUTES_PROPERTY, RouteBinding, RouteKey, RouteOutcome,
+    SIGNAL, SignalRoute, TRACKED_LABEL,
 };
 use serde_json::{Value, json};
 use tokio::sync::OnceCell;
@@ -117,6 +117,14 @@ fn fake() -> FakeJira {
     FakeJira::new().with_webhook_secret(WEBHOOK_SECRET)
 }
 
+/// The marker label of each issue that `tracked_issue` makes.
+const TEST_MARKER: &str = "autumn-idem-bridge-test";
+
+/// The binding of the route entries of `tracked_issue`: its marker label.
+fn test_binding() -> RouteBinding {
+    RouteBinding::MarkerLabel(TEST_MARKER.to_owned())
+}
+
 /// Makes a tracked issue with these route entries, and drops its deliveries.
 async fn tracked_issue(fake: &FakeJira, entries: Vec<Value>) -> IssueKey {
     tracked_issue_on(fake, "acme", entries).await
@@ -129,7 +137,7 @@ async fn tracked_issue_on(fake: &FakeJira, site: &str, entries: Vec<Value>) -> I
         IssueTypeRef::Name("Task".into()),
         "Disk full",
     )
-    .labels([TRACKED_LABEL])
+    .labels([TRACKED_LABEL, TEST_MARKER])
     .property(ROUTES_PROPERTY, json!({"routes": entries}));
     let created = client_on(fake, site).create_issue(&issue).await.unwrap();
     let _ = fake.take_deliveries();
@@ -189,7 +197,11 @@ async fn duplicate_delivery_gives_one_signal() {
     let started = start_run(&pool, &url, &workflow_id).await;
     let fake = fake();
     let route = SignalRoute::new(WORKFLOW, &workflow_id).unwrap();
-    let key = tracked_issue(&fake, vec![route.property_entry(&route_key())]).await;
+    let key = tracked_issue(
+        &fake,
+        vec![route.property_entry(&route_key(), &test_binding())],
+    )
+    .await;
     let delivery = status_change(&fake, &key);
     let bridge = make_bridge(pool.clone(), &fake);
 
@@ -232,7 +244,11 @@ async fn missing_run_is_skipped() {
     migrated(&url).await;
     let fake = fake();
     let route = SignalRoute::new(WORKFLOW, &format!("incident:{}", nonce())).unwrap();
-    let key = tracked_issue(&fake, vec![route.property_entry(&route_key())]).await;
+    let key = tracked_issue(
+        &fake,
+        vec![route.property_entry(&route_key(), &test_binding())],
+    )
+    .await;
     let delivery = status_change(&fake, &key);
     let bridge = make_bridge(pool(&url), &fake);
     assert_eq!(
@@ -258,7 +274,11 @@ async fn finished_run_is_skipped() {
         .unwrap();
     let fake = fake();
     let route = SignalRoute::new(WORKFLOW, &workflow_id).unwrap();
-    let key = tracked_issue(&fake, vec![route.property_entry(&route_key())]).await;
+    let key = tracked_issue(
+        &fake,
+        vec![route.property_entry(&route_key(), &test_binding())],
+    )
+    .await;
     let delivery = status_change(&fake, &key);
     let bridge = make_bridge(pool.clone(), &fake);
     assert_eq!(
@@ -278,7 +298,11 @@ async fn finished_run_is_skipped() {
 async fn db_error_is_transient() {
     let fake = fake();
     let route = SignalRoute::new(WORKFLOW, "incident:closed-db").unwrap();
-    let key = tracked_issue(&fake, vec![route.property_entry(&route_key())]).await;
+    let key = tracked_issue(
+        &fake,
+        vec![route.property_entry(&route_key(), &test_binding())],
+    )
+    .await;
     let delivery = status_change(&fake, &key);
     let bridge = make_bridge(pool(CLOSED_URL), &fake);
     let err = bridge.route(&delivery).await.unwrap_err();
@@ -307,8 +331,12 @@ async fn forged_tag_makes_no_db_call() {
     let fake = fake();
     let good = SignalRoute::new(WORKFLOW, "incident:A-1").unwrap();
     let other = SignalRoute::new("other_flow", "B-2").unwrap();
-    let forged = json!({"wf": WORKFLOW, "id": "incident:A-9", "tag": good.tag(&route_key())});
-    let key = tracked_issue(&fake, vec![forged, other.property_entry(&route_key())]).await;
+    let forged = json!({"wf": WORKFLOW, "id": "incident:A-9", "tag": good.tag(&route_key(), &test_binding())});
+    let key = tracked_issue(
+        &fake,
+        vec![forged, other.property_entry(&route_key(), &test_binding())],
+    )
+    .await;
     let delivery = status_change(&fake, &key);
     // Each DB call on this pool fails, so Ok means no DB call.
     let bridge = make_bridge(pool(CLOSED_URL), &fake);
@@ -367,7 +395,11 @@ async fn a_delivery_of_another_site_gives_the_status_of_this_site() {
     let site_a = fake();
     let site_b = fake();
     let route = SignalRoute::new(WORKFLOW, &workflow_id).unwrap();
-    let ours = tracked_issue(&site_a, vec![route.property_entry(&route_key())]).await;
+    let ours = tracked_issue(
+        &site_a,
+        vec![route.property_entry(&route_key(), &test_binding())],
+    )
+    .await;
     let theirs = tracked_issue(&site_b, vec![]).await;
     let our_id = client(&site_a).get_issue(ours.clone()).await.unwrap().id;
     let their_id = client(&site_b).get_issue(theirs.clone()).await.unwrap().id;
@@ -398,8 +430,17 @@ async fn a_delivery_of_another_site_is_refused() {
     let site_a = fake();
     let site_b = fake().with_site("beta", "22222222-2222-4333-8444-555555555555");
     let route = SignalRoute::new(WORKFLOW, "incident:other-site").unwrap();
-    let ours = tracked_issue(&site_a, vec![route.property_entry(&route_key())]).await;
-    let theirs = tracked_issue_on(&site_b, "beta", vec![route.property_entry(&route_key())]).await;
+    let ours = tracked_issue(
+        &site_a,
+        vec![route.property_entry(&route_key(), &test_binding())],
+    )
+    .await;
+    let theirs = tracked_issue_on(
+        &site_b,
+        "beta",
+        vec![route.property_entry(&route_key(), &test_binding())],
+    )
+    .await;
     let delivery = status_change(&site_b, &theirs);
     assert_eq!(
         delivery.site().map(SiteHost::as_str),
@@ -431,7 +472,11 @@ async fn a_delivery_of_another_site_is_refused() {
     // A bridge with an explicit site host: a san-mateo client does not
     // tell its host, so the app gives it. A delivery of acme is then
     // another site.
-    let fresh = tracked_issue(&site_a, vec![route.property_entry(&route_key())]).await;
+    let fresh = tracked_issue(
+        &site_a,
+        vec![route.property_entry(&route_key(), &test_binding())],
+    )
+    .await;
     let ours_delivery = status_change(&site_a, &fresh);
     let beta = make_bridge(pool(CLOSED_URL), &site_a)
         .site_host(SiteHost::parse("beta.atlassian.net").unwrap());
