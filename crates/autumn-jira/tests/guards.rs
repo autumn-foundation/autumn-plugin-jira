@@ -860,6 +860,36 @@ mod check {
             .collect()
     }
 
+    /// The manifest of a `cargo update` in a shell line, or `None`. The
+    /// update can come after `&&`, `||`, `;` or `|`, and can follow a `cd`.
+    /// Both `--manifest-path p` and `--manifest-path=p` name the manifest
+    /// (R2E-tests-guards-8).
+    fn updated_manifest(line: &str, dir: &mut Option<String>) -> Option<String> {
+        let mut found = None;
+        for command in line.split(['&', '|', ';']) {
+            let words = shell_words(command);
+            match words.as_slice() {
+                ["cd", to, ..] => *dir = Some((*to).trim_end_matches('/').to_owned()),
+                ["cargo", "update", rest @ ..] => {
+                    let named = rest.iter().enumerate().find_map(|(k, w)| {
+                        if *w == "--manifest-path" {
+                            rest.get(k + 1).copied()
+                        } else {
+                            w.strip_prefix("--manifest-path=")
+                        }
+                    });
+                    let named = named.map(|m| m.trim_matches(['"', '\'']).to_owned());
+                    found = Some(named.unwrap_or_else(|| match dir {
+                        Some(d) => format!("{d}/Cargo.toml"),
+                        None => "Cargo.toml".to_owned(),
+                    }));
+                }
+                _ => {}
+            }
+        }
+        found
+    }
+
     /// AC39: a `cargo update` changes the lock, so a later step of the same
     /// job runs `scripts/one-version.sh` on the same manifest. The step has
     /// no `if`, so it runs after each update.
@@ -867,15 +897,13 @@ mod check {
         let scripts = run_scripts(ci);
         let mut out = Vec::new();
         for (i, script) in scripts.iter().enumerate() {
+            // A `cd` holds for the rest of the script.
+            let mut dir: Option<String> = None;
             for (n, line) in &script.lines {
-                let words = shell_words(line);
-                if words.get(..2) != Some(&["cargo", "update"][..]) {
+                let Some(manifest) = updated_manifest(line, &mut dir) else {
                     continue;
-                }
-                let manifest = words
-                    .windows(2)
-                    .find(|w| w[0] == "--manifest-path")
-                    .map_or("Cargo.toml", |w| w[1]);
+                };
+                let manifest = manifest.as_str();
                 let checked = scripts[i + 1..]
                     .iter()
                     .filter(|s| s.job == script.job && s.cond.is_none())
