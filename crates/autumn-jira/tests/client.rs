@@ -196,6 +196,35 @@ async fn moved_issue_key_is_kept() {
 }
 
 #[tokio::test]
+async fn one_search_page_at_a_token() {
+    use autumn_jira::request::SearchRequest;
+    let fake = FakeJira::new();
+    let client = api_token_client(&fake);
+    for n in 0..3 {
+        client
+            .create_issue(&task().labels([format!("page-{n}"), "paged".to_owned()]))
+            .await
+            .unwrap();
+    }
+    let jql = autumn_jira::Jql::raw("labels = paged ORDER BY key ASC");
+    let request = SearchRequest::new(jql).max_results(2);
+    let first = client.search_page_at(&request, None).await.unwrap();
+    assert_eq!(first.issues.len(), 2);
+    let token = first.next_token.expect("a next page");
+    let second = client.search_page_at(&request, Some(&token)).await.unwrap();
+    assert_eq!(second.issues.len(), 1);
+    assert_eq!(second.next_token, None);
+    let mut keys: Vec<String> = first
+        .issues
+        .iter()
+        .chain(&second.issues)
+        .map(|i| i.key.to_string())
+        .collect();
+    keys.dedup();
+    assert_eq!(keys.len(), 3);
+}
+
+#[tokio::test]
 async fn short_non_last_comment_page() {
     let url = format!("{BASE}/issue/OPS-1/comment");
     let comment =

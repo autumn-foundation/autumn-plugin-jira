@@ -88,6 +88,17 @@ pub enum DeleteOutcome {
     GoneAfterRetry,
 }
 
+/// One page of a search, for a host that reads one page for each call
+/// (F26). `next_token` is `None` on the last page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct IssuePage {
+    /// The issues of the page.
+    pub issues: Vec<Issue>,
+    /// The token of the next page.
+    pub next_token: Option<PageToken>,
+}
+
 /// The typed Jira client. Clones share the backend and the caches.
 #[derive(Clone)]
 pub struct JiraClient {
@@ -605,6 +616,23 @@ impl JiraClient {
         .json(&json!({"jql": jql.as_str()}));
         let count: CountWire = self.read(&request).await?;
         Ok(count.count)
+    }
+
+    /// Reads one page of a search at `token` (`POST /search/jql`). A host
+    /// that keeps the token between calls uses it, for example a harvest
+    /// activity that reads one page for each call. The host checks for a
+    /// repeated token.
+    ///
+    /// # Errors
+    ///
+    /// The typed errors of the call.
+    pub async fn search_page_at(
+        &self,
+        request: &SearchRequest,
+        token: Option<&PageToken>,
+    ) -> Result<IssuePage> {
+        let _ = (request, token);
+        Err(JiraError::invalid("search", "not yet"))
     }
 
     /// Reads one page of a search.

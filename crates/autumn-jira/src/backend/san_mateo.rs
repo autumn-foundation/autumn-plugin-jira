@@ -366,8 +366,28 @@ mod tests {
                 },
             ),
         ];
-        for (error, expected) in cases {
-            assert_eq!(map_error(&error), expected, "{error:?}");
+        for (error, expected) in &cases {
+            assert_eq!(map_error(error), *expected, "{error:?}");
+        }
+        // A transient `NotSent` becomes `JiraError::Network` after the last
+        // attempt. Each of its codes must be in `NOT_SENT_NETWORK_CODES`,
+        // or a durable host counts the call as "maybe sent".
+        for (error, _) in &cases {
+            if let BackendError::NotSent {
+                transient: true,
+                code,
+            } = map_error(error)
+            {
+                assert!(
+                    crate::error::NOT_SENT_NETWORK_CODES.contains(&code),
+                    "{code} is not pinned"
+                );
+                let network = JiraError::Network {
+                    op: Op::GetIssue,
+                    code,
+                };
+                assert!(!network.may_have_run(), "{code}");
+            }
         }
         let config = [
             Error::UnknownIntegration(s()),

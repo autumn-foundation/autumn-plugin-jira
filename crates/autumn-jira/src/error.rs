@@ -510,7 +510,19 @@ impl JiraError {
             _ => None,
         }
     }
+
+    /// Returns `false` only when the request cannot have run in Jira.
+    ///
+    /// A durable host reads it after a failed attempt (plan 7.2).
+    #[must_use]
+    pub fn may_have_run(&self) -> bool {
+        true
+    }
 }
+
+/// The codes of a `JiraError::Network` that did not leave this process.
+pub const NOT_SENT_NETWORK_CODES: [&str; 3] =
+    ["store_error", "connection_refresh_backoff", "provider"];
 
 #[cfg(test)]
 #[allow(
@@ -522,6 +534,97 @@ impl JiraError {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn may_have_run_table() {
+        let op = Op::CreateIssue;
+        let not_run = [
+            JiraError::invalid("issue key", "bad"),
+            JiraError::Config { code: "no_client" },
+            JiraError::Auth {
+                code: "refresh_exhausted",
+            },
+            JiraError::CloudId("none".into()),
+            JiraError::NotFoundOrForbidden { op },
+            JiraError::Unauthorized {
+                op,
+                status: 401,
+                hint: SCOPE_HINT,
+            },
+            JiraError::CaptchaRequired { op },
+            JiraError::Validation {
+                op,
+                status: 400,
+                messages: vec![],
+                fields: vec![],
+            },
+            JiraError::Conflict { op },
+            JiraError::Gone { op },
+            JiraError::PayloadTooLarge { op },
+            JiraError::RateLimited {
+                op,
+                retry_after: None,
+                reason: None,
+            },
+            JiraError::TransitionNotAvailable {
+                target: "done".into(),
+                available: vec![],
+            },
+            JiraError::LabelsNotOnScreen {
+                project: crate::ids::ProjectKey::parse("OPS").unwrap(),
+            },
+            JiraError::Network {
+                op,
+                code: "store_error",
+            },
+            JiraError::Network {
+                op,
+                code: "connection_refresh_backoff",
+            },
+            JiraError::Network {
+                op,
+                code: "provider",
+            },
+        ];
+        for err in &not_run {
+            assert!(!err.may_have_run(), "{err:?}");
+        }
+        let may_run = [
+            JiraError::Upstream { op, status: 503 },
+            JiraError::Network {
+                op,
+                code: "connect",
+            },
+            JiraError::Network {
+                op,
+                code: "timeout",
+            },
+            JiraError::Network {
+                op,
+                code: "upstream",
+            },
+            JiraError::OutcomeUnknown {
+                op,
+                cause: UnknownCause::Network,
+                marker: None,
+            },
+            JiraError::Redirect { op, status: 302 },
+            JiraError::UnexpectedStatus { op, status: 202 },
+            JiraError::Decode {
+                op,
+                reason: "x".into(),
+            },
+            JiraError::PaginationStalled { op, pages: 2 },
+            JiraError::PageLimit { op, max: 2 },
+        ];
+        for err in &may_run {
+            assert!(err.may_have_run(), "{err:?}");
+        }
+        assert_eq!(
+            NOT_SENT_NETWORK_CODES,
+            ["store_error", "connection_refresh_backoff", "provider"]
+        );
+    }
 
     /// Returns the variant index. The match has no `_` arm, so a new
     /// variant fails to compile here until the table has a row.
