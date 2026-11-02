@@ -192,8 +192,15 @@ async fn ignored_signals_do_not_extend_the_deadline() {
                 run.seed()
             );
             assert_eq!(run.elapsed().num_seconds(), 120, "seed {}", run.seed());
-            // The first read, the poll at 60 s and the last read at 120 s.
-            assert_eq!(reads(run.events()).len(), 3, "seed {}", run.seed());
+            // The first read, the poll at 60 s and the last read at 120 s. A
+            // signal that lands with the poll timer wins the race, and then
+            // that poll does not run.
+            let reads = reads(run.events()).len();
+            assert!(
+                (2..=3).contains(&reads),
+                "seed {}: {reads} reads",
+                run.seed()
+            );
             let first_fire = run
                 .events()
                 .iter()
@@ -235,7 +242,7 @@ async fn already_there_returns_at_once() {
     );
     let reads = reads(outcome.events());
     assert_eq!(reads, vec![GetIssueInput::new(issue_id(ISSUE))]);
-    assert!(timers(outcome.events()).is_empty());
+    assert_eq!(timers(outcome.events()), Vec::<u64>::new());
     assert_eq!(outcome.elapsed().num_seconds(), 0);
     assert_replays(&outcome).await;
 }
@@ -341,7 +348,7 @@ async fn timeout_over_max_wait_fails() {
         _ => None,
     });
     assert_eq!(failed, Some(Some(INVALID_INPUT_ERROR.to_owned())));
-    assert!(reads(outcome.events()).is_empty());
+    assert_eq!(reads(outcome.events()), Vec::<GetIssueInput>::new());
     assert_replays(&outcome).await;
 
     // MAX_WAIT itself is allowed.

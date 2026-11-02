@@ -2,20 +2,26 @@
 
 use std::time::Duration;
 
+use autumn_harvest::HarvestError;
 use autumn_harvest::context::WorkflowContext;
 use autumn_harvest::failure::WorkflowFailure;
 use autumn_jira::ids::WebhookDeliveryId;
-use autumn_jira::model::StatusSummary;
+use autumn_jira::model::{IssueSummary, StatusSummary};
 use autumn_jira::{IssueId, IssueKey, StatusTarget};
 use serde::{Deserialize, Serialize};
 
+use crate::activities::{GET_ISSUE, GetIssueInput, READ_START_TO_CLOSE, get_issue_retry};
 use crate::clients::ClientRef;
+use crate::failure::{INVALID_INPUT_ERROR, WORKFLOW_ERROR};
 
 /// The name of the signal that the bridge sends to a waiting run.
 pub const SIGNAL: &str = "jira.event";
 
 /// The longest wait: 29 days.
 pub const MAX_WAIT: Duration = Duration::from_secs(29 * 24 * 3600);
+
+/// The shortest poll interval: 1 second. A durable timer has whole seconds.
+pub const MIN_POLL_EVERY: Duration = Duration::from_secs(1);
 
 /// The default poll interval: 15 minutes.
 pub const DEFAULT_POLL_EVERY: Duration = Duration::from_secs(15 * 60);
@@ -92,16 +98,195 @@ pub enum StatusWait {
 
 /// Waits until issue `issue_id` reaches `target`. Deterministic on replay.
 ///
+/// The steps (plan 9.3):
+///
+/// 1. A timeout over [`MAX_WAIT`] fails at once.
+/// 2. One read with `jira_get_issue`. At the target, the wait ends with
+///    [`WaitSource::Initial`].
+/// 3. `deadline = ctx.system_now() + timeout`. The history records each
+///    `system_now()`, so a replay sees the same times. `ctx.now()` stays at
+///    the start time in production, so the wait never uses it.
+/// 4. Each round races the signal [`SIGNAL`] against a fresh timer of
+///    `min(remaining, poll_every)`. A signal of another issue, or with a
+///    timestamp older than the newest one seen, is skipped. A skipped signal
+///    does not move the deadline. A timer win reads the issue when a poll is
+///    due.
+/// 5. At the deadline, one last read. At the target, the wait ends with
+///    [`WaitSource::Poll`]. Else it ends with [`StatusWait::TimedOut`].
+/// 6. At the end, the wait takes the signals that are already in the
+///    history. They are about a wait that is over.
+///
 /// # Errors
 ///
 /// A non-retryable `jira.invalid_input` failure when `options.timeout` is
-/// over [`MAX_WAIT`]. The failure of a read activity keeps its error type.
+/// over [`MAX_WAIT`], or `options.poll_every` is under [`MIN_POLL_EVERY`].
+/// The failure of a read activity keeps its error type.
 pub async fn await_issue_status(
     ctx: &WorkflowContext,
     issue_id: &IssueId,
     target: &StatusTarget,
     options: &WaitOptions,
 ) -> Result<StatusWait, WorkflowFailure> {
-    let _ = (ctx, issue_id, target, options);
-    Ok(StatusWait::TimedOut { last: None })
+    if options.timeout > MAX_WAIT {
+        return Err(WorkflowFailure::new(
+            INVALID_INPUT_ERROR,
+            "the wait timeout is over MAX_WAIT (29 days)",
+        )
+        .non_retryable());
+    }
+    if options
+        .poll_every
+        .is_some_and(|every| every < MIN_POLL_EVERY)
+    {
+        return Err(WorkflowFailure::new(
+            INVALID_INPUT_ERROR,
+            "the poll interval is under MIN_POLL_EVERY (1 s)",
+        )
+        .non_retryable());
+    }
+    let outcome = wait_loop(ctx, issue_id, target, options).await;
+    // The signals that are already in the history are about a wait that is
+    // over. The wait takes them, so the history has no signal that no code
+    // reads. A strict replay of harvest 0.8 fails on such a signal. A later
+    // wait reads the issue first, so it does not need these signals.
+    let drained = ctx.drain_signals_raw(SIGNAL);
+    match (outcome, drained) {
+        (Ok(wait), Ok(_)) => Ok(wait),
+        (Err(failure), _) => Err(failure),
+        (Ok(_), Err(error)) => Err(harvest_failure(&error)),
+    }
+}
+
+/// The steps 2 to 5 of [`await_issue_status`].
+async fn wait_loop(
+    ctx: &WorkflowContext,
+    issue_id: &IssueId,
+    target: &StatusTarget,
+    options: &WaitOptions,
+) -> Result<StatusWait, WorkflowFailure> {
+    let read = GetIssueInput::new(issue_id).client(options.client.clone());
+    let mut last = read_status(ctx, &read).await?;
+    if let Some(status) = at_target(last.as_ref(), target) {
+        return Ok(StatusWait::Reached {
+            status,
+            source: WaitSource::Initial,
+        });
+    }
+    let timeout = chrono::Duration::from_std(options.timeout).map_err(|_| invalid_timeout())?;
+    let deadline = ctx.system_now() + timeout;
+    let mut newest_ms: Option<i64> = None;
+    loop {
+        let remaining = (deadline - ctx.system_now())
+            .to_std()
+            .unwrap_or(Duration::ZERO);
+        if remaining.is_zero() {
+            break;
+        }
+        let poll_due = options.poll_every.filter(|every| *every < remaining);
+        let wait = poll_due.unwrap_or(remaining);
+        let winner = ctx
+            .race()
+            .signal(SIGNAL)
+            .label(SIGNAL_BRANCH)
+            .timer(wait)
+            .label(TIMER_BRANCH)
+            .run()
+            .await
+            .map_err(|e| harvest_failure(&e))?;
+        if winner.label.as_deref() == Some(SIGNAL_BRANCH) {
+            let Ok(signal) = winner.decode::<IssueSignal>() else {
+                ctx.log_warn("jira wait: skipped a signal that is not an IssueSignal");
+                continue;
+            };
+            if signal.issue_id != *issue_id || is_older(signal.timestamp_ms, newest_ms) {
+                continue;
+            }
+            newest_ms = newest_ms.max(signal.timestamp_ms);
+            if signal.status.is_some() {
+                last.clone_from(&signal.status);
+            }
+            if let Some(status) = at_target(signal.status.as_ref(), target) {
+                return Ok(StatusWait::Reached {
+                    status,
+                    source: WaitSource::Signal,
+                });
+            }
+        } else if poll_due.is_some() {
+            last = read_status(ctx, &read).await?.or(last);
+            if let Some(status) = at_target(last.as_ref(), target) {
+                return Ok(StatusWait::Reached {
+                    status,
+                    source: WaitSource::Poll,
+                });
+            }
+        }
+    }
+    last = read_status(ctx, &read).await?.or(last);
+    Ok(
+        at_target(last.as_ref(), target).map_or(StatusWait::TimedOut { last }, |status| {
+            StatusWait::Reached {
+                status,
+                source: WaitSource::Poll,
+            }
+        }),
+    )
+}
+
+/// The label of the signal branch of a race.
+const SIGNAL_BRANCH: &str = "signal";
+
+/// The label of the timer branch of a race.
+const TIMER_BRANCH: &str = "timer";
+
+/// Returns the status when it is at the target.
+fn at_target(status: Option<&StatusSummary>, target: &StatusTarget) -> Option<StatusSummary> {
+    status.filter(|s| target.matches(s)).cloned()
+}
+
+/// Returns `true` when a signal is older than the newest one seen (F45). A
+/// signal with no timestamp is never older.
+const fn is_older(timestamp_ms: Option<i64>, newest_ms: Option<i64>) -> bool {
+    matches!((timestamp_ms, newest_ms), (Some(t), Some(newest)) if t < newest)
+}
+
+/// Reads the issue with `jira_get_issue` on the queue of the run [V GOTCHA].
+async fn read_status(
+    ctx: &WorkflowContext,
+    read: &GetIssueInput,
+) -> Result<Option<StatusSummary>, WorkflowFailure> {
+    let input = serde_json::to_value(read).map_err(|e| {
+        WorkflowFailure::new(WORKFLOW_ERROR, format!("jira wait: bad read input: {e}"))
+    })?;
+    let output = ctx
+        .execute_activity_raw_with_opts(
+            GET_ISSUE,
+            input,
+            ctx.queue_name(),
+            Some(get_issue_retry()),
+            Some(READ_START_TO_CLOSE),
+        )
+        .await
+        .map_err(|e| harvest_failure(&e))?;
+    let issue: IssueSummary = serde_json::from_value(output).map_err(|e| {
+        WorkflowFailure::new(WORKFLOW_ERROR, format!("jira wait: bad read output: {e}"))
+    })?;
+    Ok(issue.status)
+}
+
+/// The failure of a timeout that does not fit a chrono duration.
+fn invalid_timeout() -> WorkflowFailure {
+    WorkflowFailure::new(INVALID_INPUT_ERROR, "the wait timeout is too large").non_retryable()
+}
+
+/// Returns the workflow failure for a harvest error. An activity failure
+/// keeps its error type and its details.
+pub(crate) fn harvest_failure(error: &HarvestError) -> WorkflowFailure {
+    let failure = WorkflowFailure::new(
+        error.activity_error_type().unwrap_or(WORKFLOW_ERROR),
+        error.to_string(),
+    );
+    match error.activity_details() {
+        Some(details) => failure.with_details(details.clone()),
+        None => failure,
+    }
 }
