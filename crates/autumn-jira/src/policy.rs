@@ -410,11 +410,13 @@ mod tests {
         "is_lower_hex",
     ];
 
-    /// The text that makes Verus skip a proof. Verus still says
-    /// "verified" with one of them, so the file must not hold any.
-    const PROOF_ESCAPES: [&str; 7] = [
+    /// The text that makes Verus skip a proof, with no white space. Verus
+    /// still says "verified" with one of them, so the file must not hold
+    /// any.
+    const PROOF_ESCAPES: [&str; 8] = [
         "assume(",
         "admit(",
+        "assume_new(",
         "external_body",
         "verifier::external",
         "#[verifier(",
@@ -422,15 +424,36 @@ mod tests {
         "exec_allows_no_decreases_clause",
     ];
 
-    /// Returns each proof escape in `spec`, outside `//` comments.
+    /// Returns the code of `text` with no comments: `/* */` comments go,
+    /// and each line keeps only the part before `//`.
+    fn strip_comments(text: &str) -> String {
+        strip_block_comments(text)
+            .lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Returns each proof escape in `spec`, outside comments.
+    ///
+    /// Verus tokens can have white space between them, so the scan reads
+    /// the code with no white space. An escape word must not follow a
+    /// letter, a digit or `_`: `my_assume(` is a name, not an escape.
     fn proof_escapes(spec: &str) -> Vec<String> {
-        let code = strip_block_comments(spec);
+        let code: String = strip_comments(spec)
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
         let mut out = Vec::new();
-        for (n, line) in code.lines().enumerate() {
-            let line = line.split("//").next().unwrap_or("");
-            for escape in PROOF_ESCAPES {
-                if line.contains(escape) {
-                    out.push(format!("line {}: {escape}", n + 1));
+        for escape in PROOF_ESCAPES {
+            let word = escape.starts_with(|c: char| c.is_ascii_alphabetic());
+            for (at, _) in code.match_indices(escape) {
+                let after_name = code[..at]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+                if !(word && after_name) {
+                    out.push(format!("at byte {at}: {escape}"));
                 }
             }
         }
@@ -585,7 +608,11 @@ mod tests {
     /// Returns the body of `pub fn name` with no comments, no proof blocks
     /// and no white space. In the spec, the body starts at a line with only
     /// `{` (after `ensures`).
+    ///
+    /// The comments go first. Else a brace or a `proof {` in a comment can
+    /// move the end of the body or remove code from the compare.
     fn body(text: &str, name: &str, spec: bool) -> Option<String> {
+        let text = &strip_comments(text);
         let at = text
             .find(&format!("pub fn {name}("))
             .or_else(|| text.find(&format!("pub const fn {name}(")))?;
@@ -607,10 +634,7 @@ mod tests {
             }
         }
         Some(
-            strip_proof_blocks(&strip_block_comments(&text[start..end]))
-                .lines()
-                .map(|l| l.split("//").next().unwrap_or(""))
-                .collect::<String>()
+            strip_proof_blocks(&text[start..end])
                 .chars()
                 .filter(|c| !c.is_whitespace())
                 .collect(),

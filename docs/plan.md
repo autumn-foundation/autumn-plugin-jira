@@ -221,6 +221,7 @@ text.
 | V100 | `HandlerError::from` maps `OutcomeUnknown` with a marker (`outcome_pending`) to `Permanent`. | A sink that used `?` on an idempotent write answered 503, and the redelivery could send the write again (R2F-fixcheck-a-5). | 4.8 |
 | V101 | `SanMateoBackend` checks a stored cloud id after a 401 or 404 at most one time in each `CLOUD_ID_RECHECK_INTERVAL` (300 s), not one time for its life. New pub const `backend::CLOUD_ID_RECHECK_INTERVAL`. | One ordinary 404 used up the only check, so a site move while the process ran was never seen (R2B-webhooks-secrets-1, R2F-fixcheck-a-4, R2G-fixcheck-b-1). | 4.4, 7.2 |
 | V102 | New `ids::SiteHost` (`parse`, `from_url`), `JiraSite::host() -> Option<SiteHost>`, the fields `WebhookIssue::site` and `WebhookComment::site` (the host of `self`), `JiraEvent::site()` and `Delivery::site()`. | A delivery had no site, so a sink could not refuse a delivery of another site with the same secret (R2F-fixcheck-a-2). | 4.2, 4.3, 4.8 |
+| V103 | The proof escape scan reads the spec with no white space and also finds `assume_new(`. The body extractor removes comments first. | `assume (false);` passed the guard, and a `proof {` in a line comment hid code from the compare (R2F-fixcheck-a-6, R2E-tests-guards-5, R2E-tests-guards-4). | 6 |
 
 ---
 
@@ -1348,11 +1349,15 @@ Tests in `policy::tests` (V67):
   `every_const_fn_is_proved_or_listed` and `each_fn_is_in_exactly_one_list`
   check this. A new function cannot skip the proof by omission.
 - `the_spec_has_no_proof_escape`: `verus/policy.rs` holds no `assume(`,
-  `admit(`, `external_body`, `verifier::external`, `#[verifier(`,
-  `assume_specification` or `exec_allows_no_decreases_clause` outside
-  comments. Verus still says "verified" with one of them. Negative
-  self-tests insert each one.
-- `the_drift_check_sees_changes`: an edited copy fails the body match.
+  `admit(`, `assume_new(`, `external_body`, `verifier::external`,
+  `#[verifier(`, `assume_specification` or
+  `exec_allows_no_decreases_clause` outside comments. Verus still says
+  "verified" with one of them. The scan reads the code with no white
+  space, because Verus tokens can have spaces between them (V103).
+  Negative self-tests insert each one, also with spaces.
+- `the_drift_check_sees_changes`: an edited copy fails the body match. The
+  extractor removes the comments before it finds the body and its proof
+  blocks, so a brace in a comment hides no code (V103).
 - One proptest per `ensures` clause (`spec_as_test_*`). They are the local
   stand-in for Verus (L8).
 - `backoff_matches_san_mateo`: differential proptest.
