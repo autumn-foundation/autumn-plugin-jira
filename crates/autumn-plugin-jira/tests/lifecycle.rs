@@ -377,3 +377,53 @@ fn debug_hides_secret_values() {
     assert!(text.contains("JIRA_API_TOKEN"), "{text}");
     assert!(!text.contains("very-secret-value"), "{text}");
 }
+
+/// The cloud id of the second tenant, `globex`.
+const GLOBEX_CLOUD_ID: &str = "22222222-3333-4444-8555-666666666666";
+
+/// Two OAuth tenants, each on its own fake site. `acme` is the default
+/// connection, and `[jira.san_mateo]` pins its cloud id and site URL.
+async fn two_oauth_tenants() -> (FakeJira, FakeJira, autumn_plugin_jira::JiraRuntime) {
+    let globex = with_oauth(FakeJira::new().with_site("globex", GLOBEX_CLOUD_ID));
+    let acme = with_oauth(FakeJira::new()).with_fallback(Arc::new(globex.clone()));
+    let san = san_mateo(Arc::new(acme.clone()));
+    oauth_connection(&san, "acme", autumn_jira_fake::DEFAULT_CLOUD_ID).await;
+    oauth_connection(&san, "globex", GLOBEX_CLOUD_ID).await;
+    let state = AppState::for_test();
+    state.insert_extension(SanMateoService::new(san));
+    let config = autumn_plugin_jira::JiraConfig::from_toml_str(&format!(
+        "[jira.san_mateo]\nenvironment = \"{ENV}\"\nintegration = \"{OAUTH_INTEGRATION}\"\nconnection_id = \"acme\"\ncloud_id = \"{}\"\nsite_url = \"https://acme.atlassian.net\"\n",
+        autumn_jira_fake::DEFAULT_CLOUD_ID
+    ))
+    .unwrap();
+    let rt = JiraPlugin::with_config(config).start(&state).unwrap();
+    (acme, globex, rt)
+}
+
+/// R10-plugin-ecosystem-1: `cloud_id` and `site_url` of `[jira.san_mateo]`
+/// belong to the default connection. Another tenant uses its own site.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_configured_cloud_id_is_for_the_default_connection_only() {
+    let (acme, globex, rt) = two_oauth_tenants().await;
+    rt.service().myself().await.unwrap();
+    assert_eq!(acme.count(FakeOp::Myself), 1, "the default goes to acme");
+    rt.service()
+        .for_connection("globex")
+        .unwrap()
+        .myself()
+        .await
+        .unwrap();
+    assert_eq!(
+        (acme.count(FakeOp::Myself), globex.count(FakeOp::Myself)),
+        (1, 1),
+        "the globex token goes to the globex site, not to acme"
+    );
+    // The default id through for_connection keeps the configured site.
+    rt.service()
+        .for_connection("acme")
+        .unwrap()
+        .myself()
+        .await
+        .unwrap();
+    assert_eq!(acme.count(FakeOp::Myself), 2);
+}

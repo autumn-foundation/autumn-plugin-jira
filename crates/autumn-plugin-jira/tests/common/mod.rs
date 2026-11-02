@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use async_trait::async_trait;
 use autumn_jira::client::ClientSettings;
 use autumn_jira::ids::SiteName;
+use autumn_jira::san_mateo::credentials::OAuth2Credentials;
 use autumn_jira::san_mateo::transport::{HttpRequest, HttpResponse, HttpTransport, TransportError};
 use autumn_jira::san_mateo::{
     ConnectionKey, Credentials, EnvironmentConfig, ImportConnection, KeyRing, NewIntegration,
@@ -223,6 +224,64 @@ pub async fn basic_connection(san: &SanMateo, connection_id: &str) -> Connection
             },
             connection_config: Map::from_iter([("subdomain".to_owned(), json!("acme"))]),
             metadata: Map::new(),
+            tags: autumn_jira::san_mateo::Tags::new(),
+            end_user: None,
+            webhook_url_override: None,
+        },
+    )
+    .await
+    .unwrap()
+    .key()
+}
+
+/// The `atlassian` integration key.
+pub const OAUTH_INTEGRATION: &str = "atl";
+/// The OAuth client of the fakes.
+pub const CLIENT_ID: &str = "cid-1";
+/// The OAuth client secret of the fakes.
+pub const CLIENT_SECRET: &str = "csecret-1";
+/// The access token of each OAuth connection.
+pub const ACCESS_TOKEN: &str = "at-0";
+/// The refresh token of each OAuth connection.
+pub const REFRESH_TOKEN: &str = "rt-0";
+
+/// Turns on OAuth on a fake with the test client and tokens.
+pub fn with_oauth(fake: FakeJira) -> FakeJira {
+    fake.with_oauth(CLIENT_ID, CLIENT_SECRET, ACCESS_TOKEN, REFRESH_TOKEN)
+}
+
+/// Adds the `atlassian` integration (one time) and an OAuth connection
+/// whose metadata holds `cloud_id`.
+pub async fn oauth_connection(
+    san: &SanMateo,
+    connection_id: &str,
+    cloud_id: &str,
+) -> ConnectionKey {
+    let _ = san
+        .create_integration(
+            ENV,
+            NewIntegration {
+                unique_key: OAUTH_INTEGRATION.to_owned(),
+                provider: "atlassian".to_owned(),
+                client_id: Some(CLIENT_ID.to_owned()),
+                client_secret: Some(Secret::new(CLIENT_SECRET)),
+                ..NewIntegration::default()
+            },
+        )
+        .await;
+    san.import_connection(
+        ENV,
+        ImportConnection {
+            connection_id: Some(connection_id.to_owned()),
+            provider_config_key: OAUTH_INTEGRATION.to_owned(),
+            credentials: Credentials::OAuth2(OAuth2Credentials {
+                access_token: Secret::new(ACCESS_TOKEN),
+                refresh_token: Some(Secret::new(REFRESH_TOKEN)),
+                expires_at: None,
+                raw: json!({}),
+            }),
+            connection_config: Map::new(),
+            metadata: Map::from_iter([("cloudId".to_owned(), json!(cloud_id))]),
             tags: autumn_jira::san_mateo::Tags::new(),
             end_user: None,
             webhook_url_override: None,
