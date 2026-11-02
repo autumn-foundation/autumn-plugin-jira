@@ -1061,3 +1061,88 @@ async fn no_secret_in_outputs_or_history() {
     assert_no_secrets(&output.to_string());
     assert!(history.contains("jira_watch_issue"), "{history}");
 }
+
+// ------------------------------------------------------------ review fixes
+
+/// R5-spec-proof-1: a failed pre-lookup is a read. It cannot have run the
+/// write, so the next attempt sends the write.
+#[tokio::test(start_paused = true)]
+async fn a_failed_pre_lookup_is_not_sent() {
+    for comment in [false, true] {
+        let fake = FakeJira::new();
+        let client = durable(&fake);
+        let key = human_issue(&fake, "Printer").await;
+        let first = first_ctx();
+        // The durable client sends a read two times. Both fail.
+        let lookup = if comment {
+            FakeOp::GetComments
+        } else {
+            FakeOp::Search
+        };
+        fake.fault(lookup, Fault::Status(503));
+        fake.fault(lookup, Fault::Status(503));
+        let failure = if comment {
+            AddCommentInput::new(key_ref(&key), "Fixed it")
+                .run(&client, &first)
+                .await
+                .unwrap_err()
+        } else {
+            create_input().run(&client, &first).await.unwrap_err()
+        };
+        assert!(!failure.non_retryable, "{failure:?}");
+        assert_eq!(
+            failure.details.as_ref().and_then(|d| d.get("sent")),
+            Some(&json!(false)),
+            "{failure:?}"
+        );
+        let second = retry_of(&first, 2, Some(failure.into_error_payload()));
+        assert_eq!(
+            autumn_jira_harvest::previous_attempt(&second),
+            autumn_jira::policy::Previous::NotSent
+        );
+        if comment {
+            let made = AddCommentInput::new(key_ref(&key), "Fixed it")
+                .run(&client, &second)
+                .await
+                .unwrap();
+            assert_eq!(made.outcome, CreateKind::Created);
+            assert_eq!(fake.count(FakeOp::AddComment), 1);
+        } else {
+            let made = create_input().run(&client, &second).await.unwrap();
+            assert_eq!(made.outcome, CreateKind::Created);
+            // The person's issue and this one.
+            assert_eq!(fake.count(FakeOp::CreateIssue), 2);
+        }
+    }
+}
+
+/// R1-write-safety-6: the `sent` flag of a failure tells only the last
+/// client attempt. An earlier client attempt of the same activity attempt
+/// can have deleted the issue. So a 404 on any later attempt is gone.
+#[tokio::test(start_paused = true)]
+async fn a_delete_404_after_any_failed_attempt_is_gone() {
+    let fake = FakeJira::new();
+    let client = durable(&fake);
+    let key = human_issue(&fake, "Old").await;
+    let delete = DeleteIssueInput::new(key_ref(&key));
+    let ctx = first_ctx();
+    delete.run(&client, &ctx).await.unwrap();
+    let store_error = failure_for(&JiraError::Network {
+        op: Op::DeleteIssue,
+        code: "store_error",
+    })
+    .into_error_payload();
+    let rate_limited = failure_for(&JiraError::RateLimited {
+        op: Op::DeleteIssue,
+        retry_after: None,
+        reason: None,
+    })
+    .into_error_payload();
+    for (attempt, previous) in [(2, store_error), (3, rate_limited)] {
+        let gone = delete
+            .run(&client, &retry_of(&ctx, attempt, Some(previous)))
+            .await
+            .unwrap();
+        assert_eq!(gone.outcome, DeleteKind::GoneAfterRetry, "{attempt}");
+    }
+}
