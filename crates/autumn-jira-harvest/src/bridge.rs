@@ -7,11 +7,17 @@
 //! id is the idempotency key, so a repeated delivery gives one signal.
 //! Webhooks are at least once.
 //!
-//! A delivery does not name its Jira site, and two sites can have the same
-//! issue id. So the bridge does not trust the payload for the issue. It
-//! reads the status and the key from the site of its own client
+//! Two sites can have the same issue id, and one webhook secret can serve
+//! two sites by mistake. So the bridge does not trust the payload for the
+//! issue. It reads the status and the key from the site of its own client
 //! (R2-webhook-security-1). One bridge serves one site. Give each site its
 //! own webhook endpoint, its own webhook secret and its own bridge.
+//!
+//! When the bridge knows its site host, it also refuses a delivery whose
+//! `issue.self` names another host or no host (R2F-fixcheck-a-2). It makes
+//! no call for such a delivery and counts it in `other_site`. A client of a
+//! subdomain site tells its host. For a san-mateo client or a cloud id
+//! client, give the host with [`HarvestSignalBridge::site_host`].
 //!
 //! [`wants`] and [`routes_from_property`] are pure. They do no I/O.
 
@@ -26,7 +32,8 @@ use autumn_harvest::erase::is_terminal_state;
 use autumn_harvest::resolve_execution_id_by_workflow_id;
 use autumn_harvest::signal::send_signal_idempotent;
 use autumn_harvest::worker::DbPool;
-use autumn_jira::ids::FieldId;
+use autumn_jira::backend::{BackendInfo, BackendMode};
+use autumn_jira::ids::{FieldId, SiteHost};
 use autumn_jira::request::FieldSet;
 use autumn_jira::{Delivery, EventSink, HandlerError, IssueId, JiraClient, JiraEvent};
 use serde::Serialize;
@@ -75,6 +82,9 @@ pub struct BridgeCounters {
     pub bad_tag: u64,
     /// Deliveries that ended with a transient error (503).
     pub transient: u64,
+    /// Deliveries of another site, or of no named site. The bridge made no
+    /// call for them.
+    pub other_site: u64,
 }
 
 /// The live counters.
@@ -89,6 +99,7 @@ struct Counters {
     not_allowed: AtomicU64,
     bad_tag: AtomicU64,
     transient: AtomicU64,
+    other_site: AtomicU64,
 }
 
 impl Counters {
@@ -104,6 +115,7 @@ impl Counters {
             not_allowed: read(&self.not_allowed),
             bad_tag: read(&self.bad_tag),
             transient: read(&self.transient),
+            other_site: read(&self.other_site),
         }
     }
 }
@@ -120,6 +132,7 @@ impl Counters {
 pub struct HarvestSignalBridge {
     pool: DbPool,
     client: JiraClient,
+    site: Option<SiteHost>,
     key: RouteKey,
     allowed: BTreeSet<String>,
     counters: Arc<Counters>,
@@ -129,6 +142,7 @@ impl fmt::Debug for HarvestSignalBridge {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HarvestSignalBridge")
             .field("client", &self.client)
+            .field("site", &self.site)
             .field("key", &self.key)
             .field("allowed", &self.allowed)
             .field("counters", &self.counters.snapshot())
@@ -139,11 +153,17 @@ impl fmt::Debug for HarvestSignalBridge {
 impl HarvestSignalBridge {
     /// Makes a bridge with an empty allowlist. An empty allowlist allows no
     /// workflow, so call [`Self::allow_workflow`] for each workflow name.
+    ///
+    /// A client of a subdomain site gives the site host of the bridge. Other
+    /// clients give no host. Then the bridge does not check the site of a
+    /// delivery until you call [`Self::site_host`].
     #[must_use]
     pub fn new(pool: DbPool, client: JiraClient, key: RouteKey) -> Self {
+        let site = client_host(&client.info());
         Self {
             pool,
             client,
+            site,
             key,
             allowed: BTreeSet::new(),
             counters: Arc::default(),
@@ -154,6 +174,17 @@ impl HarvestSignalBridge {
     #[must_use]
     pub fn allow_workflow(mut self, workflow_name: &str) -> Self {
         self.allowed.insert(workflow_name.to_owned());
+        self
+    }
+
+    /// Sets the site host of the bridge, for example `acme.atlassian.net`.
+    /// The bridge then refuses each delivery whose `issue.self` names
+    /// another host, or names no host. For a san-mateo client, use the host
+    /// of the site URL in `accessible-resources`:
+    /// `SiteHost::from_url(&resource.url)`.
+    #[must_use]
+    pub fn site_host(mut self, host: SiteHost) -> Self {
+        self.site = Some(host);
         self
     }
 
@@ -172,6 +203,16 @@ impl HarvestSignalBridge {
     /// error of the property read.
     pub async fn route(&self, delivery: &Delivery) -> Result<Vec<RouteOutcome>, HandlerError> {
         bump(&self.counters.deliveries);
+        if let Some(own) = &self.site
+            && delivery.site() != Some(own)
+        {
+            bump(&self.counters.other_site);
+            tracing::warn!(
+                site = %own,
+                "jira bridge: a delivery names another site or no site; no call"
+            );
+            return Ok(Vec::new());
+        }
         let result = self.route_inner(delivery).await;
         match &result {
             Ok(outcomes) if outcomes.is_empty() => bump(&self.counters.skipped),
@@ -317,6 +358,15 @@ impl HarvestSignalBridge {
             Err(error) => error_outcome(&error),
         }
     }
+}
+
+/// The site host of a client: the host of a subdomain site. A cloud id
+/// site and a san-mateo connection give `None`.
+fn client_host(info: &BackendInfo) -> Option<SiteHost> {
+    if info.mode != BackendMode::ApiToken {
+        return None;
+    }
+    SiteHost::parse(&info.site).ok()
 }
 
 /// Adds one to a counter.

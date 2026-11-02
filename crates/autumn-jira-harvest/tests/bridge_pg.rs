@@ -100,8 +100,13 @@ fn route_key() -> RouteKey {
 }
 
 fn client(fake: &FakeJira) -> JiraClient {
+    client_on(fake, "acme")
+}
+
+/// A client of the fake at the subdomain `site`.
+fn client_on(fake: &FakeJira, site: &str) -> JiraClient {
     JiraClient::api_token(
-        JiraSite::Subdomain(SiteName::parse("acme").unwrap()),
+        JiraSite::Subdomain(SiteName::parse(site).unwrap()),
         BasicAuth::new(DEFAULT_EMAIL, Secret::new(DEFAULT_API_TOKEN)).unwrap(),
         Arc::new(fake.clone()),
     )
@@ -114,6 +119,11 @@ fn fake() -> FakeJira {
 
 /// Makes a tracked issue with these route entries, and drops its deliveries.
 async fn tracked_issue(fake: &FakeJira, entries: Vec<Value>) -> IssueKey {
+    tracked_issue_on(fake, "acme", entries).await
+}
+
+/// [`tracked_issue`] on the subdomain `site`.
+async fn tracked_issue_on(fake: &FakeJira, site: &str, entries: Vec<Value>) -> IssueKey {
     let issue = NewIssue::new(
         ProjectKey::parse("OPS").unwrap(),
         IssueTypeRef::Name("Task".into()),
@@ -121,7 +131,7 @@ async fn tracked_issue(fake: &FakeJira, entries: Vec<Value>) -> IssueKey {
     )
     .labels([TRACKED_LABEL])
     .property(ROUTES_PROPERTY, json!({"routes": entries}));
-    let created = client(fake).create_issue(&issue).await.unwrap();
+    let created = client_on(fake, site).create_issue(&issue).await.unwrap();
     let _ = fake.take_deliveries();
     created.key
 }
@@ -389,9 +399,12 @@ async fn a_delivery_of_another_site_is_refused() {
     let site_b = fake().with_site("beta", "22222222-2222-4333-8444-555555555555");
     let route = SignalRoute::new(WORKFLOW, "incident:other-site").unwrap();
     let ours = tracked_issue(&site_a, vec![route.property_entry(&route_key())]).await;
-    let theirs = tracked_issue(&site_b, vec![route.property_entry(&route_key())]).await;
+    let theirs = tracked_issue_on(&site_b, "beta", vec![route.property_entry(&route_key())]).await;
     let delivery = status_change(&site_b, &theirs);
-    assert_eq!(delivery.site().map(|s| s.as_str()), Some("beta.atlassian.net"));
+    assert_eq!(
+        delivery.site().map(SiteHost::as_str),
+        Some("beta.atlassian.net")
+    );
     // Each DB call on this pool fails, so Ok means no DB call.
     let bridge = make_bridge(pool(CLOSED_URL), &site_a);
     assert_eq!(bridge.route(&delivery).await.unwrap(), vec![]);
@@ -418,7 +431,8 @@ async fn a_delivery_of_another_site_is_refused() {
     // A bridge with an explicit site host: a san-mateo client does not
     // tell its host, so the app gives it. A delivery of acme is then
     // another site.
-    let ours_delivery = status_change(&site_a, &ours);
+    let fresh = tracked_issue(&site_a, vec![route.property_entry(&route_key())]).await;
+    let ours_delivery = status_change(&site_a, &fresh);
     let beta = make_bridge(pool(CLOSED_URL), &site_a)
         .site_host(SiteHost::parse("beta.atlassian.net").unwrap());
     assert_eq!(beta.route(&ours_delivery).await.unwrap(), vec![]);

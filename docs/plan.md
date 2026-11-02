@@ -2206,10 +2206,11 @@ replays there, and `replay_check` also runs.
 
 ```rust
 #[derive(Clone)]   // Debug hides the route key
-pub struct HarvestSignalBridge { /* pool: DbPool, client: JiraClient, key: RouteKey, allowed: BTreeSet<String>, counters */ }
+pub struct HarvestSignalBridge { /* pool: DbPool, client: JiraClient, site: Option<SiteHost>, key: RouteKey, allowed: BTreeSet<String>, counters */ }
 impl HarvestSignalBridge {
-    pub fn new(pool: autumn_harvest::worker::DbPool, client: JiraClient, key: RouteKey) -> Self;   // [V DbPool]
+    pub fn new(pool: autumn_harvest::worker::DbPool, client: JiraClient, key: RouteKey) -> Self;   // [V DbPool]; a subdomain client gives the site host
     #[must_use] pub fn allow_workflow(self, workflow_name: &str) -> Self;   // allowlist; empty = none
+    #[must_use] pub fn site_host(self, host: SiteHost) -> Self;   // the site host for a san-mateo or cloud id client
     pub fn counters(&self) -> BridgeCounters;
     /// The core of `deliver`, with an outcome per route, for tests.
     pub async fn route(&self, delivery: &Delivery) -> Result<Vec<RouteOutcome>, HandlerError>;
@@ -2218,7 +2219,8 @@ impl HarvestSignalBridge {
 pub enum RouteOutcome { Signalled, Duplicate, NoRun, Finished, NotAllowed, BadTag }
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct BridgeCounters { pub deliveries: u64, pub skipped: u64, pub signalled: u64, pub duplicate: u64,
-    pub no_run: u64, pub finished: u64, pub not_allowed: u64, pub bad_tag: u64, pub transient: u64 }
+    pub no_run: u64, pub finished: u64, pub not_allowed: u64, pub bad_tag: u64, pub transient: u64,
+    pub other_site: u64 }
 /// Pure: does this delivery need routing? jira:issue_created, or jira:issue_updated with a status change (B4, W26).
 pub fn wants(event: &JiraEvent) -> bool;
 /// Pure: the routes in a property value, each with its check result.
@@ -2229,6 +2231,12 @@ pub fn routes_from_property(value: &Value, key: &RouteKey, allowed: &BTreeSet<St
 ```
 
 `deliver` steps:
+0. Site check (R2F-fixcheck-a-2): when the bridge knows its site host,
+   a delivery whose `Delivery::site()` is not that host is refused. That
+   includes a delivery that names no site. The bridge makes no call, counts
+   `other_site` and gives `Ok(())`. A client of a subdomain site gives the
+   host. A san-mateo client or a cloud id client gives none, so the app
+   calls `site_host` with `SiteHost::from_url` of the site URL.
 1. `wants(event)` false: `Ok(())`.
 2. `issue.fields.labels` present and without `autumn-tracked`: `Ok(())`.
 3. `client.get_issue_property(issue_id, ROUTES_PROPERTY)` (a strongly
