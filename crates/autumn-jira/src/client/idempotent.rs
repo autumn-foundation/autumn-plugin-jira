@@ -89,12 +89,21 @@ fn labels_fix(error: JiraError, project: &ProjectKey) -> JiraError {
 /// have run, so the client looks up the marker, as for a 2xx that does not
 /// decode (B11).
 const fn is_odd_success(error: &JiraError) -> bool {
-    matches!(error, JiraError::UnexpectedStatus { status: 200..=299, .. })
+    matches!(
+        error,
+        JiraError::UnexpectedStatus {
+            status: 200..=299,
+            ..
+        }
+    )
 }
 
 /// Returns `true` when `own` wrote the comment and a line of it is `marker`.
 fn is_marked_by(comment: &Comment, own: &AccountId, marker: &str) -> bool {
-    comment.author.as_ref().is_some_and(|a| &a.account_id == own)
+    comment
+        .author
+        .as_ref()
+        .is_some_and(|a| &a.account_id == own)
         && comment
             .body
             .as_ref()
