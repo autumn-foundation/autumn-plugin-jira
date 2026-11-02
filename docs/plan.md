@@ -2154,10 +2154,15 @@ Steps (D12, W2, B1, B5, Y2):
    wall clock in history; `ctx.deadline()` is the same on each replay]
    (V83). `LAST_READ_MARGIN` (46 min) is five attempts of
    `READ_START_TO_CLOSE` and the backoff. So a run with an
-   `execution_timeout` gets `TimedOut` while it can still act on it. Loop
-   with an index `i`:
+   `execution_timeout` gets `TimedOut` while it can still act on it. Only
+   one read runs after the deadline (R2C-harvest-2): a poll read that ends
+   at or after the deadline is the last read. The poll reads and the last
+   read take a retry override with `jira.rate_limited` not retryable, so
+   they do not wait for a `Retry-After`. A strict replay matches the name
+   and the input of an activity, not its retry. Loop with an index `i`:
    - `remaining = deadline - ctx.system_now()`. `remaining <= 0`: one last
-     `jira_get_issue` (B5), then `Reached { Poll }` or `TimedOut`.
+     `jira_get_issue` (B5), unless the round before was a poll read. Then
+     `Reached { Poll }` or `TimedOut`.
    - `ctx.race().signal(SIGNAL).timer(min(remaining, poll_every)).run()` [V].
      The race arms a fresh timer each round, so there is no stale timer.
    - A signal win: decode `IssueSignal`. Skip it when `issue_id` differs, or
@@ -2167,8 +2172,11 @@ Steps (D12, W2, B1, B5, Y2):
      (V86). Both come from the Jira clock, so a signal older than a read is
      skipped. The compare is strict (`<`). A signal with no timestamp is
      never older. After `MAX_SIGNAL_ROUNDS` signal rounds that do not end
-     the wait, the race has the timer only (V83). So a busy issue or a
-     copied route cannot fill the history.
+     the wait, the race has the timer only (V83). The wait then polls at
+     `min(poll_every, DEFAULT_POLL_EVERY)`, also with no `poll_every`
+     (R2C-harvest-1). The cap bounds the race rounds, not the stored
+     signals: the bridge adds one `SignalReceived` for each routed delivery
+     (R2C-harvest-3). The v2 route tag keeps a copied route away.
      A payload that is not an `IssueSignal` is skipped with `ctx.log_warn`
      (no payload in the log). A signal win runs no poll read in that round.
    - A timer win with `poll_every`: `jira_get_issue`. A match gives

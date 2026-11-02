@@ -7,6 +7,7 @@ use std::time::Duration;
 use autumn_harvest::HarvestError;
 use autumn_harvest::context::WorkflowContext;
 use autumn_harvest::failure::WorkflowFailure;
+use autumn_harvest::policy::RetryPolicy;
 use autumn_jira::ids::WebhookDeliveryId;
 use autumn_jira::model::{IssueSummary, StatusSummary};
 use autumn_jira::{IssueId, IssueKey, StatusTarget};
@@ -14,7 +15,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::activities::{GetIssueInput, jira_get_issue_info};
+use crate::activities::{GetIssueInput, get_issue_retry, jira_get_issue_info};
 use crate::clients::ClientRef;
 use crate::failure::{ERROR_PREFIX, INVALID_INPUT_ERROR, WORKFLOW_ERROR};
 
@@ -33,27 +34,44 @@ pub const DEFAULT_POLL_EVERY: Duration = Duration::from_secs(15 * 60);
 /// The most poll rounds of one wait: `timeout / poll_every`, rounded up.
 ///
 /// Each round adds events to the history. Harvest moves a run with 50 000
-/// events to the DLQ. 3 000 poll rounds and [`MAX_SIGNAL_ROUNDS`] signal
-/// rounds use less than half of that cap, so the rest of the workflow has
-/// room. The default poll over [`MAX_WAIT`] is 2 784 rounds.
+/// events to the DLQ. A missed poll adds the most events: one start for
+/// each attempt and one failure. In the worst case, 3 000 missed polls and
+/// [`MAX_SIGNAL_ROUNDS`] signal rounds use less than 35 000 events. So
+/// 15 000 events stay for the rest of the workflow (R2C-harvest-3). The
+/// default poll over [`MAX_WAIT`] is 2 784 rounds.
 pub const MAX_POLL_ROUNDS: u64 = 3_000;
 
 /// The time that a wait keeps free before the execution deadline of the
 /// run: 46 minutes.
 ///
-/// The last read needs it: five attempts of `READ_START_TO_CLOSE` and the
+/// One read needs it: five attempts of `READ_START_TO_CLOSE` and the
 /// backoff between them. The `execution_timeout` of a run can end before
 /// the wait ends. Then the wait gives `TimedOut` at the start of this
 /// margin, so the workflow can still act on the timeout
 /// (R4-harvest-determinism-5).
+///
+/// Two rules keep the reads after the deadline to one read
+/// (R2C-harvest-2). A poll read that ends at or after the deadline is the
+/// last read, so no second read follows it. And the poll reads and the
+/// last read do not wait for a `Retry-After`: a rate-limited read is a
+/// missed poll at once. Harvest can wait up to 15 minutes for each
+/// `Retry-After`, and four such waits do not fit the margin.
 pub const LAST_READ_MARGIN: Duration = Duration::from_secs(46 * 60);
 
 /// The most signal rounds of one wait that do not end it.
 ///
-/// After them, the wait does not take signals, and only the polls and the
-/// deadline can end it. A signal round adds events to the history too, so
-/// this bound keeps a busy issue, or a copied route, from filling the
-/// history.
+/// After them, the wait does not take signals. It then polls at
+/// `min(poll_every, DEFAULT_POLL_EVERY)`, also with no `poll_every`, so the
+/// wait does not go blind until its deadline (R2C-harvest-1). Each signal
+/// round counts, also a skipped one. So this bound limits the race rounds
+/// of a busy issue.
+///
+/// The bound does not limit the stored signals. The bridge adds one
+/// `SignalReceived` event to the history for each routed delivery, and the
+/// wait does not change that. The v2 route tag keeps the signals of a
+/// copied route away (R2F-fixcheck-a-3). A run that routes many busy
+/// issues to itself still gets one event for each of their status changes
+/// (R2C-harvest-3).
 pub const MAX_SIGNAL_ROUNDS: u32 = 1_000;
 
 /// The payload of a [`SIGNAL`]: one Jira event about one issue.
@@ -151,9 +169,11 @@ pub enum StatusWait {
 ///    comes from the signals and from the `updated` time of each read. Both
 ///    come from the Jira clock. A skipped signal does not move the deadline.
 ///    After [`MAX_SIGNAL_ROUNDS`] signals that do not end the wait, the race
-///    has the timer only. A timer win reads the issue when a poll is due.
+///    has the timer only, and the wait polls at least each
+///    [`DEFAULT_POLL_EVERY`]. A timer win reads the issue when a poll is due.
 /// 5. At the deadline, one last read. At the target, the wait ends with
-///    [`WaitSource::Poll`]. Else it ends with [`StatusWait::TimedOut`].
+///    [`WaitSource::Poll`]. Else it ends with [`StatusWait::TimedOut`]. A
+///    poll read that ends at or after the deadline is the last read.
 ///
 /// A poll read or the last read that fails with a retryable class is a
 /// missed poll (R4-harvest-determinism-1). The wait logs the error type,
@@ -256,7 +276,7 @@ async fn wait_loop(
     options: &WaitOptions,
 ) -> Result<StatusWait, WorkflowFailure> {
     let read = GetIssueInput::new(issue_id).client(options.client.clone());
-    let first = read_issue(ctx, &read)
+    let first = read_issue(ctx, &read, None)
         .await
         .map_err(|e| harvest_failure(&e))?;
     let mut last = first.status;
@@ -270,6 +290,7 @@ async fn wait_loop(
     let timeout = chrono::Duration::from_std(options.timeout).map_err(|_| invalid_timeout())?;
     let deadline = wait_deadline(ctx.system_now(), timeout, ctx.deadline());
     let mut signal_rounds: u32 = 0;
+    let mut polled_last = false;
     loop {
         let remaining = (deadline - ctx.system_now())
             .to_std()
@@ -277,7 +298,9 @@ async fn wait_loop(
         if remaining.is_zero() {
             break;
         }
-        let poll_due = options.poll_every.filter(|every| *every < remaining);
+        polled_last = false;
+        let poll_due =
+            poll_every(options.poll_every, signal_rounds).filter(|every| *every < remaining);
         let wait = poll_due.unwrap_or(remaining);
         let race = ctx.race();
         let race = if signal_rounds < MAX_SIGNAL_ROUNDS {
@@ -310,20 +333,23 @@ async fn wait_loop(
                     source: WaitSource::Signal,
                 });
             }
-        } else if poll_due.is_some()
-            && let Some(issue) = poll(ctx, &read).await?
-        {
-            newest_ms = newest_ms.max(issue.updated.map(|t| t.epoch_ms()));
-            last = issue.status.or(last);
-            if let Some(status) = at_target(last.as_ref(), target) {
-                return Ok(StatusWait::Reached {
-                    status,
-                    source: WaitSource::Poll,
-                });
+        } else if poll_due.is_some() {
+            polled_last = true;
+            if let Some(issue) = poll(ctx, &read).await? {
+                newest_ms = newest_ms.max(issue.updated.map(|t| t.epoch_ms()));
+                last = issue.status.or(last);
+                if let Some(status) = at_target(last.as_ref(), target) {
+                    return Ok(StatusWait::Reached {
+                        status,
+                        source: WaitSource::Poll,
+                    });
+                }
             }
         }
     }
-    if let Some(issue) = poll(ctx, &read).await? {
+    if needs_last_read(polled_last)
+        && let Some(issue) = poll(ctx, &read).await?
+    {
         last = issue.status.or(last);
     }
     Ok(
@@ -334,6 +360,39 @@ async fn wait_loop(
             }
         }),
     )
+}
+
+/// The poll interval of a round. Before the signal cap it is `poll_every`.
+/// From the cap on, the race has no signal branch, so the wait polls at
+/// least each [`DEFAULT_POLL_EVERY`] (R2C-harvest-1). The polls then stay in
+/// [`MAX_POLL_ROUNDS`]: [`MAX_WAIT`] at the default interval is 2 784 rounds.
+fn poll_every(poll_every: Option<Duration>, signal_rounds: u32) -> Option<Duration> {
+    if signal_rounds < MAX_SIGNAL_ROUNDS {
+        return poll_every;
+    }
+    Some(poll_every.map_or(DEFAULT_POLL_EVERY, |every| every.min(DEFAULT_POLL_EVERY)))
+}
+
+/// Returns `true` when the wait makes the last read at the deadline. A poll
+/// read that ended at or after the deadline is the last read already
+/// (R2C-harvest-2).
+const fn needs_last_read(polled_last: bool) -> bool {
+    !polled_last
+}
+
+/// The retry policy of the poll reads and the last read: the policy of
+/// `jira_get_issue`, with `jira.rate_limited` not retryable.
+///
+/// A rate-limited failure carries the `Retry-After` of Jira, and harvest
+/// waits up to 15 minutes for it before each new attempt. Those waits do not
+/// fit [`LAST_READ_MARGIN`]. A rate-limited poll is a missed poll, so the
+/// next poll or the deadline still ends the wait (R2C-harvest-2).
+fn wait_read_retry() -> RetryPolicy {
+    let mut retry = get_issue_retry();
+    retry
+        .non_retryable_errors
+        .push(format!("{ERROR_PREFIX}rate_limited"));
+    retry
 }
 
 /// The open waits, by the address of their workflow context.
@@ -391,12 +450,13 @@ impl Drop for OpenWait {
     }
 }
 
-/// A poll read. A retryable failure is a missed poll: `Ok(None)`.
+/// A poll read or the last read, with [`wait_read_retry`]. A retryable
+/// failure is a missed poll: `Ok(None)`.
 async fn poll(
     ctx: &WorkflowContext,
     read: &GetIssueInput,
 ) -> Result<Option<IssueSummary>, WorkflowFailure> {
-    match read_issue(ctx, read).await {
+    match read_issue(ctx, read, Some(wait_read_retry())).await {
         Ok(issue) => Ok(Some(issue)),
         Err(error) if is_missed_poll(&error) => {
             // The error type is a class. It holds no body and no secret.
@@ -470,17 +530,21 @@ const fn is_older(timestamp_ms: Option<i64>, newest_ms: Option<i64>) -> bool {
 }
 
 /// Reads the issue with `jira_get_issue` on the queue of the run [V GOTCHA].
+///
+/// `retry` `None` takes the retry of the activity info. The timeout always
+/// comes from the activity info. A strict replay matches the name and the
+/// input of an activity, not its retry, so a new retry keeps old histories
+/// replayable.
 async fn read_issue(
     ctx: &WorkflowContext,
     read: &GetIssueInput,
+    retry: Option<RetryPolicy>,
 ) -> Result<IssueSummary, HarvestError> {
-    // The retry and the timeout come from the activity info: the same
-    // history as an explicit `exponential(5, 1s)` and the read timeout.
     ctx.execute_activity_with_opts(
         &jira_get_issue_info(),
         read,
         Some(ctx.queue_name()),
-        None,
+        retry,
         None,
     )
     .await

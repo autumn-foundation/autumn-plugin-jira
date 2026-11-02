@@ -1090,7 +1090,8 @@ async fn one_poll_round_over_the_bound_fails() {
 
 /// R2C-harvest-3: a missed poll records more events than a good one: each
 /// attempt starts, and the last one fails. The worst case of the round
-/// bounds still fits the history cap with room for the workflow.
+/// bounds stays under 35 000 events, so 15 000 of the cap of 50 000 stay
+/// for the workflow. That is the claim of `MAX_POLL_ROUNDS`.
 #[tokio::test]
 async fn missed_polls_fit_the_history_cap() {
     let base = WorkflowTestEnv::new()
@@ -1130,7 +1131,7 @@ async fn missed_polls_fit_the_history_cap() {
         + signal_round * usize::try_from(autumn_jira_harvest::MAX_SIGNAL_ROUNDS).unwrap()
         + base.events().len();
     assert!(
-        worst < 25_000,
+        worst < 35_000,
         "{poll_round} events for each missed poll, {signal_round} for each signal: {worst}"
     );
 }
