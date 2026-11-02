@@ -22,21 +22,38 @@ impl JiraTimestamp {
     ///
     /// `JiraError::InvalidInput` when no format matches.
     pub fn parse(text: &str) -> Result<Self> {
-        let _ = text;
-        Err(JiraError::invalid("timestamp", "not ready"))
+        let bad = || {
+            JiraError::invalid(
+                "timestamp",
+                "must be %Y-%m-%dT%H:%M:%S%.f%z, RFC 3339 or epoch ms",
+            )
+        };
+        if !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()) {
+            return text
+                .parse::<i64>()
+                .ok()
+                .and_then(Self::from_epoch_ms)
+                .ok_or_else(bad);
+        }
+        DateTime::parse_from_str(text, "%Y-%m-%dT%H:%M:%S%.f%z")
+            .or_else(|_| DateTime::parse_from_rfc3339(text))
+            .map(|t| Self(t.with_timezone(&Utc)))
+            .map_err(|_| bad())
     }
 
     /// Makes a timestamp from epoch milliseconds. `None` when out of range.
     #[must_use]
     pub const fn from_epoch_ms(ms: i64) -> Option<Self> {
-        let _ = ms;
-        None
+        match DateTime::from_timestamp_millis(ms) {
+            Some(time) => Some(Self(time)),
+            None => None,
+        }
     }
 
     /// Returns the epoch milliseconds.
     #[must_use]
-    pub fn epoch_ms(&self) -> i64 {
-        0
+    pub const fn epoch_ms(&self) -> i64 {
+        self.0.timestamp_millis()
     }
 
     /// Returns the time.
@@ -54,8 +71,11 @@ impl From<DateTime<Utc>> for JiraTimestamp {
 
 impl fmt::Display for JiraTimestamp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let _ = f;
-        Ok(())
+        write!(
+            f,
+            "{}",
+            self.0.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        )
     }
 }
 
@@ -67,8 +87,19 @@ impl Serialize for JiraTimestamp {
 
 impl<'de> Deserialize<'de> for JiraTimestamp {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
-        let _ = serde_json::Value::deserialize(deserializer)?;
-        Err(serde::de::Error::custom("not ready"))
+        // Jira sends text in REST replies and epoch ms in webhooks.
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Wire {
+            Ms(i64),
+            Text(String),
+        }
+        match Wire::deserialize(deserializer)? {
+            Wire::Ms(ms) => {
+                Self::from_epoch_ms(ms).ok_or_else(|| serde::de::Error::custom("bad epoch ms"))
+            }
+            Wire::Text(text) => Self::parse(&text).map_err(serde::de::Error::custom),
+        }
     }
 }
 
@@ -96,7 +127,14 @@ mod tests {
             let t = JiraTimestamp::parse(text).unwrap_or_else(|e| panic!("{text}: {e}"));
             assert_eq!(t.epoch_ms(), ms, "{text}");
         }
-        for bad in ["", "yesterday", "2021-01-17", "2021-01-17T12:34:00", "12a", "-"] {
+        for bad in [
+            "",
+            "yesterday",
+            "2021-01-17",
+            "2021-01-17T12:34:00",
+            "12a",
+            "-",
+        ] {
             assert!(JiraTimestamp::parse(bad).is_err(), "{bad}");
         }
     }

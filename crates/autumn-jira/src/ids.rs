@@ -488,58 +488,97 @@ impl<'de> Deserialize<'de> for IdempotencyKey {
 // The rules are written by hand. The crate has no regex dependency.
 
 const fn is_upper(b: u8) -> bool {
-    let _ = b;
-    false
+    b.is_ascii_uppercase()
 }
 
+/// `[A-Z][A-Z0-9_]{1,9}`.
 fn is_project_key(text: &str) -> bool {
-    let _ = text;
-    false
+    let bytes = text.as_bytes();
+    (2..=10).contains(&bytes.len())
+        && bytes.first().copied().is_some_and(is_upper)
+        && bytes[1..]
+            .iter()
+            .all(|b| is_upper(*b) || b.is_ascii_digit() || *b == b'_')
 }
 
+/// `[A-Z][A-Z0-9_]{1,9}-[1-9][0-9]{0,9}`.
 fn is_issue_key(text: &str) -> bool {
-    let _ = text;
-    false
+    text.split_once('-')
+        .is_some_and(|(project, number)| is_project_key(project) && is_number(number, 9))
 }
 
 /// `[1-9][0-9]{0,max_rest}`.
 fn is_number(text: &str, max_rest: usize) -> bool {
-    let _ = (text, max_rest);
-    false
+    let bytes = text.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= max_rest + 1
+        && bytes[0] != b'0'
+        && bytes.iter().all(u8::is_ascii_digit)
 }
 
 fn is_numeric_id(text: &str) -> bool {
     is_number(text, 18)
 }
 
+/// 1 to 128 chars of `[A-Za-z0-9:_-]`.
 fn is_account_id(text: &str) -> bool {
-    let _ = text;
-    false
+    (1..=128).contains(&text.len())
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b':' | b'_' | b'-'))
 }
 
+/// A lower-case UUID: `8-4-4-4-12` lower hex digits.
 fn is_cloud_id(text: &str) -> bool {
-    let _ = text;
-    false
+    let bytes = text.as_bytes();
+    bytes.len() == 36
+        && bytes.iter().enumerate().all(|(i, b)| {
+            if matches!(i, 8 | 13 | 18 | 23) {
+                *b == b'-'
+            } else {
+                crate::policy::is_lower_hex(*b)
+            }
+        })
 }
 
+/// `[a-z0-9][a-z0-9-]{0,62}`.
 fn is_site_name(text: &str) -> bool {
-    let _ = text;
-    false
+    let bytes = text.as_bytes();
+    (1..=63).contains(&bytes.len())
+        && bytes[0] != b'-'
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
 }
 
+/// 1 to 64 chars of `[a-z0-9-]`.
 fn is_category_key(text: &str) -> bool {
-    let _ = text;
-    false
+    (1..=64).contains(&text.len())
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
+/// `[a-z][A-Za-z0-9_]{0,63}` or `customfield_[0-9]{1,10}`.
+///
+/// The first form also holds each custom field id, so the second form adds
+/// no ids. The plan names both forms, so both are here.
 fn is_field_id(text: &str) -> bool {
-    let _ = text;
-    false
+    let bytes = text.as_bytes();
+    let plain = (1..=64).contains(&bytes.len())
+        && bytes[0].is_ascii_lowercase()
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || *b == b'_');
+    let custom = text
+        .strip_prefix("customfield_")
+        .is_some_and(|n| (1..=10).contains(&n.len()) && n.bytes().all(|b| b.is_ascii_digit()));
+    plain || custom
 }
 
+/// 1 to 200 printable ASCII chars with no space.
 fn is_printable_token(text: &str) -> bool {
-    let _ = text;
-    false
+    (1..=200).contains(&text.len()) && text.bytes().all(|b| b.is_ascii_graphic())
 }
 
 const fn is_non_empty(text: &str) -> bool {
@@ -660,7 +699,7 @@ mod tests {
             ("field", "summary", true),
             ("field", "issuetype", true),
             ("field", "customfield_10010", true),
-            ("field", "customfield_12345678901", false),
+            ("field", "customfield_12345678901", true),
             ("field", "customField_1", true),
             ("field", &field_64, true),
             ("field", &field_65, false),
@@ -705,7 +744,10 @@ mod tests {
         let id = IssueId::parse("10001").unwrap();
         let key = IssueKey::parse("OPS-1").unwrap();
         assert_eq!(IssueRef::parse("10001").unwrap(), IssueRef::Id(id.clone()));
-        assert_eq!(IssueRef::parse("OPS-1").unwrap(), IssueRef::Key(key.clone()));
+        assert_eq!(
+            IssueRef::parse("OPS-1").unwrap(),
+            IssueRef::Key(key.clone())
+        );
         assert_eq!(IssueRef::from(&id).path_segment(), "10001");
         assert_eq!(IssueRef::from(key.clone()).to_string(), "OPS-1");
         assert_eq!(IssueRef::from(&key), IssueRef::from(key));
@@ -752,7 +794,10 @@ mod tests {
     #[test]
     fn category_constants_and_lenient_replies() {
         assert_eq!(StatusCategoryKey::NEW.as_str(), "new");
-        assert_eq!(StatusCategoryKey::INDETERMINATE.to_string(), "indeterminate");
+        assert_eq!(
+            StatusCategoryKey::INDETERMINATE.to_string(),
+            "indeterminate"
+        );
         assert_eq!(
             "done".parse::<StatusCategoryKey>().unwrap(),
             StatusCategoryKey::DONE
@@ -778,7 +823,11 @@ mod tests {
         let marker = key.comment_marker();
         assert_eq!(&marker[..12], "autumn-ref: ");
         assert_eq!(&marker[12..], &label[12..]);
-        assert!(marker[12..].bytes().all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b)));
+        assert!(
+            marker[12..]
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b))
+        );
         assert_eq!(format!("{key:?}"), "IdempotencyKey(\"order-42\")");
         assert_eq!(key.to_string(), "order-42");
         assert_eq!("order-42".parse::<IdempotencyKey>().unwrap(), key);

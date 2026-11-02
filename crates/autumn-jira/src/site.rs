@@ -24,16 +24,20 @@ impl JiraSite {
     /// Returns the base URL. It is the only base URL builder (guard test).
     #[must_use]
     pub fn base_url(&self) -> String {
-        let _ = self;
-        String::new()
+        match self {
+            Self::Subdomain(name) => format!("https://{name}.atlassian.net"),
+            Self::CloudId(id) => format!("https://api.atlassian.com/ex/jira/{id}"),
+        }
     }
 
     /// Returns a label for logs and health: `acme.atlassian.net` or
     /// `cloud:<id>`. It holds no secret.
     #[must_use]
     pub fn label(&self) -> String {
-        let _ = self;
-        String::new()
+        match self {
+            Self::Subdomain(name) => format!("{name}.atlassian.net"),
+            Self::CloudId(id) => format!("cloud:{id}"),
+        }
     }
 }
 
@@ -52,22 +56,32 @@ impl BasicAuth {
     /// `JiraError::InvalidInput` for an empty email or an empty token.
     pub fn new(email: impl Into<String>, token: Secret) -> Result<Self> {
         let email = email.into();
-        let _ = (email, token);
-        Err(JiraError::invalid("basic auth", "not ready"))
+        if email.trim().is_empty() {
+            return Err(JiraError::invalid("basic auth", "the email is empty"));
+        }
+        if token.is_empty() {
+            return Err(JiraError::invalid("basic auth", "the API token is empty"));
+        }
+        Ok(Self { email, token })
     }
 
     /// Returns the `Authorization` header value: `Basic base64(email:token)`.
     #[allow(dead_code, reason = "the DirectBackend of WP3 uses it")]
     pub(crate) fn authorization(&self) -> Secret {
-        let _ = (&self.email, &self.token);
-        Secret::new("")
+        let pair = format!("{}:{}", self.email, self.token.expose());
+        Secret::new(format!(
+            "Basic {}",
+            data_encoding::BASE64.encode(pair.as_bytes())
+        ))
     }
 }
 
 impl fmt::Debug for BasicAuth {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let _ = f;
-        Ok(())
+        f.debug_struct("BasicAuth")
+            .field("email", &"<redacted>")
+            .field("token", &"<redacted>")
+            .finish()
     }
 }
 

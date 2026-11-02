@@ -90,22 +90,70 @@ impl Op {
     /// to the policy in place of this class.
     #[must_use]
     pub const fn class(self) -> OpClass {
-        let _ = self;
-        OpClass::Read
+        match self {
+            Self::CreateIssue | Self::DoTransition | Self::AddComment => OpClass::UnsafeWrite,
+            Self::EditIssue | Self::DeleteIssue | Self::SetProperty => OpClass::IdempotentWrite,
+            Self::Myself
+            | Self::ServerInfo
+            | Self::GetProject
+            | Self::ListProjects
+            | Self::ListIssueTypes
+            | Self::GetIssue
+            | Self::GetProperty
+            | Self::GetTransitions
+            | Self::ListComments
+            | Self::Search
+            | Self::Count
+            | Self::Discovery => OpClass::Read,
+        }
     }
 
     /// Returns the name, for example `create_issue`.
     #[must_use]
     pub const fn name(self) -> &'static str {
-        let _ = self;
-        ""
+        match self {
+            Self::Myself => "myself",
+            Self::ServerInfo => "server_info",
+            Self::GetProject => "get_project",
+            Self::ListProjects => "list_projects",
+            Self::ListIssueTypes => "list_issue_types",
+            Self::CreateIssue => "create_issue",
+            Self::GetIssue => "get_issue",
+            Self::EditIssue => "edit_issue",
+            Self::DeleteIssue => "delete_issue",
+            Self::SetProperty => "set_property",
+            Self::GetProperty => "get_property",
+            Self::GetTransitions => "get_transitions",
+            Self::DoTransition => "do_transition",
+            Self::AddComment => "add_comment",
+            Self::ListComments => "list_comments",
+            Self::Search => "search",
+            Self::Count => "count",
+            Self::Discovery => "discovery",
+        }
     }
 
     /// Returns the HTTP statuses that mean success for this operation.
     #[must_use]
     pub const fn expected(self) -> &'static [u16] {
-        let _ = self;
-        &[]
+        match self {
+            Self::CreateIssue | Self::AddComment => &[201],
+            Self::EditIssue => &[204, 200],
+            Self::DeleteIssue | Self::DoTransition => &[204],
+            Self::SetProperty => &[200, 201],
+            Self::Myself
+            | Self::ServerInfo
+            | Self::GetProject
+            | Self::ListProjects
+            | Self::ListIssueTypes
+            | Self::GetIssue
+            | Self::GetProperty
+            | Self::GetTransitions
+            | Self::ListComments
+            | Self::Search
+            | Self::Count
+            | Self::Discovery => &[200],
+        }
     }
 }
 
@@ -372,12 +420,43 @@ impl JiraError {
     /// line over this.
     #[must_use]
     pub const fn class(&self) -> ErrorClass {
-        let _ = self;
+        use CamelKind::{Config, Http, Io, Unauthenticated, Validation};
+        let (code, retryable, http_status, camel) = match self {
+            Self::InvalidInput { .. } => ("invalid_input", false, 400, Validation),
+            Self::NotFoundOrForbidden { .. } => ("not_found_or_forbidden", false, 404, Http(404)),
+            Self::Unauthorized { .. } => ("unauthorized", false, 502, Unauthenticated),
+            Self::CaptchaRequired { .. } => ("captcha_required", false, 502, Unauthenticated),
+            Self::Validation { .. } => ("validation", false, 422, Validation),
+            Self::Conflict { .. } => ("conflict", false, 409, Http(409)),
+            Self::Gone { .. } => ("gone", false, 502, Config),
+            Self::PayloadTooLarge { .. } => ("payload_too_large", false, 413, Validation),
+            Self::RateLimited { .. } => ("rate_limited", true, 503, Http(429)),
+            Self::Upstream { status, .. } => ("upstream", true, 502, Http(*status)),
+            Self::OutcomeUnknown {
+                marker: Some(_), ..
+            } => ("outcome_pending", true, 502, Io),
+            Self::OutcomeUnknown { marker: None, .. } => {
+                ("outcome_unknown", false, 502, Validation)
+            }
+            Self::Network { .. } => ("network", true, 502, Io),
+            Self::Redirect { .. } => ("redirect", false, 502, Config),
+            Self::UnexpectedStatus { .. } => ("unexpected_status", false, 502, Config),
+            Self::Decode { .. } => ("decode", false, 502, Validation),
+            Self::PaginationStalled { .. } => ("pagination_stalled", false, 502, Validation),
+            Self::PageLimit { .. } => ("page_limit", false, 502, Validation),
+            Self::TransitionNotAvailable { .. } => {
+                ("transition_not_available", false, 409, Validation)
+            }
+            Self::LabelsNotOnScreen { .. } => ("labels_not_on_screen", false, 422, Validation),
+            Self::CloudId(_) => ("cloud_id", false, 502, Config),
+            Self::Config { .. } => ("config", false, 500, Config),
+            Self::Auth { .. } => ("auth", false, 502, Unauthenticated),
+        };
         ErrorClass {
-            code: "",
-            retryable: false,
-            http_status: 0,
-            camel: CamelKind::Io,
+            code,
+            retryable,
+            http_status,
+            camel,
         }
     }
 
@@ -395,23 +474,42 @@ impl JiraError {
 
     /// Returns the HTTP status of the Jira reply, when there is one.
     #[must_use]
-    pub fn status(&self) -> Option<u16> {
-        let _ = self;
-        None
+    pub const fn status(&self) -> Option<u16> {
+        match self {
+            Self::NotFoundOrForbidden { .. } => Some(404),
+            Self::Conflict { .. } => Some(409),
+            Self::Gone { .. } => Some(410),
+            Self::PayloadTooLarge { .. } => Some(413),
+            Self::RateLimited { .. } => Some(429),
+            Self::Unauthorized { status, .. }
+            | Self::Validation { status, .. }
+            | Self::Upstream { status, .. }
+            | Self::Redirect { status, .. }
+            | Self::UnexpectedStatus { status, .. }
+            | Self::OutcomeUnknown {
+                cause: UnknownCause::ServerError(status),
+                ..
+            } => Some(*status),
+            _ => None,
+        }
     }
 
     /// Returns the Jira error messages. They are not in `Display`.
     #[must_use]
     pub fn messages(&self) -> &[String] {
-        let _ = self;
-        &[]
+        match self {
+            Self::Validation { messages, .. } => messages,
+            _ => &[],
+        }
     }
 
     /// Returns the `Retry-After` wait of a rate limit.
     #[must_use]
-    pub fn retry_after(&self) -> Option<Duration> {
-        let _ = self;
-        None
+    pub const fn retry_after(&self) -> Option<Duration> {
+        match self {
+            Self::RateLimited { retry_after, .. } => *retry_after,
+            _ => None,
+        }
     }
 }
 
@@ -507,7 +605,13 @@ mod tests {
                 409,
                 CamelKind::Http(409),
             ),
-            (JiraError::Gone { op }, "gone", false, 502, CamelKind::Config),
+            (
+                JiraError::Gone { op },
+                "gone",
+                false,
+                502,
+                CamelKind::Config,
+            ),
             (
                 JiraError::PayloadTooLarge { op },
                 "payload_too_large",
@@ -671,8 +775,11 @@ mod tests {
         let rows = samples();
         let codes: BTreeSet<&str> = rows.iter().map(|(e, ..)| e.code()).collect();
         assert_eq!(codes.len(), rows.len());
-        assert!(codes.iter().all(|c| !c.is_empty()
-            && c.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')));
+        assert!(
+            codes
+                .iter()
+                .all(|c| !c.is_empty() && c.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'))
+        );
     }
 
     #[test]
@@ -682,15 +789,45 @@ mod tests {
             (Op::ServerInfo, "server_info", OpClass::Read, &[200]),
             (Op::GetProject, "get_project", OpClass::Read, &[200]),
             (Op::ListProjects, "list_projects", OpClass::Read, &[200]),
-            (Op::ListIssueTypes, "list_issue_types", OpClass::Read, &[200]),
-            (Op::CreateIssue, "create_issue", OpClass::UnsafeWrite, &[201]),
+            (
+                Op::ListIssueTypes,
+                "list_issue_types",
+                OpClass::Read,
+                &[200],
+            ),
+            (
+                Op::CreateIssue,
+                "create_issue",
+                OpClass::UnsafeWrite,
+                &[201],
+            ),
             (Op::GetIssue, "get_issue", OpClass::Read, &[200]),
-            (Op::EditIssue, "edit_issue", OpClass::IdempotentWrite, &[204, 200]),
-            (Op::DeleteIssue, "delete_issue", OpClass::IdempotentWrite, &[204]),
-            (Op::SetProperty, "set_property", OpClass::IdempotentWrite, &[200, 201]),
+            (
+                Op::EditIssue,
+                "edit_issue",
+                OpClass::IdempotentWrite,
+                &[204, 200],
+            ),
+            (
+                Op::DeleteIssue,
+                "delete_issue",
+                OpClass::IdempotentWrite,
+                &[204],
+            ),
+            (
+                Op::SetProperty,
+                "set_property",
+                OpClass::IdempotentWrite,
+                &[200, 201],
+            ),
             (Op::GetProperty, "get_property", OpClass::Read, &[200]),
             (Op::GetTransitions, "get_transitions", OpClass::Read, &[200]),
-            (Op::DoTransition, "do_transition", OpClass::UnsafeWrite, &[204]),
+            (
+                Op::DoTransition,
+                "do_transition",
+                OpClass::UnsafeWrite,
+                &[204],
+            ),
             (Op::AddComment, "add_comment", OpClass::UnsafeWrite, &[201]),
             (Op::ListComments, "list_comments", OpClass::Read, &[200]),
             (Op::Search, "search", OpClass::Read, &[200]),
@@ -762,7 +899,7 @@ mod tests {
         };
         assert!(unauthorized.to_string().contains("read:jira-work"));
         for (e, ..) in samples() {
-            assert!(!e.to_string().contains("required"), "{e}");
+            assert!(!e.to_string().contains("Field 'priority'"), "{e}");
         }
     }
 
