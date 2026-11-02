@@ -5,22 +5,39 @@
 //!
 //! - **Config:** the `[jira]` section. It holds env var names, never
 //!   secrets. The table that exists sets the mode: `[jira.api_token]` or
-//!   `[jira.san_mateo]`.
+//!   `[jira.san_mateo]`. San Mateo mode needs `SanMateoPlugin`, registered
+//!   before `JiraPlugin`.
+//! - **Service:** [`JiraService`] is in the app state after the start. It
+//!   is an extractor and derefs to [`JiraClient`]. `.http()?`
+//!   ([`JiraResultExt`]) answers a Jira error with its HTTP status. The
+//!   start makes no network call.
+//! - **Health:** the `jira` indicator in `/actuator/health`
+//!   ([`JiraHealth`], `HealthOnly`, so `/ready` does not wait for Jira).
 //! - **Webhook route:** a `POST` route at the full path `{prefix}/webhook`
-//!   (default `/jira/webhook`). autumn checks the signature with its
+//!   (default `/jira/webhook`), mounted with a sink, an `on_event` closure
+//!   or `webhook_route()`. autumn checks the signature with its
 //!   `SignedWebhook` extractor. The app declares the endpoint in
 //!   `[[security.webhooks.endpoints]]`. The start fails when that entry does
 //!   not fit Jira, and the error gives the TOML that fits. Use
-//!   [`webhook_endpoint`] or [`webhook_endpoint_toml`].
+//!   [`webhook_endpoint`] or [`webhook_endpoint_toml`]. After the signature
+//!   check the route answers 200 or 503 only.
+//! - **Tests:** the `testing` feature gives `testing::plugin_for(&fake)`,
+//!   `testing::app_config()` and `deliver(..)`.
 //!
-//! Webhooks are at least once. A handler must be idempotent.
+//! Webhooks are at least once. Each sink can get the same delivery again,
+//! also when another sink fails. Make each sink idempotent.
 //!
 //! ```rust,no_run
-//! use autumn_plugin_jira::JiraPlugin;
+//! use std::sync::Arc;
+//!
+//! use autumn_plugin_jira::{Delivery, JiraPlugin};
 //!
 //! # async fn demo() {
 //! autumn_web::app()
-//!     .plugin(JiraPlugin::new().webhook_route())
+//!     .plugin(JiraPlugin::new().on_event(|delivery: Arc<Delivery>, _state| async move {
+//!         tracing::info!(event = %delivery.event, "jira event");
+//!         Ok(())
+//!     }))
 //!     .run()
 //!     .await;
 //! # }
