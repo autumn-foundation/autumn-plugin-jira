@@ -516,7 +516,7 @@ fn parse_issue_type(value: &str) -> Result<IssueTypeRef, CamelError> {
 
 /// `id:<n>` gives a status id, `category:<key>` a category, other text a
 /// status name.
-fn parse_status(value: &str) -> Result<StatusTarget, CamelError> {
+pub(crate) fn parse_status(value: &str) -> Result<StatusTarget, CamelError> {
     if let Some(id) = value.strip_prefix("id:") {
         return StatusId::parse(id)
             .map(StatusTarget::Id)

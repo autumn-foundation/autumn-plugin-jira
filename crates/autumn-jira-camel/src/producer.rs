@@ -16,8 +16,10 @@ use serde_json::json;
 
 use crate::error::to_camel_error;
 use crate::input;
-use crate::options::{EndpointOptions, Operation};
-use crate::{HEADER_ISSUE_ID, HEADER_ISSUE_KEY, HEADER_NEXT_TOKEN, HEADER_OUTCOME};
+use crate::options::{EndpointOptions, Operation, parse_status};
+use crate::{
+    HEADER_ISSUE_ID, HEADER_ISSUE_KEY, HEADER_JQL, HEADER_NEXT_TOKEN, HEADER_OUTCOME, HEADER_STATUS,
+};
 
 /// The harvest-camel header with the activity idempotency key. It is the
 /// same for each attempt of one activity.
@@ -129,10 +131,22 @@ impl Producer {
             Operation::TransitionToStatus => {
                 let fields = input::transition(input::read(body, op, max).await?)?;
                 let issue = self.issue(message)?;
-                let target = options
-                    .status
-                    .clone()
-                    .ok_or_else(|| missing(op, "the status option"))?;
+                let parse = |value: &Value| match value {
+                    Value::String(text) => parse_status(text).map_err(|_| {
+                        bad_header(
+                            HEADER_STATUS,
+                            "must be a status name, id:<n> or category:<key>",
+                        )
+                    }),
+                    _ => Err(bad_header(HEADER_STATUS, "must be a string")),
+                };
+                let target = overridden(
+                    message,
+                    options,
+                    Override::new(HEADER_STATUS, "status"),
+                    options.status.as_ref(),
+                    parse,
+                )?;
                 let outcome = self
                     .client
                     .transition_to_status_with(issue.clone(), &target, &fields)
@@ -161,16 +175,33 @@ impl Producer {
                     Some(marked) => self.comment_marked(&issue, &text, &marked).await,
                 }
             }
-            Operation::Search => self.search().await,
+            Operation::Search => self.search(message).await,
         }
     }
 
-    /// The issue of the call.
-    fn issue(&self, _message: &Message) -> Result<IssueRef, Failure> {
-        self.options
-            .issue_key
-            .clone()
-            .ok_or_else(|| missing(self.options.operation, "the issueKey option"))
+    /// The issue of the call: the `issueKey` option or the `JiraIssueKey`
+    /// header.
+    fn issue(&self, message: &Message) -> Result<IssueRef, Failure> {
+        let parse = |value: &Value| {
+            let text = match value {
+                Value::String(text) => text.clone(),
+                Value::Number(n) => n.to_string(),
+                _ => String::new(),
+            };
+            IssueRef::parse(&text).map_err(|_| {
+                bad_header(
+                    HEADER_ISSUE_KEY,
+                    "must be an issue key or a numeric issue id",
+                )
+            })
+        };
+        Ok(overridden(
+            message,
+            &self.options,
+            Override::new(HEADER_ISSUE_KEY, "issueKey"),
+            self.options.issue_key.as_ref(),
+            parse,
+        )?)
     }
 
     /// `createIssue`.
@@ -275,12 +306,41 @@ impl Producer {
 
     /// `search`: at most `maxPages` pages. When more pages exist, the reply
     /// has the token of the next page.
-    async fn search(&self) -> Result<Reply, Failure> {
+    async fn search(&self, message: &Message) -> Result<Reply, Failure> {
         let options = &self.options;
-        let jql = match (&options.jql, &options.project) {
-            (Some(jql), _) => Jql::raw(jql.as_str()),
-            (None, Some(project)) => Jql::project(project),
-            (None, None) => return Err(missing(options.operation, "the jql option")),
+        let jql = match &options.project {
+            Some(project) if options.allow_header_overrides => {
+                if header(message, HEADER_JQL).is_some() {
+                    return Err(Failure::Camel(bad_header(
+                        HEADER_JQL,
+                        "cannot replace the project option: the JQL is raw, so the \
+                         component does not add a project clause to it",
+                    )));
+                }
+                Jql::project(project)
+            }
+            Some(project) => {
+                // Without the flag, a JiraJql header fails: no option gives
+                // that query.
+                if header(message, HEADER_JQL).is_some() {
+                    return Err(Failure::Camel(not_allowed(HEADER_JQL, "jql")));
+                }
+                Jql::project(project)
+            }
+            None => {
+                let parse = |value: &Value| match value {
+                    Value::String(text) if !text.trim().is_empty() => Ok(text.clone()),
+                    _ => Err(bad_header(HEADER_JQL, "must be a non-empty JQL string")),
+                };
+                let jql = overridden(
+                    message,
+                    options,
+                    Override::new(HEADER_JQL, "jql"),
+                    options.jql.as_ref(),
+                    parse,
+                )?;
+                Jql::raw(jql)
+            }
         };
         let mut request = SearchRequest::new(jql).max_results(options.max_results);
         if let Some(fields) = &options.fields {
@@ -392,6 +452,60 @@ fn marked(message: &Message, options: &EndpointOptions) -> Result<Option<Marked>
         Previous::First
     };
     Ok(Some(Marked { key, previous }))
+}
+
+/// An in header that can replace an option.
+#[derive(Debug, Clone, Copy)]
+struct Override {
+    /// The header name, for example `JiraIssueKey`.
+    header: &'static str,
+    /// The option name, for example `issueKey`.
+    option: &'static str,
+}
+
+impl Override {
+    const fn new(header: &'static str, option: &'static str) -> Self {
+        Self { header, option }
+    }
+}
+
+/// The error of an override header without `allowHeaderOverrides` (R18).
+/// It does not hold the header value.
+fn not_allowed(header: &str, option: &str) -> CamelError {
+    CamelError::ValidationError(format!(
+        "the {header} header can replace the {option} option only with \
+         allowHeaderOverrides=true; the endpoint does not set it, so the \
+         header must not be there or must equal the option"
+    ))
+}
+
+/// Returns the value of an option that a header can replace.
+///
+/// With `allowHeaderOverrides`, the header wins over the option. Without
+/// it, a header that differs from the option fails the exchange, and does
+/// not stay silent (R18). A header equal to the option changes nothing, so
+/// it passes: it is often the out header of an earlier `jira:` step on the
+/// same issue.
+fn overridden<T: Clone + PartialEq>(
+    message: &Message,
+    options: &EndpointOptions,
+    rule: Override,
+    option: Option<&T>,
+    parse: impl Fn(&Value) -> Result<T, CamelError>,
+) -> Result<T, CamelError> {
+    match header(message, rule.header) {
+        Some(value) if options.allow_header_overrides => parse(value),
+        Some(value) => match (parse(value).ok(), option) {
+            (Some(parsed), Some(option)) if parsed == *option => Ok(parsed),
+            _ => Err(not_allowed(rule.header, rule.option)),
+        },
+        None => option.cloned().ok_or_else(|| {
+            CamelError::ValidationError(format!(
+                "{} needs the {} header: the endpoint has no {} option",
+                options.operation, rule.header, rule.option
+            ))
+        }),
+    }
 }
 
 /// The failure of a negative lookup on a retry attempt. It is not
