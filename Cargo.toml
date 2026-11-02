@@ -70,3 +70,11 @@ print_stderr = "deny"
 redundant_pub_crate = "allow"
 # Names such as `autumn_jira::client::JiraClient` are clear.
 module_name_repetitions = "allow"
+
+# Small debug info keeps the build directory small. Coverage does not need
+# it: llvm-cov reads its own instrumentation.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
