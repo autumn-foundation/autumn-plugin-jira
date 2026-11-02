@@ -1,4 +1,9 @@
 //! Signed webhook deliveries in the shape of the Jira webhook page.
+//!
+//! Jira sends webhook payloads in the REST v2 shape, not in the REST v3
+//! shape of the API replies: a comment `body` and a `description` are
+//! text, and each `self` link is a `/rest/api/2/` link (the example
+//! payload of the Jira webhook page). [`to_v2`] makes that shape.
 
 use std::sync::Arc;
 
@@ -60,12 +65,26 @@ pub(crate) fn emit(state: &mut State, event: &Event<'_>, issue: &Issue, actor: &
     };
     let timestamp = state.clock.now().timestamp_millis();
     let body = match event {
-        Event::CommentCreated(comment) => json!({
-            "timestamp": timestamp,
-            "webhookEvent": "comment_created",
-            "comment": render::comment(state, issue, comment),
-            "issue": reduced_issue(state, issue),
-        }),
+        Event::CommentCreated(comment) => {
+            // Jira also sends an issue update of type `issue_commented`
+            // with the comment.
+            let mut update = issue_body(
+                state,
+                timestamp,
+                "jira:issue_updated",
+                "issue_commented",
+                issue,
+                actor,
+            );
+            update["comment"] = render::comment(state, issue, comment);
+            queue(state, &secret, &update);
+            json!({
+                "timestamp": timestamp,
+                "webhookEvent": "comment_created",
+                "comment": render::comment(state, issue, comment),
+                "issue": reduced_issue(state, issue),
+            })
+        }
         Event::Created => issue_body(
             state,
             timestamp,
@@ -100,11 +119,37 @@ pub(crate) fn emit(state: &mut State, event: &Event<'_>, issue: &Issue, actor: &
             body
         }
     };
+    queue(state, &secret, &body);
+}
+
+/// Signs a body in the REST v2 shape and queues it.
+fn queue(state: &mut State, secret: &Arc<[u8]>, body: &Value) {
     let id = format!("{}-{}", state.site, state.next_delivery);
     state.next_delivery += 1;
-    state
-        .deliveries
-        .push(build(&secret, &id, body.to_string().into_bytes()));
+    let bytes = to_v2(body.clone()).to_string().into_bytes();
+    state.deliveries.push(build(secret, &id, bytes));
+}
+
+/// Turns a REST v3 value into the REST v2 shape of a webhook payload: each
+/// ADF document becomes its text, and each `self` link to `/rest/api/3/`
+/// becomes a `/rest/api/2/` link. Other text does not change.
+pub(crate) fn to_v2(value: Value) -> Value {
+    match value {
+        v if render::is_adf(&v) => Value::String(render::wiki_text(&v)),
+        Value::Array(items) => Value::Array(items.into_iter().map(to_v2).collect()),
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(k, v)| match v {
+                    Value::String(link) if k == "self" => {
+                        let link = link.replace("/rest/api/3/", "/rest/api/2/");
+                        (k, Value::String(link))
+                    }
+                    v => (k, to_v2(v)),
+                })
+                .collect(),
+        ),
+        other => other,
+    }
 }
 
 /// Returns the body of an issue event, with no changelog.

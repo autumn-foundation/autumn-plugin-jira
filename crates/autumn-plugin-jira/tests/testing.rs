@@ -42,7 +42,12 @@ async fn app_handler_test_in_ten_lines() {
     }
     assert_eq!(
         *seen.lock().unwrap(),
-        ["jira:issue_created", "comment_created"]
+        // Jira sends an `issue_commented` update and a `comment_created`.
+        [
+            "jira:issue_created",
+            "jira:issue_updated",
+            "comment_created"
+        ]
     );
     // A tampered copy fails the autumn signature check.
     fake.human_comment(issue.key.as_str(), "Again", "ann")

@@ -1528,16 +1528,17 @@ fn deliveries_are_signed() {
         .unwrap();
     fake.human_edit_labels(&key, &["b"], &["a"], ANN).unwrap();
     let more = fake.take_deliveries();
-    assert_eq!(more.len(), 2);
-    let comment = check(&more[0]);
+    assert_eq!(more.len(), 3);
+    let commented = check(&more[0]);
+    assert_eq!(commented["webhookEvent"], "jira:issue_updated");
+    assert_eq!(commented["issue_event_type_name"], "issue_commented");
+    let comment = check(&more[1]);
     assert_eq!(comment["webhookEvent"], "comment_created");
     assert_eq!(comment["comment"]["author"]["accountId"], ANN);
-    assert_eq!(
-        comment["comment"]["body"]["content"][1]["content"][0]["text"],
-        "second line"
-    );
+    // The REST v2 shape: the body is text.
+    assert_eq!(comment["comment"]["body"], "looks good\n\nsecond line");
     assert_eq!(comment["issue"]["key"], key.as_str());
-    let labels = check(&more[1]);
+    let labels = check(&more[2]);
     let item = &labels["changelog"]["items"][0];
     assert_eq!(item["field"], "labels");
     assert_eq!(item["fromString"], "a");
@@ -1589,6 +1590,7 @@ fn deliveries_are_signed() {
         [
             "jira:issue_updated",
             "jira:issue_updated",
+            "jira:issue_updated",
             "comment_created",
             "jira:issue_deleted"
         ]
@@ -1627,7 +1629,7 @@ fn deliveries_are_signed() {
     let body = check(&as_bot);
     assert_eq!(body["user"]["accountId"], BOT);
     assert_ne!(as_bot.id(), original.id());
-    let comment_as = more[0].with_actor("acct-other");
+    let comment_as = more[1].with_actor("acct-other");
     assert_eq!(
         check(&comment_as)["comment"]["author"]["accountId"],
         "acct-other"

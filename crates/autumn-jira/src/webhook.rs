@@ -30,8 +30,11 @@ pub const RETRY_HEADER: &str = "X-Atlassian-Webhook-Retry";
 /// The flow header: `Primary` or `Secondary`.
 pub const FLOW_HEADER: &str = "X-Atlassian-Webhook-Flow";
 
-/// The text that marks a comment of this client (the loop guard).
+/// The text that starts the marker of a comment of this client (the loop
+/// guard).
 const COMMENT_MARKER: &str = "autumn-ref: ";
+/// The number of chars after [`COMMENT_MARKER`]: lower base32 of SHA-256.
+const MARKER_CHARS: usize = 26;
 /// The method part of the signature header.
 const SIGNATURE_PREFIX: &str = "sha256=";
 
@@ -54,7 +57,10 @@ pub struct Delivery {
     /// The `timestamp` of the payload.
     pub timestamp: Option<JiraTimestamp>,
     /// The account id of `user`: the actor. A comment event with no
-    /// `user` gives the comment author.
+    /// `user` gives the person who wrote this version of the comment:
+    /// `author` for `comment_created`, `updateAuthor` (else `author`) for
+    /// `comment_updated`. A `comment_deleted` with no `user` gives `None`,
+    /// because the payload does not tell who deleted the comment.
     pub actor: Option<AccountId>,
 }
 
@@ -147,6 +153,10 @@ pub struct IssueEvent {
     pub changelog: Vec<ChangeItem>,
     /// `issue_event_type_name`, as free text.
     pub type_name: Option<String>,
+    /// The `comment` of the payload. Jira sends one on a
+    /// `jira:issue_updated` with type `issue_commented`. `None` when the
+    /// payload has no comment, or a comment with no numeric id.
+    pub comment: Option<WebhookComment>,
 }
 
 /// A comment event.
@@ -186,14 +196,22 @@ pub struct WebhookFields {
 }
 
 /// The comment of a payload.
+///
+/// Jira sends webhook payloads in the REST v2 shape (the Jira webhook
+/// page): the comment `body` is a wiki markup string. The parser also
+/// takes an ADF body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebhookComment {
     /// The numeric id.
     pub id: CommentId,
-    /// The body.
+    /// The body. A string body (REST v2) gives one paragraph for each line
+    /// of the raw text. The parser does not read wiki markup.
     pub body: Option<Adf>,
     /// The account id of the author.
     pub author: Option<AccountId>,
+    /// The account id of `updateAuthor`: the person who changed the
+    /// comment last.
+    pub update_author: Option<AccountId>,
 }
 
 /// One changelog item.
@@ -273,18 +291,33 @@ impl JiraEvent {
         })
     }
 
-    /// Returns `true` when the comment holds `autumn-ref: `: the client
-    /// wrote it (loop guard, B9).
+    /// Returns the comment of the event: the comment of a comment event,
+    /// or the comment of an `issue_commented` update.
+    #[must_use]
+    pub const fn comment(&self) -> Option<&WebhookComment> {
+        match self {
+            Self::CommentCreated(e) | Self::CommentUpdated(e) | Self::CommentDeleted(e) => {
+                Some(&e.comment)
+            }
+            Self::IssueCreated(e) | Self::IssueUpdated(e) | Self::IssueDeleted(e) => {
+                e.comment.as_ref()
+            }
+            Self::Other { .. } => None,
+        }
+    }
+
+    /// Returns `true` when the last non-empty line of the comment is a full
+    /// marker: `autumn-ref: ` and 26 lower base32 chars. The client wrote
+    /// such a comment (loop guard, B9). The prefix in other text, or a
+    /// quoted marker with a reply below it, does not count.
+    ///
+    /// The marker has no key, so a person can type a full marker. A sink
+    /// that must not drop such a comment also checks the comment author.
     #[must_use]
     pub fn has_comment_marker(&self) -> bool {
-        match self {
-            Self::CommentCreated(e) | Self::CommentUpdated(e) | Self::CommentDeleted(e) => e
-                .comment
-                .body
-                .as_ref()
-                .is_some_and(|b| b.contains_text(COMMENT_MARKER)),
-            _ => false,
-        }
+        self.comment()
+            .and_then(|c| c.body.as_ref())
+            .is_some_and(|b| ends_with_marker(&b.to_plain_text()))
     }
 }
 
@@ -324,16 +357,16 @@ pub fn parse_event(body: &[u8]) -> Result<ParsedEvent> {
         Value::String(text) => JiraTimestamp::parse(text).ok(),
         _ => None,
     });
-    // A comment event can have no top-level `user`: the actor is then the
-    // comment author.
-    let actor = account(payload.user.as_ref())
-        .or_else(|| account(payload.comment.as_ref().and_then(|c| c.get("author"))));
+    // A comment event can have no top-level `user`.
+    let actor = actor(&name, payload.user.as_ref(), payload.comment.as_ref());
     let event = match name.as_str() {
         ISSUE_CREATED | ISSUE_UPDATED | ISSUE_DELETED => {
             let event = IssueEvent {
                 issue: webhook_issue(payload.issue.as_ref())?,
                 changelog: changelog(payload.changelog.as_ref()),
                 type_name: payload.issue_event_type_name,
+                // Lenient: a bad comment does not drop the issue event.
+                comment: webhook_comment(payload.comment.as_ref()).ok(),
             };
             match name.as_str() {
                 ISSUE_CREATED => JiraEvent::IssueCreated(event),
@@ -358,6 +391,32 @@ pub fn parse_event(body: &[u8]) -> Result<ParsedEvent> {
         event,
         timestamp,
         actor,
+    })
+}
+
+/// Returns `true` when the last non-empty line of `text` is a full marker.
+pub(crate) fn ends_with_marker(text: &str) -> bool {
+    text.lines()
+        .map(str::trim)
+        .rfind(|line| !line.is_empty())
+        .and_then(|line| line.strip_prefix(COMMENT_MARKER))
+        .is_some_and(|rest| {
+            rest.len() == MARKER_CHARS
+                && rest
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b))
+        })
+}
+
+/// Returns the actor of a payload. A top-level `user` wins. Else a comment
+/// event gives the person who wrote this version of the comment. A delete
+/// does not tell who deleted, so it gives `None`.
+fn actor(name: &str, user: Option<&Value>, comment: Option<&Value>) -> Option<AccountId> {
+    let field = |key: &str| account(comment.and_then(|c| c.get(key)));
+    account(user).or_else(|| match name {
+        COMMENT_CREATED => field("author"),
+        COMMENT_UPDATED => field("updateAuthor").or_else(|| field("author")),
+        _ => None,
     })
 }
 
@@ -426,12 +485,17 @@ fn webhook_comment(comment: Option<&Value>) -> Result<WebhookComment> {
     let id = text(comment.get("id"))
         .and_then(|id| CommentId::parse(&id).ok())
         .ok_or_else(|| bad_body("the comment needs a numeric id"))?;
+    let body = match comment.get("body") {
+        // REST v2: wiki markup text.
+        Some(Value::String(text)) => Some(Adf::text(text)),
+        Some(value) => Adf::from_value(value.clone()).ok(),
+        None => None,
+    };
     Ok(WebhookComment {
         id,
-        body: comment
-            .get("body")
-            .and_then(|b| Adf::from_value(b.clone()).ok()),
+        body,
         author: account(comment.get("author")),
+        update_author: account(comment.get("updateAuthor")),
     })
 }
 
@@ -651,11 +715,10 @@ mod tests {
         for name in ["comment_created", "comment_updated", "comment_deleted"] {
             let parsed = parse(&comment_payload(name, "hello"));
             assert_eq!(parsed.event.name(), name);
-            // No top-level `user`: the actor is the comment author.
-            assert_eq!(
-                parsed.actor.as_ref().map(AccountId::as_str),
-                Some("712020:bot")
-            );
+            // No top-level `user`: the actor is the comment author. A delete
+            // does not tell who deleted, so it has no actor.
+            let expected = (name != "comment_deleted").then_some("712020:bot");
+            assert_eq!(parsed.actor.as_ref().map(AccountId::as_str), expected);
             let (JiraEvent::CommentCreated(e)
             | JiraEvent::CommentUpdated(e)
             | JiraEvent::CommentDeleted(e)) = &parsed.event
@@ -677,7 +740,7 @@ mod tests {
     }
 
     /// A full comment marker: `autumn-ref: ` and 26 lower base32 chars.
-    const FULL_MARKER: &str = "autumn-ref: 01jabcdefghijklmnopqrstuvw";
+    const FULL_MARKER: &str = "autumn-ref: 23jabcdefghijklmnopqrstuvw";
 
     #[test]
     fn v2_string_comment_body_is_read() {

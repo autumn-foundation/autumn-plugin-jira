@@ -424,6 +424,18 @@ pub(crate) fn transitions(
 
 /// Returns the plain text of an ADF node. Blocks join with a newline.
 pub(crate) fn adf_text(node: &Value) -> String {
+    text_with(node, "\n")
+}
+
+/// Returns the REST v2 text of an ADF node, as in a webhook payload.
+/// Blocks join with a blank line, as in wiki markup. The fake does not
+/// write wiki markup for marks.
+pub(crate) fn wiki_text(node: &Value) -> String {
+    text_with(node, "\n\n")
+}
+
+/// Returns the text of an ADF node. Blocks join with `block`.
+fn text_with(node: &Value, block: &str) -> String {
     match node.get("type").and_then(Value::as_str) {
         Some("text") => node
             .get("text")
@@ -442,11 +454,11 @@ pub(crate) fn adf_text(node: &Value) -> String {
                     Some("text" | "hardBreak" | "mention" | "emoji" | "inlineCard")
                 )
             });
-            let parts = children.iter().map(adf_text);
+            let parts = children.iter().map(|c| text_with(c, block));
             if inline {
                 parts.collect()
             } else {
-                parts.collect::<Vec<_>>().join("\n")
+                parts.collect::<Vec<_>>().join(block)
             }
         }
     }
