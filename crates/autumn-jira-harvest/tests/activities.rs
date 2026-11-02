@@ -1232,3 +1232,88 @@ async fn the_comment_lookup_reads_at_most_its_page_cap() {
     assert_eq!(fake.count(FakeOp::GetComments), 2 * cap);
     assert_eq!(fake.count(FakeOp::AddComment), posts, "no comment is sent");
 }
+
+/// R2A-write-safety-3: on attempt 1 no earlier attempt can have sent the
+/// comment. So a busy issue with more comments than the lookup cap still
+/// gets the comment. Only a lookup after a possible send fails closed.
+#[tokio::test(start_paused = true)]
+async fn add_comment_on_an_issue_with_301_comments_works_on_attempt_1() {
+    let fake = FakeJira::new();
+    let durable = durable(&fake);
+    let key = human_issue(&fake, "Printer").await;
+    let person = client(&fake, "acme");
+    for n in 0..=(100 * COMMENT_LOOKUP_PAGES) {
+        person
+            .add_comment(key_ref(&key), &autumn_jira::Adf::text(&format!("note {n}")))
+            .await
+            .unwrap();
+    }
+    let posts = fake.count(FakeOp::AddComment);
+    let reads = fake.count(FakeOp::GetComments);
+    let first = first_ctx();
+    let comment = AddCommentInput::new(key_ref(&key), "Fixed it");
+    let made = comment.run(&durable, &first).await.unwrap();
+    assert_eq!(made.outcome, CreateKind::Created);
+    assert_eq!(fake.count(FakeOp::AddComment), posts + 1);
+    assert_eq!(fake.count(FakeOp::GetComments), reads, "no pre-lookup");
+
+    // After a failure that tells "not sent", the next attempt also sends
+    // with no pre-lookup.
+    let not_sent = failure_for(&JiraError::Network {
+        op: Op::AddComment,
+        code: "store_error",
+    })
+    .into_error_payload();
+    let other = first_ctx();
+    let ctx = retry_of(&other, 2, Some(not_sent));
+    let made = comment.run(&durable, &ctx).await.unwrap();
+    assert_eq!(made.outcome, CreateKind::Created);
+    assert_eq!(fake.count(FakeOp::AddComment), posts + 2);
+    assert_eq!(fake.count(FakeOp::GetComments), reads, "no pre-lookup");
+}
+
+/// The core gives `resume_transition_to_status` for a host retry
+/// (R2A-write-safety-1). After an attempt that can have run, the activity
+/// reads the status and sends no transition.
+#[tokio::test(start_paused = true)]
+async fn a_transition_after_a_maybe_sent_attempt_sends_nothing() {
+    let fake = FakeJira::new();
+    let durable = durable(&fake);
+    let key = human_issue(&fake, "Printer").await;
+    let first = first_ctx();
+    let transition = TransitionInput::new(key_ref(&key), StatusTarget::in_progress());
+    let pending = failure_for(&JiraError::OutcomeUnknown {
+        op: Op::DoTransition,
+        cause: UnknownCause::ServerError(503),
+        marker: Some(MarkerRef::label("autumn-idem-x".into())),
+    })
+    .into_error_payload();
+    // A crash or a timeout (no typed failure), and "maybe sent".
+    for (attempt, previous) in [(2, None), (3, Some(pending))] {
+        let ctx = retry_of(&first, attempt, previous);
+        let failure = transition.run(&durable, &ctx).await.unwrap_err();
+        assert_eq!(failure.error_type, OUTCOME_UNKNOWN_ERROR, "{attempt}");
+        assert!(failure.non_retryable, "{attempt}");
+    }
+    assert_eq!(fake.count(FakeOp::DoTransition), 0, "no transition is sent");
+
+    // At the target, the resumed attempt gives AlreadyThere.
+    fake.human_transition(key.as_str(), "In Progress", autumn_jira_fake::ANN)
+        .unwrap();
+    let ctx = retry_of(&first, 2, None);
+    let output = transition.run(&durable, &ctx).await.unwrap();
+    assert_eq!(output.outcome, TransitionKind::AlreadyThere);
+    assert_eq!(fake.count(FakeOp::DoTransition), 0);
+
+    // After a failure that tells "not sent", the attempt moves the issue.
+    let back = TransitionInput::new(key_ref(&key), StatusTarget::todo());
+    let not_sent = failure_for(&JiraError::Network {
+        op: Op::GetTransitions,
+        code: "store_error",
+    })
+    .into_error_payload();
+    let ctx = retry_of(&first, 2, Some(not_sent));
+    let output = back.run(&durable, &ctx).await.unwrap();
+    assert_eq!(output.outcome, TransitionKind::Moved);
+    assert_eq!(fake.count(FakeOp::DoTransition), 1);
+}
