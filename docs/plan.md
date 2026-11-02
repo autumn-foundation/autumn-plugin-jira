@@ -240,7 +240,7 @@ text.
 | V119 | A failed cloud id check of `SanMateoBackend` keeps its start time. The next check comes after `CLOUD_ID_RECHECK_INTERVAL`, also while the failure lasts. | A site URL that no site had, or a 429 of `accessible-resources`, made one more call for each 401 or 404 (R3-webhooks-site-auth-1). | 4.4, ADR 0002 |
 | V120 | `SanMateoBackend::discover_cloud_id` also resets the cached prefix when the target has no cloud id. The signature does not change. | An explicit discovery stored the new id, but the requests went to the old id for up to 300 s (R3-webhooks-site-auth-2). | 4.4 |
 | V121 | The proof escape scan skips an escape word as a longer name only when a letter, a digit or `_` comes just before it in the source, with no white space between them. | The scan removed the white space first, so `pub assume_specification[f]` read as a longer name and passed the guard (R3-tests-docs-guards-2). | 6 |
-| V122 | The AC39 update check skips a shell keyword (`then`, `do`, `else`, `elif`, `if`, `while`, `until`), `!`, a wrapper (`time`, `env`) and `NAME=value` assignments at the start of a segment before it looks for `cargo update`. | `if ...; then cargo update; fi` escaped the one-version check (R3-tests-docs-guards-4). | 12 |
+| V122 | The AC39 update check skips a shell keyword (`then`, `do`, `else`, `elif`, `if`, `while`, `until`), `!`, a wrapper (`time`, `env`) and `NAME=value` assignments at the start of a segment before it looks for `cargo update`. | `if ...; then cargo update; fi` escaped the one-version check (R3-tests-docs-guards-4). | 13, 16 |
 
 ---
 
