@@ -8,7 +8,7 @@ use std::fmt;
 use san_mateo::Secret;
 
 use crate::error::{JiraError, Result};
-use crate::ids::{CloudId, SiteName};
+use crate::ids::{CloudId, SiteHost, SiteName};
 
 /// A Jira Cloud site. Only the two fixed host shapes exist.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,6 +27,12 @@ impl JiraSite {
             Self::Subdomain(name) => format!("https://{name}.atlassian.net"),
             Self::CloudId(id) => format!("https://api.atlassian.com/ex/jira/{id}"),
         }
+    }
+
+    /// Returns the host of the site.
+    #[must_use]
+    pub const fn host(&self) -> Option<SiteHost> {
+        None
     }
 
     /// Returns a label for logs and health: `acme.atlassian.net` or

@@ -14,7 +14,7 @@ use sha2::Sha256;
 use crate::adf::Adf;
 use crate::error::{JiraError, Result};
 use crate::ids::{
-    AccountId, CommentId, IssueId, IssueKey, ProjectKey, StatusId, WebhookDeliveryId,
+    AccountId, CommentId, IssueId, IssueKey, ProjectKey, SiteHost, StatusId, WebhookDeliveryId,
 };
 use crate::model::StatusSummary;
 use crate::model::wire::StatusWire;
@@ -74,6 +74,14 @@ impl Delivery {
             timestamp: parsed.timestamp,
             actor: parsed.actor,
         }
+    }
+}
+
+impl Delivery {
+    /// Returns the site of the delivery.
+    #[must_use]
+    pub const fn site(&self) -> Option<&SiteHost> {
+        self.event.site()
     }
 }
 
@@ -178,6 +186,8 @@ pub struct WebhookIssue {
     pub key: Option<IssueKey>,
     /// The fields in the payload.
     pub fields: WebhookFields,
+    /// The host of `self`.
+    pub site: Option<SiteHost>,
 }
 
 /// The fields of a payload issue. Each is `None` when the payload has none.
@@ -212,6 +222,8 @@ pub struct WebhookComment {
     /// The account id of `updateAuthor`: the person who changed the
     /// comment last.
     pub update_author: Option<AccountId>,
+    /// The host of `self`.
+    pub site: Option<SiteHost>,
 }
 
 /// One changelog item.
@@ -272,6 +284,12 @@ impl JiraEvent {
             }
             Self::Other { .. } => None,
         }
+    }
+
+    /// Returns the site of the event.
+    #[must_use]
+    pub const fn site(&self) -> Option<&SiteHost> {
+        None
     }
 
     /// Returns the status change of an issue event, from the changelog item
@@ -476,6 +494,7 @@ fn webhook_issue(issue: Option<&Value>) -> Result<WebhookIssue> {
                 .map(ProjectKey::from_response),
             issue_type: text(field("issuetype").and_then(|t| t.get("name"))),
         },
+        site: None,
     })
 }
 
@@ -496,6 +515,7 @@ fn webhook_comment(comment: Option<&Value>) -> Result<WebhookComment> {
         body,
         author: account(comment.get("author")),
         update_author: account(comment.get("updateAuthor")),
+        site: None,
     })
 }
 

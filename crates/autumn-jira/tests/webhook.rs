@@ -76,3 +76,85 @@ async fn signed_delivery_reaches_a_sink() {
     // At least once: the same delivery can come again, and the sink takes it again.
     assert_eq!(sink.deliver(delivery).await, Ok(()));
 }
+
+/// A delivery of site `host` for issue 10042 with a comment.
+fn site_body(issue_self: &str, comment_self: &str) -> Vec<u8> {
+    serde_json::json!({
+        "webhookEvent": "comment_created",
+        "issue": {"id": "10042", "self": issue_self, "key": "OPS-7"},
+        "comment": {"id": "5", "self": comment_self, "body": "hi"}
+    })
+    .to_string()
+    .into_bytes()
+}
+
+#[test]
+fn a_delivery_keeps_the_host_of_its_site() {
+    use autumn_jira::ids::SiteHost;
+    let acme = "https://acme.atlassian.net/rest/api/2/issue/10042";
+    let acme_comment = "https://ACME.atlassian.net:443/rest/api/2/issue/10042/comment/5";
+    let parsed = parse_event(&site_body(acme, acme_comment)).unwrap();
+    let issue = parsed.event.issue().unwrap();
+    assert_eq!(
+        issue.site.as_ref().map(SiteHost::as_str),
+        Some("acme.atlassian.net")
+    );
+    assert_eq!(
+        parsed.event.site().map(SiteHost::as_str),
+        Some("acme.atlassian.net")
+    );
+    let meta = DeliveryMeta::new(WebhookDeliveryId::parse("d-9").unwrap(), 0, Flow::Primary);
+    let delivery = Delivery::new(meta, parsed);
+    assert_eq!(
+        delivery.site().map(SiteHost::as_str),
+        Some("acme.atlassian.net")
+    );
+    // Two sites in one delivery, or no site: no site is known.
+    let other = "https://other.atlassian.net/rest/api/2/issue/10042/comment/5";
+    let mixed = parse_event(&site_body(acme, other)).unwrap();
+    assert_eq!(mixed.event.site(), None);
+    let none =
+        parse_event(br#"{"webhookEvent": "jira:issue_created", "issue": {"id": "1"}}"#).unwrap();
+    assert_eq!(none.event.site(), None);
+    // A bad `self` gives no site, and the event still parses.
+    for bad in [
+        "acme.atlassian.net/rest",
+        "https://user@evil.example/rest",
+        "https://evil..example/",
+        "https://-x.example/",
+        "https:///rest",
+        "ftp://acme.atlassian.net/",
+        "https://acme.atlassian.net:99999/",
+    ] {
+        let parsed = parse_event(&site_body(bad, bad)).unwrap();
+        assert_eq!(parsed.event.site(), None, "{bad}");
+    }
+}
+
+#[test]
+fn a_site_host_has_a_strict_rule() {
+    use autumn_jira::ids::{SiteHost, SiteName};
+    use autumn_jira::{JiraSite, ids::CloudId};
+    assert_eq!(
+        SiteHost::parse("acme.atlassian.net").unwrap().as_str(),
+        "acme.atlassian.net"
+    );
+    for bad in ["", "ACME.net", "a..b", "-a.b", "a-.b", "a b", "a/b", "a:1"] {
+        assert!(SiteHost::parse(bad).is_err(), "{bad}");
+    }
+    assert_eq!(
+        SiteHost::from_url("https://Acme.Atlassian.net/x?y#z").map(|h| h.to_string()),
+        Some("acme.atlassian.net".to_owned())
+    );
+    let site = JiraSite::Subdomain(SiteName::parse("acme").unwrap());
+    assert_eq!(
+        site.host().map(|h| h.to_string()),
+        Some("acme.atlassian.net".to_owned())
+    );
+    let cloud = JiraSite::CloudId(CloudId::parse("11111111-2222-4333-8444-555555555555").unwrap());
+    assert_eq!(
+        cloud.host(),
+        None,
+        "the host of a cloud id site is not known"
+    );
+}

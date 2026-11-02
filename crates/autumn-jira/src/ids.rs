@@ -176,6 +176,24 @@ string_id!(
 );
 
 string_id!(
+    /// The host of a Jira site, for example `acme.atlassian.net`.
+    #[derive(Debug)]
+    SiteHost,
+    "site host",
+    "lower-case DNS labels of [a-z0-9-], 1 to 253 chars",
+    is_site_host
+);
+
+impl SiteHost {
+    /// Returns the host of an `https` URL.
+    #[must_use]
+    pub fn from_url(url: &str) -> Option<Self> {
+        let _ = url;
+        None
+    }
+}
+
+string_id!(
     /// A field id, for example `summary` or `customfield_10010`.
     #[derive(Debug)]
     FieldId,
@@ -539,6 +557,12 @@ fn is_cloud_id(text: &str) -> bool {
                 crate::policy::is_lower_hex(*b)
             }
         })
+}
+
+/// A DNS host name.
+const fn is_site_host(text: &str) -> bool {
+    let _ = text;
+    false
 }
 
 /// `[a-z0-9][a-z0-9-]{0,62}`.
