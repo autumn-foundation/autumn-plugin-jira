@@ -142,10 +142,25 @@ fn redelivered(message: &Message) -> bool {
 
 /// Reads the issue: the `JiraIssueKey` header or the `issueKey` option.
 ///
+/// `own` is the `JiraIssueKey` value that an earlier `jira:` step set as
+/// its out header. Without `allowHeaderOverrides`, a header equal to it is
+/// not an override header, so the `issueKey` option applies. A header that
+/// an other step changed is not equal to it, and the override rule applies.
+///
 /// # Errors
 ///
 /// `ValidationError` for a bad or a not allowed header, or for no issue.
-pub(crate) fn issue(message: &Message, options: &EndpointOptions) -> Result<IssueRef, CamelError> {
+pub(crate) fn issue(
+    message: &Message,
+    own: Option<&Value>,
+    options: &EndpointOptions,
+) -> Result<IssueRef, CamelError> {
+    if !options.allow_header_overrides
+        && let (Some(own), Some(option)) = (own, options.issue_key.as_ref())
+        && header(message, HEADER_ISSUE_KEY) == Some(own)
+    {
+        return Ok(option.clone());
+    }
     let parse = |value: &Value| {
         let text = match value {
             Value::String(text) => text.clone(),
@@ -394,20 +409,35 @@ mod tests {
     }
 
     #[test]
+    fn the_own_out_header_is_not_an_override() {
+        let o = options("jira:getIssue?issueKey=OPS-2");
+        let m = message(&[(HEADER_ISSUE_KEY, json!("OPS-1"))]);
+        let own = json!("OPS-1");
+        assert_eq!(issue(&m, Some(&own), &o).unwrap().to_string(), "OPS-2");
+        // A header that differs from the own value is an override header.
+        let other = json!("OPS-3");
+        assert!(issue(&m, Some(&other), &o).is_err());
+        assert!(issue(&m, None, &o).is_err());
+        // With allowHeaderOverrides, the header gives the issue.
+        let o = options("jira:getIssue?issueKey=OPS-2&allowHeaderOverrides=true");
+        assert_eq!(issue(&m, Some(&own), &o).unwrap().to_string(), "OPS-1");
+    }
+
+    #[test]
     fn a_header_equal_to_the_option_passes() {
         let o = options("jira:getIssue?issueKey=10001");
         let m = message(&[(HEADER_ISSUE_KEY, json!(10001))]);
-        assert_eq!(issue(&m, &o).unwrap().to_string(), "10001");
+        assert_eq!(issue(&m, None, &o).unwrap().to_string(), "10001");
         let m = message(&[(HEADER_ISSUE_KEY, json!("10002"))]);
         assert!(
-            issue(&m, &o)
+            issue(&m, None, &o)
                 .unwrap_err()
                 .to_string()
                 .contains("allowHeaderOverrides")
         );
         // A header that does not parse is also not allowed: no value leaks.
         let m = message(&[(HEADER_ISSUE_KEY, json!("../secret"))]);
-        let err = issue(&m, &o).unwrap_err().to_string();
+        let err = issue(&m, None, &o).unwrap_err().to_string();
         assert!(
             err.contains("allowHeaderOverrides") && !err.contains("secret"),
             "{err}"

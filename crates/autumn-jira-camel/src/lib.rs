@@ -23,8 +23,8 @@
 //!
 //! The reply is `Body::Json` in `input`, and `output` stays `None`. The out
 //! headers are [`HEADER_ISSUE_KEY`], [`HEADER_ISSUE_ID`],
-//! [`HEADER_OUTCOME`] and [`HEADER_NEXT_TOKEN`]. Each step first removes
-//! the out headers of an earlier step.
+//! [`HEADER_OUTCOME`] and [`HEADER_NEXT_TOKEN`]. After its call, each step
+//! removes the out headers of an earlier step and sets its own.
 //!
 //! The component checks every option when the route is added, not at the
 //! first message. [`uri_options`] gives the options for the component
@@ -37,6 +37,14 @@
 //! flag, such a header that differs from the option fails the exchange with
 //! a `ValidationError` that names `allowHeaderOverrides`. A header from an
 //! outside caller must not pick the issue, the status or the query.
+//!
+//! The [`HEADER_ISSUE_KEY`] out header of an earlier `jira:` step is not an
+//! override header. Without the flag, the `issueKey` option of the next
+//! step applies, so `getIssue?issueKey=OPS-1` and then
+//! `addComment?issueKey=OPS-2` comments on OPS-2. With the flag, the out
+//! header gives the issue, so a step can act on the issue that an earlier
+//! step made. When an other step changes the header, the header is not the
+//! out header any more, and the override rule applies.
 //!
 //! # Idempotency under harvest
 //!
@@ -101,7 +109,8 @@ pub const OPERATIONS: &[&str] = &[
 ];
 
 /// Out header: the issue key. In header only with `allowHeaderOverrides=true`:
-/// then it replaces the `issueKey` option.
+/// then it replaces the `issueKey` option. The out header of an earlier
+/// `jira:` step does not replace the option without the flag.
 pub const HEADER_ISSUE_KEY: &str = "JiraIssueKey";
 
 /// Out header: the numeric issue id.

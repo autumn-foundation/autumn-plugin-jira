@@ -2,9 +2,17 @@
 //!
 //! The reply goes into `input` as `Body::Json`, and `output` stays `None`
 //! (the san-mateo-camel convention). The out headers carry the issue key,
-//! the issue id, the outcome and the next page token. The producer first
-//! removes the out headers of an earlier step, so each out header belongs
-//! to this step.
+//! the issue id, the outcome and the next page token. After the call, the
+//! producer removes the out headers of an earlier step, so each out header
+//! belongs to this step.
+//!
+//! The call reads the in headers before that removal, so the
+//! `JiraIssueKey` out header of an earlier `jira:` step is still there. The
+//! exchange property [`OWN_ISSUE_KEY`] holds the value that the producer
+//! set. Without `allowHeaderOverrides`, a `JiraIssueKey` header equal to
+//! that value is not an override header: the `issueKey` option applies.
+//! With `allowHeaderOverrides`, the header gives the issue, so a step can
+//! act on the issue of an earlier step.
 
 use std::sync::Arc;
 
@@ -32,7 +40,12 @@ const MOVED: &str = "moved";
 /// The outcome of a transition that found the issue at the target.
 const ALREADY_THERE: &str = "already_there";
 
-/// The out headers. The producer removes them before each call.
+/// The exchange property with the `JiraIssueKey` value that the last
+/// `jira:` step set. Only this component writes it. An outside caller
+/// sets headers, not exchange properties.
+pub(crate) const OWN_ISSUE_KEY: &str = "autumn-jira-camel.ownIssueKey";
+
+/// The out headers. The producer removes them after each call.
 const OUT_HEADERS: [&str; 4] = [
     HEADER_ISSUE_KEY,
     HEADER_ISSUE_ID,
@@ -107,6 +120,14 @@ impl Reply {
     }
 }
 
+/// The in message of a call, and the `JiraIssueKey` value that an earlier
+/// `jira:` step set.
+#[derive(Debug, Clone, Copy)]
+struct In<'a> {
+    message: &'a Message,
+    own: Option<&'a Value>,
+}
+
 /// A failure of one exchange.
 #[derive(Debug)]
 enum Failure {
@@ -139,7 +160,8 @@ impl Producer {
     pub(crate) async fn send(&self, mut exchange: Exchange) -> Result<Exchange, CamelError> {
         let op = self.options.operation;
         let body = std::mem::take(&mut exchange.input.body);
-        let result = self.call(&exchange.input, body).await;
+        let own = exchange.properties.remove(OWN_ISSUE_KEY);
+        let result = self.call(&exchange.input, own.as_ref(), body).await;
         let message = &mut exchange.input;
         for name in OUT_HEADERS {
             message.headers.remove(name);
@@ -147,7 +169,12 @@ impl Producer {
         match result {
             Ok(reply) => {
                 tracing::debug!(operation = %op, outcome = reply.outcome, "jira: camel call done");
-                reply.apply(message);
+                if let Some(key) = &reply.key {
+                    exchange
+                        .properties
+                        .insert(OWN_ISSUE_KEY.to_owned(), Value::String(key.clone()));
+                }
+                reply.apply(&mut exchange.input);
                 Ok(exchange)
             }
             Err(Failure::Jira(error)) if !self.options.throw_exception_on_failure => {
@@ -167,24 +194,29 @@ impl Producer {
 
     /// Reads the request and makes the Jira call. Every check of the body
     /// and the headers comes before the first call.
-    async fn call(&self, message: &Message, body: Body) -> Result<Reply, Failure> {
+    ///
+    /// `own` is the `JiraIssueKey` value that an earlier `jira:` step set.
+    async fn call(
+        &self,
+        message: &Message,
+        own: Option<&Value>,
+        body: Body,
+    ) -> Result<Reply, Failure> {
         let op = self.options.operation;
         let max = self.options.max_body_size;
+        let read = In { message, own };
         match op {
             Operation::CreateIssue => {
                 self.create(message, input::read(body, op, max).await?)
                     .await
             }
-            Operation::GetIssue => self.get(message).await,
-            Operation::EditIssue => self.edit(message, input::read(body, op, max).await?).await,
+            Operation::GetIssue => self.get(read).await,
+            Operation::EditIssue => self.edit(read, input::read(body, op, max).await?).await,
             Operation::TransitionToStatus => {
-                self.transition(message, input::read(body, op, max).await?)
+                self.transition(read, input::read(body, op, max).await?)
                     .await
             }
-            Operation::AddComment => {
-                self.comment(message, input::read(body, op, max).await?)
-                    .await
-            }
+            Operation::AddComment => self.comment(read, input::read(body, op, max).await?).await,
             Operation::Search => self.search(message).await,
         }
     }
@@ -244,8 +276,8 @@ impl Producer {
     }
 
     /// `getIssue`. The body is ignored.
-    async fn get(&self, message: &Message) -> Result<Reply, Failure> {
-        let issue = headers::issue(message, &self.options)?;
+    async fn get(&self, read: In<'_>) -> Result<Reply, Failure> {
+        let issue = headers::issue(read.message, read.own, &self.options)?;
         let fields = self.options.fields.clone().unwrap_or_default();
         let issue = self.client.get_issue_with(issue, &fields).await?;
         Ok(Reply {
@@ -257,9 +289,9 @@ impl Producer {
     }
 
     /// `editIssue`.
-    async fn edit(&self, message: &Message, raw: input::Raw) -> Result<Reply, Failure> {
+    async fn edit(&self, read: In<'_>, raw: input::Raw) -> Result<Reply, Failure> {
         let edit = input::edit(raw)?;
-        let issue = headers::issue(message, &self.options)?;
+        let issue = headers::issue(read.message, read.own, &self.options)?;
         let edit_options = self
             .options
             .notify_users
@@ -272,10 +304,10 @@ impl Producer {
     }
 
     /// `transitionToStatus`: a checked write, so a retry is safe.
-    async fn transition(&self, message: &Message, raw: input::Raw) -> Result<Reply, Failure> {
+    async fn transition(&self, read: In<'_>, raw: input::Raw) -> Result<Reply, Failure> {
         let fields = input::transition(raw)?;
-        let issue = headers::issue(message, &self.options)?;
-        let target = headers::status(message, &self.options)?;
+        let issue = headers::issue(read.message, read.own, &self.options)?;
+        let target = headers::status(read.message, &self.options)?;
         let outcome = self
             .client
             .transition_to_status_with(issue.clone(), &target, &fields)
@@ -293,10 +325,10 @@ impl Producer {
     }
 
     /// `addComment`: a plain comment without a key, else a marked comment.
-    async fn comment(&self, message: &Message, raw: input::Raw) -> Result<Reply, Failure> {
+    async fn comment(&self, read: In<'_>, raw: input::Raw) -> Result<Reply, Failure> {
         let text: Adf = input::comment(raw)?;
-        let issue = headers::issue(message, &self.options)?;
-        let Some(marked) = headers::marked(message, &self.options)? else {
+        let issue = headers::issue(read.message, read.own, &self.options)?;
+        let Some(marked) = headers::marked(read.message, &self.options)? else {
             let comment = self.client.add_comment(issue.clone(), &text).await?;
             return Ok(Reply::comment(&issue, comment.id.as_str(), CREATED));
         };
