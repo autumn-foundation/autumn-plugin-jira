@@ -120,8 +120,6 @@ const fn reason(status: u16) -> &'static str {
 #[cfg(test)]
 #[allow(clippy::panic, reason = "tests")]
 mod tests {
-    use autumn_jira::error::Op;
-
     use super::*;
 
     #[test]
