@@ -232,7 +232,7 @@ Rules for each example (EX8 checks them by text):
   `no_webhook_no_poll_times_out`, `a_wrong_value_fails_the_check`. EX7:
   `webhook_negatives`, `two_tenants_stay_apart`,
   `is_retryable_copy_matches_harvest_camel`, `boot_three_plugins_real_http`.
-  Status: in progress (wave 4, WP7).
+  Status: done (WP7).
 
 ### 7.6 The wiring guard (EX8)
 
@@ -247,7 +247,7 @@ Rules for each example (EX8 checks them by text):
   the list. `the_ecosystem_workspace_stays_apart` checks the separate
   workspace.
 - **How it runs in CI:** in the `test` job, with the other tests.
-- Status: in progress (wave 4, WP8a).
+- Status: done (WP8a).
 
 ## 8. Acceptance criteria
 

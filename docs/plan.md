@@ -1420,7 +1420,7 @@ pub fn webhook_endpoint(path: &str, secret_env: &str) -> WebhookEndpointConfig;
 /// The TOML block that the boot check prints as the fix.
 pub fn webhook_endpoint_toml(path: &str, secret_env: &str) -> String;
 
-pub struct JiraRuntime { /* service, router, health, counters */ }
+pub struct JiraRuntime { /* service, health, counters */ }
 impl JiraRuntime { pub fn service(&self) -> &JiraService; pub fn health(&self) -> Arc<JiraHealth>; pub fn counters(&self) -> WebhookCounters; }
 
 #[derive(Clone)]
