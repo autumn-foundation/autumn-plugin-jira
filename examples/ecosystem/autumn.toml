@@ -1,7 +1,13 @@
 # The autumn app of the ecosystem example. It holds names, never secrets.
-# `TestApp` reads the `[san_mateo]` and `[jira]` sections of this file. The
-# boot test adds the webhook endpoint and `[harvest]` to a copy, and runs the
-# app with `run()`.
+# `TestApp` reads the `[san_mateo]` and `[jira]` sections of this file, and
+# sets the same `[security.csrf]` values in code. The boot test adds the
+# webhook endpoint and `[harvest]` to a copy, and runs the app with `run()`.
+
+[security.csrf]
+enabled = true
+# San Mateo clients send a secret key or a connect session token, not a CSRF
+# cookie. San Mateo checks its own tokens on these routes.
+exempt_paths = ["/san-mateo"]
 
 [san_mateo]
 # It ends with the route prefix of the plugin.

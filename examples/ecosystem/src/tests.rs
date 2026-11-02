@@ -437,21 +437,18 @@ fn spawn(dir: &Path, port: u16, url: &str) -> KillOnDrop {
     .env("AUTUMN_HARVEST_DATABASE__URL", url)
     .env(app::WEBHOOK_SECRET_ENV, WEBHOOK_SECRET)
     .env("AUTUMN_SERVER__PORT", port.to_string())
-    .env("AUTUMN_SERVER__HOST", "127.0.0.1")
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped());
+    .env("AUTUMN_SERVER__HOST", "127.0.0.1");
+    // A file, not a pipe: a full pipe blocks the logs of the child, and
+    // then its server stops.
+    let log = std::fs::File::create(dir.join("child.log")).unwrap();
+    cmd.stdout(Stdio::from(log.try_clone().unwrap()))
+        .stderr(Stdio::from(log));
     KillOnDrop(cmd.spawn().unwrap())
 }
 
-fn output_of(child: &mut Child) -> String {
-    let mut out = String::new();
-    if let Some(mut e) = child.stderr.take() {
-        std::io::Read::read_to_string(&mut e, &mut out).unwrap();
-    }
-    if let Some(mut o) = child.stdout.take() {
-        std::io::Read::read_to_string(&mut o, &mut out).unwrap();
-    }
-    out
+/// The log of the child.
+fn output_of(dir: &Path) -> String {
+    std::fs::read_to_string(dir.join("child.log")).unwrap_or_default()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -462,21 +459,24 @@ async fn boot_three_plugins_real_http() {
     let port = free_port();
     let dir = app_dir();
     let mut child = spawn(&dir, port, &url);
-    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap();
     let base = format!("http://127.0.0.1:{port}");
     let start = Instant::now();
     loop {
         if let Some(status) = child.0.try_wait().unwrap() {
-            panic!(
-                "the app stopped at boot ({status}):\n{}",
-                output_of(&mut child.0)
-            );
+            panic!("the app stopped at boot ({status}):\n{}", output_of(&dir));
         }
         assert!(
             start.elapsed() < Duration::from_secs(90),
             "the app did not answer"
         );
-        if let Ok(res) = client.get(format!("{base}/actuator/health")).send().await
+        // `/ready` answers 200 when the start is done. Before that, autumn
+        // answers 503 "still starting up".
+        if let Ok(res) = client.get(format!("{base}/ready")).send().await
             && res.status().as_u16() == 200
         {
             break;
@@ -515,6 +515,7 @@ async fn boot_three_plugins_real_http() {
         .await
         .unwrap();
     let status = res.status().as_u16();
+    let reply = res.text().await.unwrap_or_default();
     let health = client
         .get(format!("{base}/actuator/health"))
         .send()
@@ -525,8 +526,9 @@ async fn boot_three_plugins_real_http() {
         .unwrap();
     let health: Value = serde_json::from_str(&health).unwrap_or(Value::Null);
     drop(child);
+    let log = output_of(&dir);
     let _ = std::fs::remove_dir_all(&dir);
-    assert_eq!(status, 200, "{health}");
+    assert_eq!(status, 200, "{reply}\n{health}\n{log}");
     let components = &health["components"];
     for name in ["jira", "san_mateo"] {
         assert!(components.get(name).is_some(), "no {name} in {health}");

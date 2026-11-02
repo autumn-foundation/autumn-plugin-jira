@@ -66,9 +66,9 @@ use autumn_harvest_plugin::{
     HarvestDatabaseConfig, HarvestMode, HarvestRunner, HarvestRunnerResources,
     HarvestRuntimeConfig, OrphanStartupAction,
 };
+use autumn_jira::JiraClient;
 use autumn_jira::san_mateo::clock::{Entropy, OsEntropy};
 use autumn_jira::san_mateo::{SanMateo, Secret};
-use autumn_jira::{JiraClient, StatusTarget};
 use autumn_jira_camel::JiraComponent;
 use autumn_jira_fake::{ANN, BOT, FakeOp, Fault};
 use autumn_jira_harvest::{
@@ -86,7 +86,7 @@ use crate::routes::{ALERT_ID, ALERTS, NOTIFY, STREAM, routes};
 use crate::summary::{Summary, check};
 use crate::transport::{CHAT_MESSAGES_URL, ENV, PROJECT, Sites, TICK};
 use crate::workflow::{
-    AlertInput, INCIDENT_FLOW, IncidentOutput, Outcome, WorkerName, incident_flow_info,
+    AlertInput, AttemptLog, INCIDENT_FLOW, IncidentOutput, Outcome, WorkerName, incident_flow_info,
     notify_chat_info,
 };
 
@@ -212,6 +212,7 @@ struct WorkerState {
     jira: JiraClient,
     key: RouteKey,
     camel: CamelHandle,
+    attempts: AttemptLog,
 }
 
 /// Starts one harvest worker on the queue of the run.
@@ -232,6 +233,7 @@ async fn start_worker(state: &WorkerState, name: &str) -> Result<HarvestRunner, 
         .state(state.san.clone())
         .state(state.camel.clone())
         .state(WorkerName(name.to_owned()))
+        .activity_interceptor(state.attempts.clone())
         .worker(worker)
         .build();
     let mut config = HarvestRuntimeConfig {
@@ -322,39 +324,6 @@ async fn runs_on(pool: &DbPool, queue: &str) -> Result<i64, BoxError> {
     Ok(row.n)
 }
 
-/// The `ActivityFailed` events of a run, as `(activity attempt, error
-/// type)`. Each failed attempt of an activity has one.
-async fn failed_attempts(pool: &DbPool, workflow_id: &str) -> Result<Vec<(u64, String)>, BoxError> {
-    use autumn_harvest::diesel_async::RunQueryDsl;
-    #[derive(diesel::QueryableByName)]
-    struct Event {
-        #[diesel(sql_type = diesel::sql_types::Text)]
-        data: String,
-    }
-    let mut conn = pool.get().await?;
-    let rows: Vec<Event> = diesel::sql_query(
-        "SELECT e.event_data::text AS data FROM harvest_events e \
-         JOIN harvest_workflow_executions w ON w.id = e.workflow_exec_id \
-         WHERE w.workflow_name = $1 AND w.workflow_id = $2 AND e.event_type = 'ActivityFailed' \
-         ORDER BY e.event_id",
-    )
-    .bind::<diesel::sql_types::Text, _>(INCIDENT_FLOW)
-    .bind::<diesel::sql_types::Text, _>(workflow_id)
-    .load(&mut conn)
-    .await?;
-    Ok(rows
-        .iter()
-        .filter_map(|row| serde_json::from_str::<Value>(&row.data).ok())
-        .map(|event| {
-            let event = event.get("ActivityFailed").cloned().unwrap_or(event);
-            (
-                event["attempt"].as_u64().unwrap_or_default(),
-                event["error_type"].as_str().unwrap_or_default().to_owned(),
-            )
-        })
-        .collect())
-}
-
 /// `n` with its noun: `one run`, `2 runs`.
 fn count_of(n: impl Into<u64>, one: &str, many: &str) -> String {
     match n.into() {
@@ -421,6 +390,7 @@ async fn run_unbounded(url: &str, scenario: &Scenario, sites: Sites) -> Result<R
         jira: jira.clone(),
         key: key.clone(),
         camel: handle,
+        attempts: AttemptLog::default(),
     };
     let runner = start_worker(&state, "A").await?;
     let api = HarvestApiState::new();
@@ -503,22 +473,25 @@ async fn run_unbounded(url: &str, scenario: &Scenario, sites: Sites) -> Result<R
         },
     );
 
-    // [4] the create: the history has the failed attempt, the fake counts
-    // the POSTs.
+    // [4] the create: the attempt log of the workers, and the POSTs that
+    // the fake got.
     let posts = sites.jira.count(FakeOp::CreateIssue);
-    let pending = driven
-        .failures
+    let creates = state.attempts.of("jira_create_issue");
+    let failures: Vec<String> = creates
         .iter()
-        .find(|(_, error)| error.starts_with("jira."))
-        .map_or_else(
-            || "no failed attempt".to_owned(),
-            |(_, e)| e.replace("jira.", ""),
-        );
-    let attempt = driven.failures.len() + 1;
+        .filter_map(|a| a.error_type.as_deref())
+        .map(|e| e.trim_start_matches("jira.").to_owned())
+        .collect();
+    let last = creates.last().map_or(0, |a| a.attempt);
     summary.line(
         "jira",
         format!(
-            "create: 503 after commit -> {pending} -> attempt {attempt} {} {issue} ({posts} POST{})",
+            "create: 503 after commit -> {} -> attempt {last} {} {issue} ({posts} POST{})",
+            if failures.is_empty() {
+                "no failed attempt".to_owned()
+            } else {
+                failures.join(" -> ")
+            },
             serde_json::to_value(output.created)?
                 .as_str()
                 .unwrap_or_default(),
@@ -529,7 +502,7 @@ async fn run_unbounded(url: &str, scenario: &Scenario, sites: Sites) -> Result<R
         "jira",
         format!(
             "{issue} -> {} ({})",
-            StatusTarget::in_progress(),
+            output.moved_to,
             serde_json::to_value(output.moved)?
                 .as_str()
                 .unwrap_or_default()
@@ -556,18 +529,20 @@ async fn run_unbounded(url: &str, scenario: &Scenario, sites: Sites) -> Result<R
         "autumn",
         match driven.webhook_statuses.as_slice() {
             [] => format!(
-                "no webhook POST; bridge signalled {}",
-                count_of(counters.signalled, "run", "runs")
+                "no webhook POST; bridge signalled {} run{}",
+                counters.signalled,
+                s(usize::try_from(counters.signalled).unwrap_or_default())
             ),
             statuses => format!(
-                "POST {} -> {}; bridge signalled {}",
+                "POST {} -> {}; bridge signalled {} run{}",
                 app::WEBHOOK_PATH,
                 statuses
                     .iter()
                     .map(u16::to_string)
                     .collect::<Vec<_>>()
                     .join(", "),
-                count_of(counters.signalled, "run", "runs")
+                counters.signalled,
+                s(usize::try_from(counters.signalled).unwrap_or_default())
             ),
         },
     );
@@ -639,7 +614,6 @@ struct Drive<'a> {
 struct Driven {
     runs: i64,
     output: IncidentOutput,
-    failures: Vec<(u64, String)>,
     stopped_while_waiting: bool,
     webhook_statuses: Vec<u16>,
     webhook_counters: Value,
@@ -737,7 +711,11 @@ async fn drive(d: &mut Drive<'_>) -> Result<Driven, BoxError> {
         Some(output) => output,
         None => result.await?,
     }
-    .map_err(|e| format!("workflow {workflow_id}: {e}"))?;
+    .map_err(|e| {
+        // The error type comes first, for example `jira.outcome_unknown`.
+        let kind = e.workflow_error_type().unwrap_or("harvest.error");
+        format!("workflow {workflow_id}: {kind}: {e}")
+    })?;
     let output: IncidentOutput = serde_json::from_value(output)?;
 
     // [9] The app route reads the issue through san-mateo.
@@ -756,11 +734,9 @@ async fn drive(d: &mut Drive<'_>) -> Result<Driven, BoxError> {
     let health = d.app.get("/actuator/health").send().await;
     let health: Value = serde_json::from_slice(&health.body).unwrap_or(Value::Null);
     let webhook_counters = health["components"]["jira"]["details"]["webhook"].clone();
-    let failures = failed_attempts(&d.state.pool, &workflow_id).await?;
     Ok(Driven {
         runs,
         output,
-        failures,
         stopped_while_waiting,
         webhook_statuses,
         webhook_counters,

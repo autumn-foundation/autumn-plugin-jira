@@ -78,14 +78,20 @@ pub fn jira_plugin(bridge: HarvestSignalBridge) -> Result<JiraPlugin, BoxError> 
 }
 
 /// The autumn config of `TestApp`: the Jira webhook endpoint with
-/// `secret`, CSRF on, and the health details. autumn exempts the webhook
-/// path from CSRF.
+/// `secret`, CSRF on (the San Mateo routes are exempt), and the health
+/// details. autumn exempts the webhook path from CSRF.
 pub fn autumn_config(secret: &str) -> AutumnConfig {
     let mut cfg = AutumnConfig::default();
     let mut endpoint = autumn_plugin_jira::webhook_endpoint(WEBHOOK_PATH, WEBHOOK_SECRET_ENV);
     endpoint.secret = Some(secret.to_owned());
     cfg.security.webhooks.endpoints.push(endpoint);
     cfg.security.csrf.enabled = true;
+    // The same as `[security.csrf]` in `autumn.toml`. San Mateo clients send
+    // a secret key or a connect session token, not a CSRF cookie.
+    cfg.security
+        .csrf
+        .exempt_paths
+        .push(autumn_plugin_san_mateo::DEFAULT_PREFIX.to_owned());
     cfg.health.detailed = true;
     cfg
 }

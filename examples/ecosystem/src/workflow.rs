@@ -5,9 +5,13 @@
 //! sends an activity to `"default"`, and the worker of this run does not
 //! read that queue.
 
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use autumn_harvest::failure::ActivityFailure;
+use autumn_harvest::interceptor::{
+    ActivityInterceptor, ActivityInterceptorFuture, ActivityInterceptorNext, ActivityInvocation,
+};
 use autumn_harvest::prelude::*;
 use autumn_jira::request::IssueTypeRef;
 use autumn_jira::{AccountId, IssueKey, IssueRef, ProjectKey, StatusTarget};
@@ -75,6 +79,8 @@ pub struct IncidentOutput {
     pub created: CreateKind,
     /// How the move to In Progress ended.
     pub moved: TransitionKind,
+    /// The status name after the move.
+    pub moved_to: String,
     /// The status the wait saw.
     pub wait: StatusWait,
     /// How the comment ended.
@@ -212,6 +218,7 @@ pub async fn incident_flow(
         lead,
         created: created.outcome,
         moved: moved.outcome,
+        moved_to: moved.status.name,
         wait,
         comment: comment.outcome,
         chat,
@@ -241,4 +248,78 @@ pub async fn notify_chat(
         .map(|w| w.0.clone())
         .unwrap_or_default();
     Ok(ChatOutput { status, worker })
+}
+
+/// One attempt of an activity, as a worker saw it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attempt {
+    /// The activity name, for example `jira_create_issue`.
+    pub activity: String,
+    /// The attempt number, from 1.
+    pub attempt: u32,
+    /// The error type of a failed attempt, for example
+    /// `jira.outcome_pending`. `None` for a success.
+    pub error_type: Option<String>,
+}
+
+/// A harvest activity interceptor that logs each attempt of each activity.
+/// The history keeps only the last result of an activity, so the timeline
+/// reads the failed attempts from this log. It holds no input, output or
+/// error text: only names and numbers.
+#[derive(Debug, Clone, Default)]
+pub struct AttemptLog(Arc<Mutex<Vec<Attempt>>>);
+
+impl AttemptLog {
+    /// The attempts of one activity, in order.
+    pub fn of(&self, activity: &str) -> Vec<Attempt> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .filter(|a| a.activity == activity)
+            .cloned()
+            .collect()
+    }
+
+    fn push(&self, attempt: Attempt) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(attempt);
+    }
+}
+
+/// The first `jira.<code>` or `ecosystem.<code>` type in an error text.
+fn error_type(error: &str) -> String {
+    ["jira.", "san_mateo.", "camel.", "ecosystem."]
+        .iter()
+        .find_map(|prefix| {
+            let at = error.find(prefix)?;
+            let code: String = error[at + prefix.len()..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            Some(format!("{prefix}{code}"))
+        })
+        .unwrap_or_else(|| "unknown".to_owned())
+}
+
+impl ActivityInterceptor for AttemptLog {
+    fn intercept<'a>(
+        &'a self,
+        invocation: &'a ActivityInvocation<'a>,
+        ctx: &'a ActivityContext,
+        input: serde_json::Value,
+        next: ActivityInterceptorNext<'a>,
+    ) -> ActivityInterceptorFuture<'a> {
+        Box::pin(async move {
+            let result = next.run(input).await;
+            self.push(Attempt {
+                activity: invocation.name().to_owned(),
+                attempt: ctx.attempt(),
+                error_type: result.as_ref().err().map(|e| error_type(e)),
+            });
+            result
+        })
+    }
 }
