@@ -158,8 +158,10 @@ impl JiraPlugin {
 
     /// Uses this prebuilt client. The plugin then reads no secret.
     ///
-    /// Do not set `[jira.api_token]` or `[jira.san_mateo]` with it: the
-    /// start fails with [`PluginError::Conflict`].
+    /// The client keeps its own settings: set them with
+    /// `JiraClient::with_settings`. Do not set `[jira.api_token]`,
+    /// `[jira.san_mateo]` or a `[jira.http]` that is not the default with
+    /// it: the start fails with [`PluginError::Conflict`].
     #[must_use]
     pub fn client(mut self, client: JiraClient) -> Self {
         self.client = Some(client);
@@ -299,6 +301,10 @@ impl JiraPlugin {
             }
             (Some(_), None) if self.transport.is_some() => {
                 return Err(PluginError::Conflict("transport(..)", "client(..)"));
+            }
+            // A prebuilt client keeps its own settings.
+            (Some(_), None) if config.http != JiraHttpConfig::default() => {
+                return Err(PluginError::Conflict("client(..)", "[jira.http]"));
             }
             (Some(client), None) => (client.clone(), None, mode_name(client)),
             (None, None) => {

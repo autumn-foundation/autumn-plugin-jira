@@ -157,7 +157,9 @@ pub struct JiraHttpConfig {
     pub lookup_attempts: u32,
     /// The wait between two marker lookups in milliseconds.
     pub lookup_delay_ms: u64,
-    /// The request timeout in API token mode, in seconds. 1 or more.
+    /// The request timeout in API token mode, in seconds. 1 or more. In
+    /// `san_mateo` mode, the San Mateo transport owns the timeout, so the
+    /// plugin does not use this value.
     pub timeout_secs: u64,
 }
 
