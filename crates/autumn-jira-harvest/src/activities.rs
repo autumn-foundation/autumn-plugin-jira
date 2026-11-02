@@ -44,16 +44,34 @@ use crate::route::{ROUTES_PROPERTY, RouteKey, SignalRoute, TRACKED_LABEL};
 /// The name of the activity that reads one issue.
 pub const GET_ISSUE: &str = "jira_get_issue";
 
-/// The `start_to_close` of a read activity: 3 minutes (plan 7.2, B2).
-pub const READ_START_TO_CLOSE: Duration = Duration::from_secs(180);
+/// The longest transport timeout that the `start_to_close` budgets hold
+/// for: 60 seconds for each request. The default of `ReqwestTransport` is
+/// 60 s. A longer transport timeout can let harvest stop an attempt in the
+/// middle of a call (R9-test-quality-6).
+pub const MAX_TRANSPORT_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// The `start_to_close` of a write activity with one client call: 5 minutes.
-pub const WRITE_START_TO_CLOSE: Duration = Duration::from_secs(300);
+/// The transport calls of one client send through san-mateo
+/// (`ClientRef::Connection`): a token refresh before the send, the send, a
+/// refresh after a 401, and the send again (R4-harvest-determinism-6).
+pub const SAN_MATEO_CALLS_PER_SEND: u32 = 4;
+
+/// The `start_to_close` of a read activity: 9 minutes (plan 7.2, B2). One
+/// durable read through san-mateo can take 490 s: two sends of four
+/// transport calls of 60 s, and one wait of 10 s.
+pub const READ_START_TO_CLOSE: Duration = Duration::from_secs(540);
+
+/// The `start_to_close` of a write activity with one client call: 9
+/// minutes. The budget is the same as the budget of a read.
+pub const WRITE_START_TO_CLOSE: Duration = Duration::from_secs(540);
 
 /// The `start_to_close` of a marked write, a checked write and the watch:
-/// 12 minutes. One durable marked write can take 390 s and one checked
-/// write 650 s, at 60 s for each request (plan 7.2, B2).
-pub const LONG_WRITE_START_TO_CLOSE: Duration = Duration::from_secs(720);
+/// 42 minutes. Through san-mateo, at four transport calls of 60 s for each
+/// send, one durable marked write can take 1 470 s, one checked write
+/// 2 450 s and the watch 1 960 s (plan 7.2, B2). A direct client needs
+/// less. Harvest retries an attempt that stops in the middle of a write
+/// as an attempt with an unknown result, so the budget must cover the
+/// slow path.
+pub const LONG_WRITE_START_TO_CLOSE: Duration = Duration::from_secs(2_520);
 
 /// The retry policy of `jira_get_issue`: 5 attempts, from 1 s.
 #[must_use]
@@ -841,7 +859,7 @@ pub struct WatchOutput {
 /// The failure of the work method, or `jira.config` when the worker
 /// state has no client for `input.client`.
 #[activity(
-    start_to_close = "12m",
+    start_to_close = "42m",
     retry = RetryPolicy::exponential(5, Duration::from_secs(2))
 )]
 pub async fn jira_create_issue(
@@ -857,7 +875,7 @@ pub async fn jira_create_issue(
 ///
 /// The failure of the work method, or `jira.config` when the worker
 /// state has no client for `input.client`.
-#[activity(start_to_close = "3m", retry = get_issue_retry())]
+#[activity(start_to_close = "9m", retry = get_issue_retry())]
 pub async fn jira_get_issue(
     ctx: &ActivityContext,
     input: GetIssueInput,
@@ -872,7 +890,7 @@ pub async fn jira_get_issue(
 /// The failure of the work method, or `jira.config` when the worker
 /// state has no client for `input.client`.
 #[activity(
-    start_to_close = "3m",
+    start_to_close = "9m",
     retry = RetryPolicy::exponential(5, Duration::from_secs(1))
 )]
 pub async fn jira_search_page(
@@ -889,7 +907,7 @@ pub async fn jira_search_page(
 /// The failure of the work method, or `jira.config` when the worker
 /// state has no client for `input.client`.
 #[activity(
-    start_to_close = "5m",
+    start_to_close = "9m",
     retry = RetryPolicy::exponential(5, Duration::from_secs(1))
 )]
 pub async fn jira_edit_issue(
@@ -906,7 +924,7 @@ pub async fn jira_edit_issue(
 /// The failure of the work method, or `jira.config` when the worker
 /// state has no client for `input.client`.
 #[activity(
-    start_to_close = "12m",
+    start_to_close = "42m",
     retry = RetryPolicy::exponential(5, Duration::from_secs(2))
 )]
 pub async fn jira_transition_to_status(
@@ -923,7 +941,7 @@ pub async fn jira_transition_to_status(
 /// The failure of the work method, or `jira.config` when the worker
 /// state has no client for `input.client`.
 #[activity(
-    start_to_close = "12m",
+    start_to_close = "42m",
     retry = RetryPolicy::exponential(5, Duration::from_secs(2))
 )]
 pub async fn jira_add_comment(
@@ -940,7 +958,7 @@ pub async fn jira_add_comment(
 /// The failure of the work method, or `jira.config` when the worker
 /// state has no client for `input.client`.
 #[activity(
-    start_to_close = "5m",
+    start_to_close = "9m",
     retry = RetryPolicy::exponential(5, Duration::from_secs(1))
 )]
 pub async fn jira_delete_issue(
@@ -957,7 +975,7 @@ pub async fn jira_delete_issue(
 /// The failure of the work method, or `jira.config` when the worker
 /// state has no client for `input.client`.
 #[activity(
-    start_to_close = "12m",
+    start_to_close = "42m",
     retry = RetryPolicy::exponential(5, Duration::from_secs(1))
 )]
 pub async fn jira_watch_issue(

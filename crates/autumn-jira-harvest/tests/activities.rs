@@ -503,8 +503,11 @@ fn start_to_close_covers_the_client_budget() {
     // send there can be four transport calls: a refresh before the send, the
     // send, a refresh after a 401 and the send again (R4-harvest-determinism-6).
     let settings = ClientSettings::for_durable_host();
-    for timeout in [1, 30, 60] {
-        for (path, calls_per_send) in [("direct", 1), ("san-mateo", 4)] {
+    let max = autumn_jira_harvest::activities::MAX_TRANSPORT_TIMEOUT.as_secs();
+    let san_mateo = u64::from(autumn_jira_harvest::activities::SAN_MATEO_CALLS_PER_SEND);
+    assert_eq!((max, san_mateo), (60, 4));
+    for timeout in [1, 30, max] {
+        for (path, calls_per_send) in [("direct", 1), ("san-mateo", san_mateo)] {
             let per_request = Duration::from_secs(timeout * calls_per_send);
             for info in activities() {
                 let budget: Duration = calls(info.name)
@@ -533,9 +536,27 @@ fn start_to_close_covers_the_client_budget() {
             .find(|info| info.name == name)
             .and_then(|info| info.default_start_to_close)
     };
-    assert_eq!(by_name("jira_create_issue"), Some(Duration::from_secs(720)));
-    assert_eq!(by_name("jira_edit_issue"), Some(Duration::from_secs(300)));
-    assert_eq!(by_name("jira_get_issue"), Some(Duration::from_secs(180)));
+    use autumn_jira_harvest::activities::{
+        LONG_WRITE_START_TO_CLOSE, READ_START_TO_CLOSE, WRITE_START_TO_CLOSE,
+    };
+    assert_eq!(
+        by_name("jira_create_issue"),
+        Some(LONG_WRITE_START_TO_CLOSE)
+    );
+    assert_eq!(by_name("jira_add_comment"), Some(LONG_WRITE_START_TO_CLOSE));
+    assert_eq!(
+        by_name("jira_transition_to_status"),
+        Some(LONG_WRITE_START_TO_CLOSE)
+    );
+    assert_eq!(by_name("jira_watch_issue"), Some(LONG_WRITE_START_TO_CLOSE));
+    assert_eq!(by_name("jira_edit_issue"), Some(WRITE_START_TO_CLOSE));
+    assert_eq!(by_name("jira_delete_issue"), Some(WRITE_START_TO_CLOSE));
+    assert_eq!(by_name("jira_get_issue"), Some(READ_START_TO_CLOSE));
+    assert_eq!(by_name("jira_search_page"), Some(READ_START_TO_CLOSE));
+    assert_eq!(
+        (READ_START_TO_CLOSE, LONG_WRITE_START_TO_CLOSE),
+        (Duration::from_secs(540), Duration::from_secs(2_520))
+    );
 }
 
 #[tokio::test(start_paused = true)]
