@@ -675,6 +675,23 @@ mod self_tests {
         assert_eq!(found.len(), 2, "{found:?}");
         let free = "```rust,ignore\nlet any = 1;\n```\n";
         assert_eq!(wired::snippet_violations(free, &source), NONE);
+        // R2E-tests-guards-9: the order counts, and test code and comments
+        // are not the example.
+        let two = "fn start() {\n    let a = one();\n    // let c = gone();\n    let b = two();\n}\n\
+                   #[cfg(test)]\nmod tests {\n    fn t() { let d = test_only(); }\n}\n";
+        let source = |name: &str| (name == "demo").then(|| two.to_owned());
+        let snippet =
+            |lines: &str| format!("```rust,ignore\n// From the demo example.\n{lines}```\n");
+        let in_order = snippet("let a = one();\n// A note.\nlet b = two();\n");
+        assert_eq!(wired::snippet_violations(&in_order, &source), NONE);
+        for bad in [
+            snippet("let b = two();\nlet a = one();\n"),
+            snippet("let a = one();\nlet d = test_only();\n"),
+            snippet("let a = one();\nlet c = gone();\n"),
+        ] {
+            let found = wired::snippet_violations(&bad, &source);
+            assert_eq!(found.len(), 1, "{bad}: {found:?}");
+        }
     }
 
     #[test]
