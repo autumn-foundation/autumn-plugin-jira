@@ -379,6 +379,15 @@ impl StopLog {
     }
 }
 
+/// Stops the worker in `runner`, when there is one, and records the stop
+/// in `flag`.
+async fn stop_worker(runner: Option<HarvestRunner>, flag: &AtomicBool) {
+    if let Some(runner) = runner {
+        runner.stop().await;
+    }
+    StopLog::stopped(flag);
+}
+
 /// [`run`] with the time limit `limit`. `stops` records each stop.
 async fn run_within(
     url: &str,
@@ -505,10 +514,7 @@ async fn run_unbounded(
     cancel.cancel();
     let stopped_connector = connector.await;
     StopLog::stopped(&stops.connector);
-    if let Some(runner) = runner.take() {
-        runner.stop().await;
-    }
-    StopLog::stopped(&stops.runner);
+    stop_worker(runner.take(), &stops.runner).await;
     let stopped_camel = camel.stop().await;
     StopLog::stopped(&stops.camel);
     let driven = driven?;

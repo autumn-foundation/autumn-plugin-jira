@@ -200,6 +200,19 @@ async fn a_run_timeout_still_stops_everything() {
     check(&report.summary).unwrap_or_else(|e| panic!("{e}\n{}", report.summary));
 }
 
+#[tokio::test]
+async fn no_worker_records_no_worker_stop() {
+    // A deadline in the worker swap of step [6] can leave no worker. Then
+    // the stop log must not show a worker stop (R2D-integration-7).
+    let stops = StopLog::default();
+    stop_worker(None, &stops.runner).await;
+    assert!(
+        !stops.runner.load(Ordering::SeqCst),
+        "no worker, so no worker stop: {stops:?}"
+    );
+    assert!(!stops.all(), "{stops:?}");
+}
+
 #[test]
 fn a_wrong_value_fails_the_check() {
     let mut summary = Summary {
