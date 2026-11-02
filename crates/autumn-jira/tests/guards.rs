@@ -1662,7 +1662,16 @@ mod check {
     pub fn cited_doc_violations(path: &str, text: &str, corpus: &str) -> Vec<String> {
         const MARK: &str = "The docs say \"";
         let flat_text = flat(text);
-        let corpus = flat(corpus).to_lowercase();
+        // A quote is not a doc that says the text. So the check removes each
+        // quote from the corpus first.
+        let mut corpus = flat(corpus);
+        while let Some(at) = corpus.find(MARK) {
+            let end = corpus[at + MARK.len()..]
+                .find('"')
+                .map_or(corpus.len(), |e| at + MARK.len() + e + 1);
+            corpus.replace_range(at..end, "");
+        }
+        let corpus = corpus.to_lowercase();
         let mut out = Vec::new();
         for (at, _) in flat_text.match_indices(MARK) {
             let rest = &flat_text[at + MARK.len()..];
@@ -2587,9 +2596,14 @@ fn docs_make_no_stale_claims_sees_each_claim() {
     assert_eq!(check::stale_claim_violations(p, good), NONE);
 }
 
-/// The docs that an ADR can cite with `The docs say "..."`.
+/// The docs that an ADR can cite with `The docs say "..."`. No ADR is in
+/// the list, because two ADRs with the same quote must not satisfy each
+/// other (R2E-tests-guards-2).
 fn cited_docs() -> Vec<PathBuf> {
     claim_docs()
+        .into_iter()
+        .filter(|p| !rel(p).starts_with("docs/adr"))
+        .collect()
 }
 
 #[test]
@@ -2601,9 +2615,7 @@ fn adrs_cite_real_doc_text() {
     let mut found = Vec::new();
     for adr in files_under(&root().join("docs/adr"), &["md"]) {
         let text = std::fs::read_to_string(&adr).unwrap();
-        // The ADR itself does not count as the doc that it cites.
-        let others = corpus.replace(&text, "");
-        found.extend(check::cited_doc_violations(&rel(&adr), &text, &others));
+        found.extend(check::cited_doc_violations(&rel(&adr), &text, &corpus));
     }
     assert!(found.is_empty(), "{}", found.join("\n"));
 }
@@ -2626,7 +2638,10 @@ fn adrs_cite_real_doc_text_sees_a_missing_quote() {
 #[test]
 fn adrs_cite_real_doc_text_reads_no_adr() {
     let corpus = cited_docs();
-    assert!(corpus.iter().all(|p| !rel(p).starts_with("docs/adr")), "{corpus:?}");
+    assert!(
+        corpus.iter().all(|p| !rel(p).starts_with("docs/adr")),
+        "{corpus:?}"
+    );
     assert!(corpus.iter().any(|p| rel(p) == "README.md"), "{corpus:?}");
 }
 
