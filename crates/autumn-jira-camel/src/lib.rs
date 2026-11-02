@@ -45,10 +45,23 @@
 //! use the idempotent client calls: the write carries a marker, and a
 //! lookup finds an earlier write. An attempt above 1 does a lookup only,
 //! because the route cannot know if the earlier attempt sent the write. A
-//! negative lookup then fails with `jira outcome_unknown`, and the write is
-//! not sent again, unless the URI sets `resendAfterNegativeLookup=true`
-//! (an unsafe opt-in, ADR 0003). Without the key, a write is sent at most
-//! once. `requireIdempotencyKey=true` makes the key header required.
+//! negative lookup then fails with `jira outcome_unknown`. The component
+//! does not send the write again. Only the unsafe opt-in
+//! `resendAfterNegativeLookup=true` sends it again (ADR 0003). Without the
+//! key, the component sends a write at most once.
+//! `requireIdempotencyKey=true` makes the key header required.
+//!
+//! # Camel redelivery
+//!
+//! A camel redelivery (`CamelRedelivered` or `CamelRedeliveryCounter` set)
+//! of a marked write does a lookup only, also on harvest attempt 1. A
+//! camel redelivery of a write with no key header fails with a
+//! `ValidationError`, and the component sends nothing. Thus a camel
+//! `retry(..)` never sends a `createIssue` or an `addComment` two times.
+//! Do not use camel redelivery on a route that a harvest activity calls:
+//! harvest is the one layer that retries. A redelivery of an earlier step
+//! also sets these headers, so a later `jira:` write in that exchange
+//! also does a lookup only.
 //!
 //! # Errors
 //!

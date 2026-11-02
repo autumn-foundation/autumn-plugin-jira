@@ -8,13 +8,18 @@
 //! - The harvest-camel headers `HarvestIdempotencyKey` and
 //!   `HarvestActivityAttempt` of a marked write (plan D7).
 //!
+//! The write rule also reads the camel redelivery headers
+//! `CamelRedelivered` and `CamelRedeliveryCounter`. A camel redelivery
+//! sends the exchange to the step again, and the earlier try can have sent
+//! the write.
+//!
 //! An error text names the header and the rule. It never holds the header
 //! value.
 
 use autumn_jira::ids::IssueRef;
 use autumn_jira::policy::Previous;
 use autumn_jira::{IdempotencyKey, Jql, StatusTarget};
-use camel_api::{CamelError, Message, Value};
+use camel_api::{CamelError, HEADER_REDELIVERED, HEADER_REDELIVERY_COUNTER, Message, Value};
 
 use crate::options::{EndpointOptions, parse_status};
 use crate::{HEADER_ISSUE_KEY, HEADER_JQL, HEADER_STATUS};
@@ -54,12 +59,19 @@ fn bad_header(name: &str, rule: &str) -> CamelError {
 /// `HarvestIdempotencyKey` is the only source of the key (W12). An attempt
 /// above 1 gives `Previous::Unknown`: the camel route cannot see the
 /// failure of the previous attempt, so it must assume that the write can
-/// have run. No key header gives `None`: the write is sent at most once.
+/// have run. A camel redelivery also gives `Previous::Unknown`, whatever
+/// the attempt header says: the earlier try of this step can have sent the
+/// write. Then the producer does a lookup only.
+///
+/// No key header gives `None`: the producer sends the write at most once.
+/// So an unmarked write on a camel redelivery fails, and the producer
+/// sends nothing.
 ///
 /// # Errors
 ///
-/// `ValidationError` for a bad header, or for no key header with
-/// `requireIdempotencyKey=true`.
+/// `ValidationError` for a bad header, for no key header with
+/// `requireIdempotencyKey=true`, and for no key header on a camel
+/// redelivery.
 pub(crate) fn marked(
     message: &Message,
     options: &EndpointOptions,
@@ -70,6 +82,13 @@ pub(crate) fn marked(
             return Err(CamelError::ValidationError(format!(
                 "{op} needs the {HEADER_HARVEST_KEY} header: the route sets \
                  requireIdempotencyKey=true"
+            )));
+        }
+        None if redelivered(message) => {
+            return Err(CamelError::ValidationError(format!(
+                "{op} has no {HEADER_HARVEST_KEY} header, and this is a camel redelivery: \
+                 the earlier try can have sent the write, so the component does not send \
+                 it again; set the {HEADER_HARVEST_KEY} header to get a marker lookup"
             )));
         }
         None => return Ok(None),
@@ -89,12 +108,36 @@ pub(crate) fn marked(
     }
     .filter(|n| *n >= 1)
     .ok_or_else(|| bad_header(HEADER_HARVEST_ATTEMPT, "must be a whole number from 1"))?;
-    let previous = if attempt > 1 {
+    let previous = if attempt > 1 || redelivered(message) {
         Previous::Unknown
     } else {
         Previous::First
     };
     Ok(Some(Marked { key, previous }))
+}
+
+/// Returns `true` when the message is a camel redelivery.
+///
+/// `CamelRedelivered` that is not `false`, or `CamelRedeliveryCounter`
+/// that is not 0, gives `true`. A value of an other type also gives
+/// `true`: the rule fails closed.
+///
+/// A camel redelivery header can also come from an earlier step that camel
+/// sent again. The step cannot see the difference, so it also does a
+/// lookup only, or fails for an unmarked write.
+fn redelivered(message: &Message) -> bool {
+    let flag = match header(message, HEADER_REDELIVERED) {
+        None | Some(Value::Bool(false)) => false,
+        Some(Value::String(text)) => !text.trim().eq_ignore_ascii_case("false"),
+        Some(_) => true,
+    };
+    let counter = match header(message, HEADER_REDELIVERY_COUNTER) {
+        None => false,
+        Some(Value::Number(n)) => n.as_u64() != Some(0),
+        Some(Value::String(text)) => text.trim() != "0",
+        Some(_) => true,
+    };
+    flag || counter
 }
 
 /// Reads the issue: the `JiraIssueKey` header or the `issueKey` option.
@@ -309,6 +352,41 @@ mod tests {
                 err.to_string().contains(HEADER_HARVEST_ATTEMPT),
                 "{bad}: {err}"
             );
+        }
+    }
+
+    #[test]
+    fn a_camel_redelivery_looks_up_only() {
+        let o = options("jira:createIssue?project=OPS&issueType=Task");
+        let key = (HEADER_HARVEST_KEY, json!("k-1"));
+        let first = (HEADER_HARVEST_ATTEMPT, json!(1));
+        for redelivery in [
+            (HEADER_REDELIVERED, json!(true)),
+            (HEADER_REDELIVERED, json!("TRUE")),
+            (HEADER_REDELIVERED, json!(1)),
+            ("camelredelivered", json!(true)),
+            (HEADER_REDELIVERY_COUNTER, json!(1)),
+            (HEADER_REDELIVERY_COUNTER, json!("2")),
+            (HEADER_REDELIVERY_COUNTER, json!(-1)),
+            (HEADER_REDELIVERY_COUNTER, json!([1])),
+        ] {
+            let m = message(&[key.clone(), first.clone(), redelivery.clone()]);
+            let marked = marked(&m, &o).unwrap().unwrap();
+            assert_eq!(marked.previous, Previous::Unknown, "{redelivery:?}");
+            // With no key, the write fails and names the key header.
+            let err = super::marked(&message(&[redelivery.clone()]), &o).unwrap_err();
+            assert!(err.to_string().contains(HEADER_HARVEST_KEY), "{err}");
+        }
+        for none in [
+            (HEADER_REDELIVERED, json!(false)),
+            (HEADER_REDELIVERED, json!(" false ")),
+            (HEADER_REDELIVERED, json!(null)),
+            (HEADER_REDELIVERY_COUNTER, json!(0)),
+            (HEADER_REDELIVERY_COUNTER, json!("0")),
+        ] {
+            let m = message(&[key.clone(), first.clone(), none.clone()]);
+            assert_eq!(marked(&m, &o).unwrap().unwrap().previous, Previous::First);
+            assert_eq!(marked(&message(&[none.clone()]), &o).unwrap(), None);
         }
     }
 

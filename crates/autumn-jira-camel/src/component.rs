@@ -23,7 +23,9 @@ const DEFAULT_CONNECTION: &str = "default";
 /// The component holds one client for each connection name: `default`
 /// and the names of [`JiraComponent::connection`]. The `connection` URI
 /// option picks one. For a route that a harvest activity calls, register
-/// `client.durable()`: then harvest is the one layer that retries.
+/// `client.durable()`: then harvest is the one layer that retries. Do not
+/// give such a route a camel redelivery. A camel redelivery of a marked
+/// write does a lookup only, and a redelivery of an unmarked write fails.
 ///
 /// ```no_run
 /// # fn demo(client: autumn_jira::JiraClient, eu: autumn_jira::JiraClient) {
