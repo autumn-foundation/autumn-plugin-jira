@@ -100,6 +100,26 @@ pub(crate) fn marked(
         }
         Some(_) => return Err(bad_header(HEADER_HARVEST_KEY, "must be a non-empty string")),
     };
+    let previous = if retried(message)? {
+        Previous::Unknown
+    } else {
+        Previous::First
+    };
+    Ok(Some(Marked { key, previous }))
+}
+
+/// Returns `true` when an earlier try of this step can have sent the
+/// write: a harvest attempt above 1, or a camel redelivery.
+///
+/// `transitionToStatus` reads it with no key header too. On such a try,
+/// it only reads the status, because a second send can run the
+/// transition two times.
+///
+/// # Errors
+///
+/// `ValidationError` for a `HarvestActivityAttempt` header that is not a
+/// whole number from 1.
+pub(crate) fn retried(message: &Message) -> Result<bool, CamelError> {
     let attempt = match header(message, HEADER_HARVEST_ATTEMPT) {
         None => Some(1),
         Some(Value::Number(n)) => n.as_u64(),
@@ -108,12 +128,7 @@ pub(crate) fn marked(
     }
     .filter(|n| *n >= 1)
     .ok_or_else(|| bad_header(HEADER_HARVEST_ATTEMPT, "must be a whole number from 1"))?;
-    let previous = if attempt > 1 || redelivered(message) {
-        Previous::Unknown
-    } else {
-        Previous::First
-    };
-    Ok(Some(Marked { key, previous }))
+    Ok(attempt > 1 || redelivered(message))
 }
 
 /// Returns `true` when the message is a camel redelivery.
@@ -124,7 +139,8 @@ pub(crate) fn marked(
 ///
 /// A camel redelivery header can also come from an earlier step that camel
 /// sent again. The step cannot see the difference, so it also does a
-/// lookup only, or fails for an unmarked write.
+/// lookup only, or fails for an unmarked write. A `transitionToStatus`
+/// only reads the status.
 fn redelivered(message: &Message) -> bool {
     let flag = match header(message, HEADER_REDELIVERED) {
         None | Some(Value::Bool(false)) => false,
