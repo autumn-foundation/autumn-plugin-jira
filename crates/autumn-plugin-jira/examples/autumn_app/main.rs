@@ -113,8 +113,9 @@ async fn seeded_fake() -> Result<FakeJira, String> {
 /// a debug build in the dev profile. `selector` is the first value that is
 /// set.
 fn app_profile(selector: Option<&str>, debug: bool) -> String {
-    let _ = selector;
-    if debug { "dev" } else { "prod" }.to_owned()
+    selector
+        .and_then(autumn_web::config::normalize_profile_name)
+        .unwrap_or_else(|| if debug { "dev" } else { "prod" }.to_owned())
 }
 
 /// The first profile selector that is set: `AUTUMN_ENV`, `AUTUMN_PROFILE`,
