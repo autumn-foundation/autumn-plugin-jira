@@ -74,6 +74,10 @@ jobs:
       - name: Newest compatible dependencies (weekly and manual runs)
         if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         run: cargo update
+      # After the weekly update, the lock can hold two versions of a shared
+      # crate. On other runs, this repeats the `deps` check.
+      - name: One version each of the shared crates
+        run: bash scripts/one-version.sh Cargo.toml
       - name: Test with coverage
         run: >-
           cargo llvm-cov --workspace --all-targets --all-features
@@ -162,14 +166,7 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - name: One version each of the shared crates
-        run: |
-          for manifest in Cargo.toml examples/ecosystem/Cargo.toml; do
-            out=$(cargo tree --locked -e normal -d --manifest-path "$manifest")
-            if printf '%s\n' "$out" | grep -E '^(autumn-web|san-mateo|autumn-harvest|camel-api|camel-core|camel-component-api) v'; then
-              echo "::error::$manifest: two versions of a crate above"
-              exit 1
-            fi
-          done
+        run: bash scripts/one-version.sh Cargo.toml examples/ecosystem/Cargo.toml
       - name: The root lock has no C builds and no harvest-camel
         run: |
           if grep -E '^name = "(harvest-camel|autumn-harvest-plugin|pq-src|libsqlite3-sys)"$' Cargo.lock; then
@@ -258,6 +255,10 @@ jobs:
             fi
             exit 1
           fi
+      # After the weekly update, the lock can hold two versions of a shared
+      # crate. On other runs, this repeats the `deps` check.
+      - name: One version each of the shared crates
+        run: bash scripts/one-version.sh "$MANIFEST"
       - run: cargo fmt --manifest-path "$MANIFEST" --check
       - run: cargo clippy --locked --manifest-path "$MANIFEST" --all-targets -- -D warnings
       - run: cargo test --locked --manifest-path "$MANIFEST"
