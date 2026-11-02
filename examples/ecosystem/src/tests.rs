@@ -28,6 +28,7 @@ use tokio::sync::Mutex;
 use super::*;
 use crate::summary::EXPECTED;
 use crate::transport::{JIRA_INTEGRATION, LEAD};
+use crate::workflow::Outcome;
 
 /// The pinned copy of `harvest_camel::is_retryable` and its samples, from
 /// the camel crate. The test below compares it with the real function.
@@ -61,7 +62,7 @@ fn database_url() -> Option<String> {
 async fn run_scenario(url: &str, scenario: &Scenario) -> (Result<Report, BoxError>, Sites) {
     let _one = ONE_RUN.lock().await;
     let sites = scenario_sites(scenario);
-    (run(url, scenario, sites.clone()).await, sites)
+    (Box::pin(run(url, scenario, sites.clone())).await, sites)
 }
 
 // --- EX5: the happy path --------------------------------------------------
@@ -69,7 +70,7 @@ async fn run_scenario(url: &str, scenario: &Scenario) -> (Result<Report, BoxErro
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn happy_path_timeline_is_exact() {
     let Some(url) = database_url() else { return };
-    let (report, sites) = run_scenario(&url, &Scenario::happy()).await;
+    let (report, sites) = Box::pin(run_scenario(&url, &Scenario::happy())).await;
     let report = report.expect("the happy path runs");
     check(&report.summary).unwrap_or_else(|e| panic!("{e}\n{}", report.summary));
     // The facts behind the lines.
@@ -103,7 +104,7 @@ async fn lost_create_fails_closed() {
         index_lag: Duration::from_secs(30),
         ..Scenario::happy()
     };
-    let (report, sites) = run_scenario(&url, &scenario).await;
+    let (report, sites) = Box::pin(run_scenario(&url, &scenario)).await;
     let err = report.expect_err("the run fails closed").to_string();
     assert!(err.starts_with("workflow A-1001."), "{err}");
     assert!(err.contains("jira.outcome_unknown"), "{err}");
@@ -120,7 +121,7 @@ async fn bad_webhook_secret_resolves_by_poll() {
         poll_every_secs: Some(1),
         ..Scenario::happy()
     };
-    let (report, _sites) = run_scenario(&url, &scenario).await;
+    let (report, _sites) = Box::pin(run_scenario(&url, &scenario)).await;
     let report = report.expect("a poll ends the wait");
     let lines = &report.summary.lines;
     assert_eq!(
@@ -145,7 +146,7 @@ async fn no_webhook_no_poll_times_out() {
         poll_every_secs: None,
         ..Scenario::happy()
     };
-    let (report, sites) = run_scenario(&url, &scenario).await;
+    let (report, sites) = Box::pin(run_scenario(&url, &scenario)).await;
     let report = report.expect("the run takes the timeout branch");
     assert_eq!(report.output.outcome, Outcome::TimedOut);
     assert!(report.output.chat.is_none(), "no chat message");
@@ -207,7 +208,7 @@ async fn webhook_negatives() {
         webhook_negatives: true,
         ..Scenario::happy()
     };
-    let (report, _sites) = run_scenario(&url, &scenario).await;
+    let (report, _sites) = Box::pin(run_scenario(&url, &scenario)).await;
     let report = report.expect("the run ends");
     // The delivery, the same delivery again, a tampered copy, a copy from
     // the bot.

@@ -256,7 +256,7 @@ pub struct Attempt {
     /// The activity name, for example `jira_create_issue`.
     pub activity: String,
     /// The attempt number, from 1.
-    pub attempt: u32,
+    pub number: u32,
     /// The error type of a failed attempt, for example
     /// `jira.outcome_pending`. `None` for a success.
     pub error_type: Option<String>,
@@ -316,7 +316,7 @@ impl ActivityInterceptor for AttemptLog {
             let result = next.run(input).await;
             self.push(Attempt {
                 activity: invocation.name().to_owned(),
-                attempt: ctx.attempt(),
+                number: ctx.attempt(),
                 error_type: result.as_ref().err().map(|e| error_type(e)),
             });
             result

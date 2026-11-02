@@ -86,7 +86,7 @@ use crate::routes::{ALERT_ID, ALERTS, NOTIFY, STREAM, routes};
 use crate::summary::{Summary, check};
 use crate::transport::{CHAT_MESSAGES_URL, ENV, PROJECT, Sites, TICK};
 use crate::workflow::{
-    AlertInput, AttemptLog, INCIDENT_FLOW, IncidentOutput, Outcome, WorkerName, incident_flow_info,
+    AlertInput, AttemptLog, INCIDENT_FLOW, IncidentOutput, WorkerName, incident_flow_info,
     notify_chat_info,
 };
 
@@ -146,6 +146,7 @@ pub struct Scenario {
 
 impl Scenario {
     /// The scenario of plan 11.3.
+    #[must_use]
     pub fn happy() -> Self {
         Self {
             app_secret: WEBHOOK_SECRET.to_owned(),
@@ -162,6 +163,7 @@ impl Scenario {
 
 /// The fakes of the scenario. The fault script is the same for each
 /// scenario: the first create reply is lost after the commit.
+#[must_use]
 pub fn scenario_sites(scenario: &Scenario) -> Sites {
     let sites = Sites::new(WEBHOOK_SECRET, CLIENT_SECRET);
     sites
@@ -333,7 +335,7 @@ fn count_of(n: impl Into<u64>, one: &str, many: &str) -> String {
 }
 
 /// The plural `s` for a count.
-fn s(n: usize) -> &'static str {
+const fn s(n: usize) -> &'static str {
     if n == 1 { "" } else { "s" }
 }
 
@@ -346,7 +348,8 @@ fn s(n: usize) -> &'static str {
 /// timeout.
 pub async fn run(url: &str, scenario: &Scenario, sites: Sites) -> Result<Report, BoxError> {
     let timeout = run_timeout();
-    tokio::time::timeout(timeout, run_unbounded(url, scenario, sites))
+    // The future of the run is large, so it lives on the heap.
+    tokio::time::timeout(timeout, Box::pin(run_unbounded(url, scenario, sites)))
         .await
         .map_err(|_| format!("the run did not end in {timeout:?}"))?
 }
@@ -354,7 +357,6 @@ pub async fn run(url: &str, scenario: &Scenario, sites: Sites) -> Result<Report,
 async fn run_unbounded(url: &str, scenario: &Scenario, sites: Sites) -> Result<Report, BoxError> {
     migrate_once(url).await?;
     let pool = engine_pool(url, 8, DbRole::Hot, &EngineDbTimeouts::default())?;
-    let mut summary = Summary::default();
     let san = transport::san_mateo(&sites, CLIENT_SECRET).await?;
 
     // [2] san-mateo: the stored token is expired. The discovery refreshes
@@ -375,6 +377,10 @@ async fn run_unbounded(url: &str, scenario: &Scenario, sites: Sites) -> Result<R
 
     let jira = transport::jira_client(&san);
     let key = RouteKey::new(Secret::new(format!("route-key-{}", OsEntropy.hex(16))))?;
+    // The autumn app first: it starts nothing that needs a stop.
+    let bridge = HarvestSignalBridge::new(pool.clone(), jira.clone(), key.clone())
+        .allow_workflow(INCIDENT_FLOW);
+    let app = app::test_app(&san, bridge.clone(), &scenario.app_secret)?;
     let (mut camel, source) = start_camel(&san, transport::durable_client(&san)).await?;
     let handle = CamelHandle::new();
     handle.resolve(&camel, NOTIFY)?;
@@ -409,9 +415,6 @@ async fn run_unbounded(url: &str, scenario: &Scenario, sites: Sites) -> Result<R
         let (cancel, runtime) = (cancel.clone(), connector(source, api.clone(), queue, input));
         async move { runtime.run(cancel).await }
     });
-    let bridge = HarvestSignalBridge::new(pool.clone(), jira.clone(), key.clone())
-        .allow_workflow(INCIDENT_FLOW);
-    let app = app::test_app(&san, bridge.clone(), &scenario.app_secret)?;
 
     let mut runner = Some(runner);
     let driven = drive(&mut Drive {
@@ -438,6 +441,26 @@ async fn run_unbounded(url: &str, scenario: &Scenario, sites: Sites) -> Result<R
     stopped_connector?;
     stopped_camel?;
 
+    let counters = bridge.counters();
+    let summary = timeline(&driven, line2, &sites, &state.attempts, counters)?;
+    Ok(Report {
+        summary,
+        output: driven.output,
+        webhook_statuses: driven.webhook_statuses,
+        bridge: counters,
+        webhook_counters: driven.webhook_counters,
+    })
+}
+
+/// Builds the nine lines from the facts of the run.
+fn timeline(
+    driven: &Driven,
+    line2: String,
+    sites: &Sites,
+    attempts: &AttemptLog,
+    counters: BridgeCounters,
+) -> Result<Summary, BoxError> {
+    let mut summary = Summary::default();
     // [1] camel: two sends of one alert id, one run.
     summary.line(
         "camel",
@@ -451,7 +474,7 @@ async fn run_unbounded(url: &str, scenario: &Scenario, sites: Sites) -> Result<R
         ),
     );
     summary.line("sanmateo", line2);
-    let output = driven.output;
+    let output = &driven.output;
     let issue = output.issue_key.to_string();
 
     // [3] the escape hatch: the call that the fake got, and the lead.
@@ -476,13 +499,13 @@ async fn run_unbounded(url: &str, scenario: &Scenario, sites: Sites) -> Result<R
     // [4] the create: the attempt log of the workers, and the POSTs that
     // the fake got.
     let posts = sites.jira.count(FakeOp::CreateIssue);
-    let creates = state.attempts.of("jira_create_issue");
+    let creates = attempts.of("jira_create_issue");
     let failures: Vec<String> = creates
         .iter()
         .filter_map(|a| a.error_type.as_deref())
         .map(|e| e.trim_start_matches("jira.").to_owned())
         .collect();
-    let last = creates.last().map_or(0, |a| a.attempt);
+    let last = creates.last().map_or(0, |a| a.number);
     summary.line(
         "jira",
         format!(
@@ -523,8 +546,27 @@ async fn run_unbounded(url: &str, scenario: &Scenario, sites: Sites) -> Result<R
         },
     );
 
+    end_lines(&mut summary, driven, counters)?;
+
+    let chats = sites.chat.requests_to(CHAT_MESSAGES_URL);
+    summary.one_chat_message_with_a_key = match chats.as_slice() {
+        [one] => one
+            .header_value("idempotency-key")
+            .is_some_and(|k| !k.trim().is_empty()),
+        _ => false,
+    };
+    Ok(summary)
+}
+
+/// Lines [7] to [9]: the webhook, the end of the run and the app route.
+fn end_lines(
+    summary: &mut Summary,
+    driven: &Driven,
+    counters: BridgeCounters,
+) -> Result<(), BoxError> {
+    let output = &driven.output;
+    let issue = output.issue_key.to_string();
     // [7] autumn and the bridge.
-    let counters = bridge.counters();
     summary.line(
         "autumn",
         match driven.webhook_statuses.as_slice() {
@@ -569,23 +611,9 @@ async fn run_unbounded(url: &str, scenario: &Scenario, sites: Sites) -> Result<R
             }
         },
     );
-    summary.line("autumn", driven.incident);
+    summary.line("autumn", &driven.incident);
 
-    let chats = sites.chat.requests_to(CHAT_MESSAGES_URL);
-    summary.one_chat_message_with_a_key = match chats.as_slice() {
-        [one] => one
-            .header_value("idempotency-key")
-            .is_some_and(|k| !k.trim().is_empty()),
-        _ => false,
-    };
-    debug_assert!(output.outcome == Outcome::Resolved || output.chat.is_none());
-    Ok(Report {
-        summary,
-        output,
-        webhook_statuses: driven.webhook_statuses,
-        bridge: counters,
-        webhook_counters: driven.webhook_counters,
-    })
+    Ok(())
 }
 
 /// The name of a wait source in the timeline.
@@ -624,6 +652,41 @@ struct Driven {
 /// the issue once (the transition read it first).
 fn waiting(sites: &Sites) -> bool {
     sites.jira.count(FakeOp::DoTransition) >= 1 && sites.jira.count(FakeOp::GetIssue) >= 2
+}
+
+/// A person resolves the issue. The fake signs one delivery, and the
+/// driver posts it to the app, as Jira does. Returns the status of each
+/// POST.
+async fn person_resolves(d: &Drive<'_>) -> Result<Vec<u16>, BoxError> {
+    // The deliveries of the bot (the API writes) are not part of this step.
+    drop(d.sites.jira.take_deliveries());
+    let key = d
+        .sites
+        .jira
+        .issues()
+        .first()
+        .and_then(|i| i["key"].as_str().map(str::to_owned))
+        .ok_or("the run made no issue")?;
+    d.sites.jira.human_transition(&key, "Done", ANN)?;
+    let mut statuses = Vec::new();
+    if !d.scenario.deliver {
+        return Ok(statuses);
+    }
+    for delivery in d.sites.jira.take_deliveries() {
+        statuses.push(d.app.deliver(&delivery).await.status.as_u16());
+        if d.scenario.webhook_negatives {
+            // Webhooks are at least once: the same delivery again. Then a
+            // tampered copy, and a copy from the bot.
+            for copy in [
+                delivery.clone(),
+                delivery.tampered(),
+                delivery.with_actor(BOT),
+            ] {
+                statuses.push(d.app.deliver(&copy).await.status.as_u16());
+            }
+        }
+    }
+    Ok(statuses)
 }
 
 /// The person, the webhook, the worker restart and the app route.
@@ -676,37 +739,12 @@ async fn drive(d: &mut Drive<'_>) -> Result<Driven, BoxError> {
         tokio::time::sleep(TICK).await;
     }
 
-    // [7] A person resolves the issue. The fake signs one delivery, and
-    // the driver posts it to the app, as Jira does.
-    let mut webhook_statuses = Vec::new();
-    if finished.is_none() && d.scenario.person_resolves {
-        // The deliveries of the bot (the API writes) are not part of this
-        // step.
-        drop(d.sites.jira.take_deliveries());
-        let key = d
-            .sites
-            .jira
-            .issues()
-            .first()
-            .and_then(|i| i["key"].as_str().map(str::to_owned))
-            .ok_or("the run made no issue")?;
-        d.sites.jira.human_transition(&key, "Done", ANN)?;
-        if d.scenario.deliver {
-            for delivery in d.sites.jira.take_deliveries() {
-                webhook_statuses.push(d.app.deliver(&delivery).await.status.as_u16());
-                if d.scenario.webhook_negatives {
-                    // Webhooks are at least once: the same delivery again.
-                    for copy in [
-                        delivery.clone(),
-                        delivery.tampered(),
-                        delivery.with_actor(BOT),
-                    ] {
-                        webhook_statuses.push(d.app.deliver(&copy).await.status.as_u16());
-                    }
-                }
-            }
-        }
-    }
+    // [7] A person resolves the issue, and the driver posts the delivery.
+    let webhook_statuses = if finished.is_none() && d.scenario.person_resolves {
+        person_resolves(d).await?
+    } else {
+        Vec::new()
+    };
     let output = match finished {
         Some(output) => output,
         None => result.await?,

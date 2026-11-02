@@ -171,8 +171,10 @@ sends a create a second time after a 5xx. The activity looks up the issue by
 its marker label, and the search index lags 2 s, so the lookup finds
 nothing: the attempt fails with the retryable `jira.outcome_pending`.
 harvest waits `settle_secs` (3 s). Attempt 2 only looks up, and it finds
-`OPS-1`. The line reads the failed attempt from `harvest_events` and counts
-the POSTs of the fake.
+`OPS-1`. The history keeps only the last result of an activity, so a
+harvest activity interceptor (`AttemptLog` in `src/workflow.rs`) logs each
+attempt with its error type. The line reads that log and counts the POSTs
+of the fake.
 
 ```rust
 // src/workflow.rs
