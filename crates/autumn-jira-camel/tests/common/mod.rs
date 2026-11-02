@@ -14,6 +14,7 @@ use std::sync::Arc;
 use autumn_jira::client::ClientSettings;
 use autumn_jira::ids::SiteName;
 use autumn_jira::san_mateo::Secret;
+use autumn_jira::san_mateo::transport::HttpTransport;
 use autumn_jira::{BasicAuth, JiraClient, JiraSite};
 use autumn_jira_camel::JiraComponent;
 use autumn_jira_fake::FakeJira;
@@ -31,6 +32,11 @@ pub const ATTEMPT: &str = "HarvestActivityAttempt";
 
 /// A durable client on the fake, with short waits.
 pub fn client(fake: &FakeJira) -> JiraClient {
+    client_on(Arc::new(fake.clone()))
+}
+
+/// A durable client of the fake site on `transport`, with short waits.
+pub fn client_on(transport: Arc<dyn HttpTransport>) -> JiraClient {
     let site = JiraSite::Subdomain(SiteName::parse(autumn_jira_fake::DEFAULT_SITE).unwrap());
     let auth = BasicAuth::new(
         autumn_jira_fake::DEFAULT_EMAIL,
@@ -41,7 +47,7 @@ pub fn client(fake: &FakeJira) -> JiraClient {
     settings.base_backoff_ms = 10;
     settings.max_backoff_ms = 100;
     settings.lookup_delay_ms = 10;
-    JiraClient::api_token(site, auth, Arc::new(fake.clone())).with_settings(settings)
+    JiraClient::api_token(site, auth, transport).with_settings(settings)
 }
 
 /// A component with the default client on the fake.
