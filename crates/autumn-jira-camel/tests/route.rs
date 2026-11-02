@@ -1350,13 +1350,15 @@ async fn retry_attempt_lookup_waits_for_index_lag() {
     assert_eq!(settle.default_value.as_deref(), Some("10000"));
 
     let fake = FakeJira::new();
-    fake.index_lag(std::time::Duration::from_secs(1));
+    // The lag is 3 s, so a runner stall of up to about 2 s still gives a
+    // first miss. The settle wait is longer than the lag.
+    fake.index_lag(std::time::Duration::from_secs(3));
     fake.fault(FakeOp::CreateIssue, Fault::StatusAfterCommit(503));
     let camel = start(
         component(&fake),
         &[(
             "direct:create",
-            "jira:createIssue?project=OPS&issueType=Task&settleMs=1500",
+            "jira:createIssue?project=OPS&issueType=Task&settleMs=3500",
         )],
     )
     .await
