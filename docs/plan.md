@@ -234,6 +234,7 @@ text.
 | V113 | The ecosystem stop log records a worker stop only when a worker stopped. | A deadline during the worker swap logged a stop that did not happen (R2D-integration-7). | 11.4 |
 | V114 | The plugin takes the webhooks of one Jira site for each app. autumn skips a second `JiraPlugin` with a warning, and the route of the plugin is not public. | The docs told an app to give each site its own endpoint and bridge, and the plugin cannot do that (R2D-integration-2). | 8.4, ADR 0004, ADR 0006 |
 | V115 | Guard changes: an ADR cites only the non-ADR docs; the metadata check reads workspace keys, multi-line arrays and empty values; the update check finds an update after `cd` or a separator and reads `--manifest-path=`; a README snippet copies the example code in order; new guard `ex_status_agrees`. | Each guard had a gap (R2E-tests-guards-2, R2E-tests-guards-7, R2E-tests-guards-8, R2E-tests-guards-9, R2G-fixcheck-b-2). | 13, 16 |
+| V116 | A camel `addComment` on harvest attempt 1 with no camel redelivery calls `add_comment_idempotent_first`, as `jira_add_comment` does (V104). With no `HarvestActivityAttempt` header, on a camel redelivery or on an attempt above 1, it keeps the lookup before the send. | A busy issue got no comment from a camel route on attempt 1 (R2A-write-safety-3, the camel half). | 10, ADR 0003 |
 
 ---
 
@@ -2487,7 +2488,12 @@ out headers. Body errors, header errors and the `outcome_unknown` of a
 negative lookup always fail the exchange.
 
 Idempotency (D7): with `HarvestIdempotencyKey`, create and comment use the
-idempotent client calls with that key. `HarvestActivityAttempt > 1` [V]
+idempotent client calls with that key. A comment on `HarvestActivityAttempt`
+1 with no camel redelivery calls `add_comment_idempotent_first` (V116): no
+earlier call used the key, so no lookup comes before the POST, and a busy
+issue does not stop the comment at the page cap. With no attempt header,
+the producer cannot know that, so it calls `add_comment_idempotent`, which
+looks up first. `HarvestActivityAttempt > 1` [V]
 gives `Previous::Unknown`, so `host_may_send` allows a send only with
 `resendAfterNegativeLookup=true`. Else lookup only: found gives the reply
 with outcome `found`; none gives `ValidationError("jira outcome_unknown:
@@ -2535,7 +2541,8 @@ Harvest headers (V48):
   parse, the same as the harvest activities. A blank key or a key that is
   not a string fails.
 - `HarvestActivityAttempt`: a number or a digit string >= 1. No header
-  counts as attempt 1.
+  counts as attempt 1, but a comment then looks up its marker before the
+  send (V116).
 - Header names match exactly first, then with no regard to case. A null
   value counts as no header. The names are crate-private constants in
   `src/headers.rs`.

@@ -354,8 +354,8 @@ impl Producer {
     ///
     /// On harvest attempt 1 with no camel redelivery, no earlier call used
     /// the key. So the client sends with no lookup first
-    /// (`add_comment_idempotent_first`), and a busy issue does not stop
-    /// the comment at the page cap of the lookup (R2A-write-safety-3).
+    /// (`add_comment_idempotent_first`). Then the page cap of a lookup on a
+    /// busy issue does not stop the comment (R2A-write-safety-3).
     /// With no attempt header, or with `resendAfterNegativeLookup=true` on
     /// a retry, the client looks up the marker before it sends.
     async fn comment(&self, read: In<'_>, raw: input::Raw) -> Result<Reply, Failure> {

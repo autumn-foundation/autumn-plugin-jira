@@ -545,7 +545,10 @@ the create gives the issue, so the step needs `allowHeaderOverrides=true`.
   option. With the flag, the out header gives the issue.
 - Under harvest-camel, the `HarvestIdempotencyKey` header makes
   `createIssue` and `addComment` idempotent. An attempt above 1 does a
-  lookup only. For a route that a harvest activity calls, use
+  lookup only. On `HarvestActivityAttempt` 1 with no camel redelivery,
+  `addComment` sends with no lookup first, so a busy issue still gets the
+  comment. With no `HarvestActivityAttempt` header, `addComment` looks up
+  the marker before it sends. For a route that a harvest activity calls, use
   `client.durable()`, so that harvest is the one layer that retries.
 - On such a lookup-only `createIssue`, the search index can lag. When the
   first lookup finds nothing, the producer waits `settleMs` (default

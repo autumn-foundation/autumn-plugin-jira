@@ -4,7 +4,7 @@
   budgets, the lookup-failure rule and the delete rule across attempts.
   Amended after review round 1: the transition resend rule, the camel
   redelivery rules, the camel settle wait and the san-mateo budgets
-  (plan V54 to V95). Amended after review round 2 (plan V97 to V115).
+  (plan V54 to V95). Amended after review round 2 (plan V97 to V116).
   These amendments are the stops after a "maybe sent" transition, the
   resume mode, the first comment attempt and the timeout cap.
 - Date: 2026-11-02
@@ -50,7 +50,8 @@ layers multiply the sends and break the activity timeout.
   before attempt 1, so a lookup there only adds the risk of `PageLimit`
   on a busy issue. After a 5xx or a lost reply it still looks up, and a
   `PageLimit` then gives `OutcomeUnknown` with the marker. Harvest uses it
-  on attempt 1 and after a `NotSent` attempt.
+  on attempt 1 and after a `NotSent` attempt. A camel `addComment` uses it
+  on harvest attempt 1 with no camel redelivery (plan V116).
 - Checked transition: before each attempt, the client reads the status. At
   the target it returns `AlreadyThere`. The status alone cannot show that a
   "maybe sent" attempt did not run. So after a 5xx or a "maybe sent"
