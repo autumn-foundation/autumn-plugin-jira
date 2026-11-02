@@ -257,6 +257,40 @@ impl JiraClient {
         {
             return Ok(CommentOutcome::Found(found));
         }
+        self.send_marked_comment(issue, body, key).await
+    }
+
+    /// Adds a comment for a key on the first attempt of a host: no earlier
+    /// call used the key. The client skips the lookup before the POST, so
+    /// a busy issue does not give `PageLimit` when nothing can have been
+    /// sent. After a 5xx or a lost reply, the client looks up the marker,
+    /// as [`Self::add_comment_idempotent`] does. A `PageLimit` of that
+    /// lookup gives `OutcomeUnknown` with the marker.
+    ///
+    /// Call it only when no earlier call or attempt used `key`. For a
+    /// retry, call [`Self::add_comment_idempotent`] or the lookup.
+    ///
+    /// # Errors
+    ///
+    /// `OutcomeUnknown` with the marker when the lookup finds nothing. The
+    /// typed errors of the calls.
+    pub async fn add_comment_idempotent_first(
+        &self,
+        issue: impl Into<IssueRef> + Send,
+        body: &Adf,
+        key: &IdempotencyKey,
+    ) -> Result<CommentOutcome> {
+        self.send_marked_comment(issue.into(), body, key).await
+    }
+
+    /// Sends the marked comment, then looks up the marker after a 5xx or a
+    /// lost reply.
+    async fn send_marked_comment(
+        &self,
+        issue: IssueRef,
+        body: &Adf,
+        key: &IdempotencyKey,
+    ) -> Result<CommentOutcome> {
         let marker = key.comment_marker();
         let request = comment_request(&issue, &body.clone().with_paragraph(&marker));
         let cause = match self.run(OpClass::MarkedWrite, &request).await {
@@ -281,20 +315,6 @@ impl JiraClient {
         })
     }
 
-    /// Adds a comment on the first attempt of a host.
-    ///
-    /// # Errors
-    ///
-    /// As [`Self::add_comment_idempotent`].
-    pub async fn add_comment_idempotent_first(
-        &self,
-        issue: impl Into<IssueRef> + Send,
-        body: &Adf,
-        key: &IdempotencyKey,
-    ) -> Result<CommentOutcome> {
-        self.add_comment_idempotent(issue, body, key).await
-    }
-
     /// Finds the comment of an idempotency key.
     ///
     /// A match is a comment by the account of the credentials
@@ -302,7 +322,10 @@ impl JiraClient {
     /// can type or quote the marker, but a person is not the author of the
     /// client comments. The lookup reads the newest comments first, 100 for
     /// each page, at most `max_pages` pages. Other comments can come
-    /// between two attempts, so the lookup does not stop at one page.
+    /// between two attempts, so the lookup does not stop at one page. When
+    /// the total drops between two pages, a comment was deleted, and the
+    /// next page starts that many places back. So a delete does not move
+    /// the marker past the cursor.
     ///
     /// # Errors
     ///
@@ -320,6 +343,7 @@ impl JiraClient {
         let max = self.settings.max_pages;
         let mut start = 0_u64;
         let mut pages = 0_u32;
+        let mut last_total: Option<u64> = None;
         loop {
             let request = ApiRequest::new(Op::ListComments, Method::Get, path.clone())
                 .query("orderBy", "-created")
@@ -335,7 +359,17 @@ impl JiraClient {
             {
                 return Ok(Some(found));
             }
-            let next = policy::offset_next(start, returned, page.total);
+            // A delete between two pages moves each older comment one place
+            // to the head, past the cursor. When the total drops by `d`, the
+            // next page starts `d` places back. A new comment moves the
+            // comments the other way, so that skips nothing.
+            let dropped = last_total.map_or(0, |t| t.saturating_sub(page.total));
+            last_total = Some(page.total);
+            let next = if dropped > 0 {
+                Some(start.saturating_sub(dropped))
+            } else {
+                policy::offset_next(start, returned, page.total)
+            };
             match policy::token_page_step(pages, max, false, next.is_some(), false) {
                 policy::PageStep::Fetch => {
                     if let Some(n) = next {

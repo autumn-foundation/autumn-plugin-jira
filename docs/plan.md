@@ -217,6 +217,7 @@ text.
 | V96 | `jira_add_comment` reads at most `COMMENT_LOOKUP_PAGES` (3) comment pages, and its `start_to_close` is 70m (`COMMENT_START_TO_CLOSE`). New `autumn_jira::client::MAX_TRANSPORT_TIMEOUT_SECS` (60), the cap of `timeout_secs`. | The paged lookup of V62 and the cold `GET /myself` did not fit the 42m budget (follow-up of R1-write-safety-9 and R9-test-quality-6). | 7.2, 8.1, 9.2 |
 | V97 | After a maybe-sent transition attempt, every stop off the target is a non-retryable `OutcomeUnknown`. New `JiraClient::resume_transition_to_status(issue, target, cause)`: one status read, no send. | A host retry after a stop with a retryable error started a new call and sent the transition again (R2A-write-safety-1, R2A-write-safety-2). | 4.5, 7.1 |
 | V98 | `Transition::is_global` and `Transition::looped` are `Option<bool>`. The resend rule counts a missing flag as `true`. | A reply with no flag made a global transition look safe to send again (R2A-write-safety-6). | 4.5, 7.1 |
+| V99 | New `JiraClient::add_comment_idempotent_first(issue, body, key)`: no lookup before the POST. The comment lookup starts a page back by the drop of the total. | A first attempt could not comment on an issue with more comments than the page cap (R2F-fixcheck-a-1). A delete between two pages hid the marker (R2A-write-safety-5). | 4.5, 7.1 |
 
 ---
 
@@ -689,6 +690,7 @@ impl JiraClient {
     // Comments
     pub async fn add_comment(&self, issue: impl Into<IssueRef> + Send, body: &Adf) -> Result<Comment>;
     pub async fn add_comment_idempotent(&self, issue: impl Into<IssueRef> + Send, body: &Adf, key: &IdempotencyKey) -> Result<CommentOutcome>;
+    pub async fn add_comment_idempotent_first(&self, issue: impl Into<IssueRef> + Send, body: &Adf, key: &IdempotencyKey) -> Result<CommentOutcome>;
     pub async fn find_comment_by_idempotency_key(&self, issue: impl Into<IssueRef> + Send, key: &IdempotencyKey) -> Result<Option<Comment>>;
     pub async fn comments(&self, issue: impl Into<IssueRef> + Send, start_at: u64, max_results: u32) -> Result<CommentPage>;
     pub async fn all_comments(&self, issue: impl Into<IssueRef> + Send) -> Result<Vec<Comment>>;
@@ -1429,7 +1431,13 @@ Rules:
   `GET /myself`) with a line that is the full marker. A person can type or
   quote the marker, but a person is not the author of the client comments.
   When pages are left at the cap, the lookup gives `PageLimit`, never
-  `None`, so it fails closed. The comment list is strongly consistent [U
+  `None`, so it fails closed. When the total drops between two pages, the
+  next page starts that many places back, so a delete does not move the
+  marker past the cursor (V99).
+- `add_comment_idempotent_first`: the first attempt of a host, when no
+  earlier call used the key. It skips the lookup before the POST, so a busy
+  issue does not give `PageLimit` when nothing can have been sent. After a
+  5xx or a lost reply, it looks up the marker as above (V99). The comment list is strongly consistent [U
   A3], so after a lost reply the client does one lookup with no delay.
   `lookup_attempts` does not apply to comments.
 - `transition_to_status`: `CheckedWrite`. Before each attempt: `GET
