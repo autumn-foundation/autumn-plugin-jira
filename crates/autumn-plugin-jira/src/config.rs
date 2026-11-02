@@ -25,6 +25,7 @@
 
 use std::path::{Path, PathBuf};
 
+use autumn_jira::client::MAX_TRANSPORT_TIMEOUT_SECS;
 use autumn_jira::policy::MAX_FUTURE_SKEW_MS;
 use serde::{Deserialize, Serialize};
 
@@ -157,7 +158,9 @@ pub struct JiraHttpConfig {
     pub lookup_attempts: u32,
     /// The wait between two marker lookups in milliseconds.
     pub lookup_delay_ms: u64,
-    /// The request timeout in API token mode, in seconds. 1 or more. In
+    /// The request timeout in API token mode, in seconds. 1 to 60
+    /// (`autumn_jira::client::MAX_TRANSPORT_TIMEOUT_SECS`): the budgets of
+    /// the harvest activities hold for 60 s for each request. In
     /// `san_mateo` mode, the San Mateo transport owns the timeout, so the
     /// plugin does not use this value.
     pub timeout_secs: u64,
@@ -422,6 +425,11 @@ impl JiraConfig {
             "[jira.http] lookup_attempts",
         )?;
         require_positive(http.timeout_secs, "[jira.http] timeout_secs")?;
+        if http.timeout_secs > MAX_TRANSPORT_TIMEOUT_SECS {
+            return Err(PluginError::config(format!(
+                "[jira.http] timeout_secs must be {MAX_TRANSPORT_TIMEOUT_SECS} or less: the harvest activity budgets hold for {MAX_TRANSPORT_TIMEOUT_SECS} s for each request"
+            )));
+        }
         if http.max_backoff_ms < http.base_backoff_ms {
             return Err(PluginError::config(
                 "[jira.http] max_backoff_ms must be base_backoff_ms or more",

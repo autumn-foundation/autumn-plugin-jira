@@ -18,7 +18,8 @@ use autumn_jira::{AccountId, IssueKey, IssueRef, ProjectKey, StatusTarget};
 use autumn_jira_harvest::{
     AddCommentInput, CommentOutput, CreateIssueInput, CreateIssueOutput, CreateKind, SignalRoute,
     StatusWait, TransitionInput, TransitionKind, TransitionOutput, WaitOptions, await_issue_status,
-    jira_add_comment_info, jira_create_issue_info, jira_transition_to_status_info,
+    drain_jira_signals, jira_add_comment_info, jira_create_issue_info,
+    jira_transition_to_status_info,
 };
 use san_mateo_harvest::{ProxyInput, ProxyOutput, san_mateo_proxy_info};
 use serde::{Deserialize, Serialize};
@@ -212,6 +213,11 @@ pub async fn incident_flow(
     } else {
         None
     };
+    // A webhook can come after the wait, while the run adds the comment or
+    // tells the chat. No code reads that signal, and a strict replay fails
+    // on a history that ends with it. So the run takes the late signals as
+    // its last step (R4-harvest-determinism-2).
+    drain_jira_signals(ctx)?;
     Ok(IncidentOutput {
         issue_key: created.key,
         outcome,

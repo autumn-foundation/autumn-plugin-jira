@@ -13,6 +13,14 @@ const DURABLE_MAX_BACKOFF_MS: u64 = 10_000;
 /// The marker lookups on a durable host.
 const DURABLE_LOOKUPS: u32 = 1;
 
+/// The longest transport timeout of one request, in seconds: 60.
+///
+/// The `start_to_close` budgets of the harvest activities hold for this
+/// timeout or less. A longer timeout can let harvest stop an attempt in the
+/// middle of a call (R9-test-quality-6). So the plugin caps
+/// `[jira.http] timeout_secs` at this value.
+pub const MAX_TRANSPORT_TIMEOUT_SECS: u64 = 60;
+
 /// The limits of one client.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]

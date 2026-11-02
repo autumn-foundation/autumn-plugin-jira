@@ -80,6 +80,23 @@ pub const WRITE_START_TO_CLOSE: Duration = Duration::from_secs(540);
 /// slow path.
 pub const LONG_WRITE_START_TO_CLOSE: Duration = Duration::from_secs(2_520);
 
+/// The most comment pages that one marker lookup of `jira_add_comment`
+/// reads: 3 pages of 100 comments, the newest first.
+///
+/// The cap keeps the `start_to_close` budget finite. An issue can get more
+/// comments between two attempts than the cap holds. Then the lookup stops
+/// with `PageLimit` and does not report "not found", so no attempt sends the
+/// comment again. The activity fails, and it never writes a duplicate.
+pub const COMMENT_LOOKUP_PAGES: u32 = 3;
+
+/// The `start_to_close` of `jira_add_comment`: 70 minutes.
+///
+/// One attempt can read `GET /myself` (a cold cache), and up to
+/// [`COMMENT_LOOKUP_PAGES`] pages before the send and after it. Through
+/// san-mateo, at four transport calls of 60 s for each send, that is
+/// 3 920 s.
+pub const COMMENT_START_TO_CLOSE: Duration = Duration::from_secs(4_200);
+
 /// The retry policy of `jira_get_issue`: 5 attempts, from 1 s.
 #[must_use]
 pub fn get_issue_retry() -> RetryPolicy {
@@ -685,6 +702,7 @@ impl AddCommentInput {
     ) -> Result<CommentOutput, ActivityFailure> {
         let key = activity_key(ctx)?;
         let settle = settle(self.settle_secs);
+        let client = &comment_client(client);
         if !host_may_send(previous_attempt(ctx), self.resend_after_negative_lookup) {
             return match client
                 .find_comment_by_idempotency_key(self.issue.clone(), &key)
@@ -713,6 +731,14 @@ impl AddCommentInput {
             Err(e) => Err(send_failure(&e, settle)),
         }
     }
+}
+
+/// The client of `jira_add_comment`: its comment lookups read at most
+/// [`COMMENT_LOOKUP_PAGES`] pages.
+fn comment_client(client: &JiraClient) -> JiraClient {
+    let mut settings = client.settings().clone();
+    settings.max_pages = settings.max_pages.min(COMMENT_LOOKUP_PAGES);
+    client.clone().with_settings(settings)
 }
 
 /// The output of `jira_add_comment`.
@@ -948,7 +974,7 @@ pub async fn jira_transition_to_status(
 /// The failure of the work method, or `jira.config` when the worker
 /// state has no client for `input.client`.
 #[activity(
-    start_to_close = "42m",
+    start_to_close = "70m",
     retry = RetryPolicy::exponential(5, Duration::from_secs(2))
 )]
 pub async fn jira_add_comment(

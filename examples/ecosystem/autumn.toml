@@ -19,6 +19,7 @@ integration = "jira"
 connection_id = "acme"
 
 [jira.webhook]
-# The bot account makes the API writes of the flow. Its own deliveries give
-# 200 and a counter, and no sink runs.
+# The bot account makes the API writes of the flow. Its own deliveries go
+# only to the sinks for all actors: the bridge is one, so a status that the
+# bot sets still signals a waiting run. Other sinks do not get them.
 ignore_actor_account_ids = ["acct-bot"]

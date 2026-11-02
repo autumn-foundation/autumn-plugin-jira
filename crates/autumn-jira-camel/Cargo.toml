@@ -16,6 +16,8 @@ camel-api.workspace = true
 camel-component-api.workspace = true
 async-trait.workspace = true
 serde_json.workspace = true
+# The settle wait of a lookup-only createIssue is a tokio timer.
+tokio.workspace = true
 tower.workspace = true
 tracing.workspace = true
 

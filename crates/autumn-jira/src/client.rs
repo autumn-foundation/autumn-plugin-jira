@@ -44,7 +44,7 @@ pub(crate) use call::status_error;
 pub use crate::error::MarkerRef;
 pub use crate::ids::IdempotencyKey;
 pub use pager::SearchPager;
-pub use settings::ClientSettings;
+pub use settings::{ClientSettings, MAX_TRANSPORT_TIMEOUT_SECS};
 
 /// The result of an idempotent create.
 #[derive(Debug, Clone, PartialEq, Eq)]

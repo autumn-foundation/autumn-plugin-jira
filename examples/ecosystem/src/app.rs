@@ -70,11 +70,17 @@ pub fn san_mateo_plugin(san: &SanMateo) -> Result<SanMateoPlugin, BoxError> {
 /// The Jira plugin in `san_mateo` mode. The bridge is its sink, so a
 /// delivery becomes a signal of the run that waits on the issue.
 ///
+/// The bridge is a sink for all actors (R2-webhook-security-5). The bot
+/// account makes the API writes, and a status that the bot sets must also
+/// signal a waiting run. The bridge does not write to Jira, so it cannot
+/// make a loop. It reads the status from the site, not from the payload.
+/// Other sinks of the app do not get the events of the bot.
+///
 /// # Errors
 ///
 /// A bad `[jira]` section.
 pub fn jira_plugin(bridge: HarvestSignalBridge) -> Result<JiraPlugin, BoxError> {
-    Ok(JiraPlugin::with_config(jira_config()?).sink(bridge))
+    Ok(JiraPlugin::with_config(jira_config()?).sink_for_all_actors(bridge))
 }
 
 /// The autumn config of `TestApp`: the Jira webhook endpoint with
