@@ -399,8 +399,8 @@ impl JiraConfig {
                 }
                 _ => {}
             }
-            require_text(&api.email_env, "[jira.api_token] email_env")?;
-            require_text(&api.token_env, "[jira.api_token] token_env")?;
+            require_env_name(&api.email_env, "[jira.api_token] email_env")?;
+            require_env_name(&api.token_env, "[jira.api_token] token_env")?;
         }
         if let Some(target) = &self.san_mateo {
             require_text(&target.environment, "[jira.san_mateo] environment")?;
@@ -496,6 +496,29 @@ fn reject_secret_keys(section: &toml::Table) -> Result<(), PluginError> {
 fn require_text(value: &str, what: &str) -> Result<(), PluginError> {
     if value.trim().is_empty() {
         return Err(PluginError::config(format!("{what} must not be empty")));
+    }
+    Ok(())
+}
+
+/// `true` for an env var name: a letter or `_`, then letters, digits and
+/// `_`, 128 chars at most.
+pub(crate) fn is_env_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    bytes
+        .next()
+        .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+        && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        && name.len() <= 128
+}
+
+/// Fails when `value` is not an env var name. The value can be a secret
+/// that an operator put in the wrong key, so the text names the key only.
+fn require_env_name(value: &str, what: &str) -> Result<(), PluginError> {
+    require_text(value, what)?;
+    if !is_env_name(value) {
+        return Err(PluginError::config(format!(
+            "{what} must be the name of an env var (letters, digits and _); the error does not show the value, because it can be a secret"
+        )));
     }
     Ok(())
 }

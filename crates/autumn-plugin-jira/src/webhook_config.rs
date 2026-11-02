@@ -9,7 +9,7 @@
 
 use autumn_web::webhook::{WebhookEndpointConfig, WebhookProvider};
 
-use crate::config::JiraWebhookConfig;
+use crate::config::{JiraWebhookConfig, is_env_name};
 use crate::error::PluginError;
 use crate::{ENDPOINT_NAME, MIN_MAX_BODY_BYTES, RECOMMENDED_MAX_BODY_BYTES};
 
@@ -108,9 +108,12 @@ pub fn check_webhook_endpoint(
     let name = settings.endpoint_name.as_str();
     let endpoint = endpoints.iter().find(|e| e.name == name);
     // The env var of the named entry, else of an entry at the route path.
+    // A value that is not an env var name can be the secret itself, so the
+    // fix shows the default name in its place.
     let secret_env = endpoint
         .or_else(|| endpoints.iter().find(|e| e.path == webhook_path))
         .and_then(|e| e.secret_env.as_deref())
+        .filter(|name| is_env_name(name))
         .unwrap_or(DEFAULT_SECRET_ENV);
     let fail = |problem: String| PluginError::WebhookEndpoint {
         fix: format!(
