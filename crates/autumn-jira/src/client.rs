@@ -137,11 +137,22 @@ fn count(n: usize) -> u64 {
 }
 
 /// Checks an issue property key.
+///
+/// The key `.` or `..` is not valid. A URL parser treats such a segment as
+/// a dot segment and removes it, so the request goes to another endpoint:
+/// `PUT .../properties/..` becomes an issue edit. Percent-encoding does not
+/// help, because a URL parser also treats `%2e` as a dot.
 fn property_key(key: &str) -> Result<&str> {
     if key.is_empty() || key.chars().count() > MAX_PROPERTY_KEY {
         return Err(JiraError::invalid(
             "issue property key",
             "must have 1 to 255 chars",
+        ));
+    }
+    if matches!(key, "." | "..") {
+        return Err(JiraError::invalid(
+            "issue property key",
+            "must not be . or ..",
         ));
     }
     Ok(key)
@@ -433,8 +444,8 @@ impl JiraClient {
     ///
     /// # Errors
     ///
-    /// `InvalidInput` for an empty key or a key over 255 chars. The typed
-    /// errors of the call.
+    /// `InvalidInput` for an empty key, a key over 255 chars, or the key
+    /// `.` or `..`. The typed errors of the call.
     pub async fn set_issue_property(
         &self,
         issue: impl Into<IssueRef> + Send,
