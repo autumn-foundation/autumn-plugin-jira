@@ -554,6 +554,53 @@ mod tests {
         assert!(LAST_READ_MARGIN >= attempts + Duration::from_secs(15));
     }
 
+    /// R2C-harvest-2: a poll read and the last read do not wait for a long
+    /// `Retry-After`. A rate-limited read is a missed poll at once. So one
+    /// read takes at most five attempts and their backoff, and the margin
+    /// holds one read.
+    #[test]
+    fn the_wait_reads_do_not_wait_for_a_retry_after() {
+        let retry = wait_read_retry();
+        assert!(
+            retry.is_non_retryable(Some("jira.rate_limited"), ""),
+            "{retry:?}"
+        );
+        assert!(!retry.is_non_retryable(Some("jira.upstream"), ""));
+        assert_eq!(
+            retry.max_attempts,
+            crate::activities::get_issue_retry().max_attempts
+        );
+        let backoff: Duration = (1..retry.max_attempts)
+            .map(|attempt| retry.initial_interval * 2_u32.pow(attempt - 1))
+            .sum();
+        let read = crate::activities::READ_START_TO_CLOSE * retry.max_attempts + backoff;
+        assert!(LAST_READ_MARGIN >= read, "{read:?}");
+    }
+
+    /// R2C-harvest-2: a poll read that ends at or after the deadline is the
+    /// last read. A second read there could end past the execution deadline.
+    #[test]
+    fn a_poll_at_the_deadline_is_the_last_read() {
+        assert!(needs_last_read(false));
+        assert!(!needs_last_read(true));
+    }
+
+    /// R2C-harvest-1: after the signal cap, a wait with no poll interval
+    /// polls at `DEFAULT_POLL_EVERY`. A shorter interval stays.
+    #[test]
+    fn the_signal_cap_falls_back_to_polls() {
+        let minute = Some(Duration::from_secs(60));
+        let day = Some(Duration::from_secs(86_400));
+        assert_eq!(poll_every(None, 0), None);
+        assert_eq!(poll_every(minute, MAX_SIGNAL_ROUNDS), minute);
+        assert_eq!(
+            poll_every(None, MAX_SIGNAL_ROUNDS),
+            Some(DEFAULT_POLL_EVERY)
+        );
+        assert_eq!(poll_every(day, MAX_SIGNAL_ROUNDS - 1), day);
+        assert_eq!(poll_every(day, MAX_SIGNAL_ROUNDS), Some(DEFAULT_POLL_EVERY));
+    }
+
     #[test]
     fn helpers() {
         assert!(is_older(Some(1), Some(2)));

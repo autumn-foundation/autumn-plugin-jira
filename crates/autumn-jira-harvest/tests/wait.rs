@@ -1019,3 +1019,118 @@ async fn a_signal_after_the_wait_needs_the_drain() {
         );
     }
 }
+
+// ------------------------------------------------------------ review round 2
+
+/// R2C-harvest-1: after `MAX_SIGNAL_ROUNDS` signals that do not end the
+/// wait, the race has no signal branch. With `poll_every: None`, the wait
+/// then still polls at `DEFAULT_POLL_EVERY`, so it does not go blind until
+/// its deadline.
+#[tokio::test]
+async fn a_wait_past_the_signal_cap_still_polls() {
+    let cap = autumn_jira_harvest::MAX_SIGNAL_ROUNDS;
+    let env = (0..cap).fold(WorkflowTestEnv::new(), |env, n| {
+        env.queue_signal(SIGNAL, signal(OTHER_ISSUE, Some(done()), None, n))
+    });
+    let first = issue_at(&in_progress());
+    let later = issue_at(&done());
+    let env = env
+        .queue_signal(SIGNAL, signal(ISSUE, Some(done()), None, cap))
+        .mock_activity_seeded(GET_ISSUE, move |_, mock| {
+            if mock.call() == 1 {
+                Ok(first.clone())
+            } else {
+                Ok(later.clone())
+            }
+        });
+    let day = 24 * 3_600;
+    let run = env.simulation().run(1, handler(), input(day, None)).await;
+    let wait: StatusWait = serde_json::from_value(run.result().clone().unwrap()).unwrap();
+    assert_eq!(
+        wait,
+        StatusWait::Reached {
+            status: done(),
+            source: WaitSource::Poll
+        }
+    );
+    let fallback = autumn_jira_harvest::wait::DEFAULT_POLL_EVERY.as_secs();
+    assert!(
+        u64::try_from(run.elapsed().num_seconds()).unwrap() <= fallback,
+        "the wait ended after {} s",
+        run.elapsed().num_seconds()
+    );
+    assert_replays_with_the_clock_off(run.events().to_vec()).await;
+}
+
+/// R2E-tests-guards-6: the bound of the poll rounds at its edge. 3 001
+/// rounds fail, also when the timeout is one second over 3 000 rounds.
+#[tokio::test]
+async fn one_poll_round_over_the_bound_fails() {
+    for timeout in [3_001 * 60, 3_000 * 60 + 1] {
+        let outcome = WorkflowTestEnv::new()
+            .mock_activity(GET_ISSUE, |_| Ok(issue_at(&done())))
+            .run(handler(), input(timeout, Some(60)))
+            .await;
+        let failed = outcome.events().iter().find_map(|e| match e {
+            WorkflowEvent::WorkflowFailed { error_type, .. } => Some(error_type.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            failed,
+            Some(Some(INVALID_INPUT_ERROR.to_owned())),
+            "{timeout}"
+        );
+        assert_eq!(
+            reads(outcome.events()),
+            Vec::<GetIssueInput>::new(),
+            "{timeout}"
+        );
+    }
+}
+
+/// R2C-harvest-3: a missed poll records more events than a good one: each
+/// attempt starts, and the last one fails. The worst case of the round
+/// bounds still fits the history cap with room for the workflow.
+#[tokio::test]
+async fn missed_polls_fit_the_history_cap() {
+    let base = WorkflowTestEnv::new()
+        .mock_activity(GET_ISSUE, |_| Ok(issue_at(&in_progress())))
+        .simulation()
+        .run(1, handler(), input(60, None))
+        .await;
+    let attempts = autumn_jira_harvest::activities::get_issue_retry().max_attempts;
+    let failed = (0..10).fold(
+        WorkflowTestEnv::new().mock_activity_retries(GET_ISSUE, vec![Ok(issue_at(&in_progress()))]),
+        |env, _| {
+            env.mock_activity_retries(
+                GET_ISSUE,
+                (0..attempts)
+                    .map(|_| Err(transient_read_failure()))
+                    .collect(),
+            )
+        },
+    );
+    let failed = failed
+        .mock_activity_retries(GET_ISSUE, vec![Ok(issue_at(&in_progress()))])
+        .simulation()
+        .run(1, handler(), input(660, Some(60)))
+        .await;
+    assert_eq!(reads(failed.events()).len(), 12);
+    let poll_round = (failed.events().len() - base.events().len()).div_ceil(10);
+    let skipped = (0..10)
+        .fold(WorkflowTestEnv::new(), |env, n| {
+            env.queue_signal(SIGNAL, signal(OTHER_ISSUE, Some(done()), None, n))
+        })
+        .mock_activity(GET_ISSUE, |_| Ok(issue_at(&in_progress())))
+        .simulation()
+        .run(1, handler(), input(60, None))
+        .await;
+    let signal_round = (skipped.events().len() - base.events().len()).div_ceil(10);
+    let worst = poll_round * 3_000
+        + signal_round * usize::try_from(autumn_jira_harvest::MAX_SIGNAL_ROUNDS).unwrap()
+        + base.events().len();
+    assert!(
+        worst < 25_000,
+        "{poll_round} events for each missed poll, {signal_round} for each signal: {worst}"
+    );
+}
