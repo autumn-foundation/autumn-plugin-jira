@@ -58,18 +58,38 @@ fn marked_body(issue: &NewIssue, key: &IdempotencyKey, label: &str) -> Value {
     body
 }
 
-/// Turns a 400 with `errors.labels` into `LabelsNotOnScreen`.
+/// The part of the Jira message for a field that the screen does not have.
+const NOT_ON_SCREEN: &str = "not on the appropriate screen";
+
+/// Turns a 400 into `LabelsNotOnScreen` when `labels` is the only bad field
+/// and its message says that the screen does not have it. Any other 400,
+/// for example a label with a space, stays a `Validation` error with the
+/// Jira messages.
 fn labels_fix(error: JiraError, project: &ProjectKey) -> JiraError {
     match error {
         JiraError::Validation {
             status: 400,
             ref fields,
+            ref messages,
             ..
-        } if fields.iter().any(|f| f == "labels") => JiraError::LabelsNotOnScreen {
-            project: project.clone(),
-        },
+        } if matches!(fields.as_slice(), [f] if f == "labels")
+            && messages
+                .iter()
+                .any(|m| m.starts_with("labels:") && m.contains(NOT_ON_SCREEN)) =>
+        {
+            JiraError::LabelsNotOnScreen {
+                project: project.clone(),
+            }
+        }
         other => other,
     }
+}
+
+/// Returns `true` for a 2xx that is not the expected status. The write can
+/// have run, so the client looks up the marker, as for a 2xx that does not
+/// decode (B11).
+const fn is_odd_success(error: &JiraError) -> bool {
+    matches!(error, JiraError::UnexpectedStatus { status: 200..=299, .. })
 }
 
 /// Returns `true` when `own` wrote the comment and a line of it is `marker`.
@@ -124,6 +144,7 @@ impl JiraClient {
                 Err(_) => UnknownCause::BadReply,
             },
             Ok(Ended::Confirm(cause)) => cause,
+            Err(failure) if is_odd_success(&failure.error) => UnknownCause::BadReply,
             Err(failure) => return Err(labels_fix(failure.error, project)),
         };
         let lookups = self.settings.lookup_attempts.min(policy::MAX_LOOKUPS);
@@ -214,6 +235,7 @@ impl JiraClient {
                 Err(_) => UnknownCause::BadReply,
             },
             Ok(Ended::Confirm(cause)) => cause,
+            Err(failure) if is_odd_success(&failure.error) => UnknownCause::BadReply,
             Err(failure) => return Err(failure.error),
         };
         // The comment list is strongly consistent (A3): one lookup, no delay.
