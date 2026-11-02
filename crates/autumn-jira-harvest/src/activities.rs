@@ -37,7 +37,7 @@ use serde_json::{Map, Value, json};
 use crate::clients::{ClientRef, client_for};
 use crate::failure::{
     OUTCOME_PENDING_ERROR, OUTCOME_UNKNOWN_ERROR, SETTLE_SECS, config_failure, failure_for,
-    previous_attempt,
+    marked_write_failure, previous_attempt,
 };
 use crate::route::{ROUTES_PROPERTY, RouteKey, SignalRoute, TRACKED_LABEL};
 
@@ -117,9 +117,9 @@ fn lookup_failure(error: &JiraError, settle: Duration) -> ActivityFailure {
 }
 
 /// The failure of a marked write. `jira.outcome_pending` gets the settle
-/// delay of the input.
+/// delay of the input. A failed pre-lookup gets `sent = false`.
 fn send_failure(error: &JiraError, settle: Duration) -> ActivityFailure {
-    let failure = failure_for(error);
+    let failure = marked_write_failure(error);
     if failure.error_type == OUTCOME_PENDING_ERROR {
         failure.with_retry_after(settle)
     } else {
@@ -195,7 +195,9 @@ pub enum TransitionKind {
 pub enum DeleteKind {
     /// Jira deleted the issue.
     Deleted,
-    /// The issue was gone after an attempt that can have deleted it.
+    /// The issue was gone after an attempt that can have deleted it. Each
+    /// failed attempt counts: its `sent` flag tells only the last client
+    /// send, and an earlier send of that attempt can have deleted the issue.
     GoneAfterRetry,
 }
 
@@ -721,8 +723,10 @@ impl DeleteIssueInput {
         }
     }
 
-    /// Deletes the issue. A 404 after an attempt that can have deleted it
-    /// gives `gone_after_retry`.
+    /// Deletes the issue. A 404 on attempt 2 or later gives
+    /// `gone_after_retry`. The failure of an earlier attempt tells only its
+    /// last client send. An earlier send of that attempt can have deleted the
+    /// issue, so each failed attempt can have deleted it (R1-write-safety-6).
     ///
     /// # Errors
     ///
@@ -739,12 +743,10 @@ impl DeleteIssueInput {
             Ok(DeleteOutcome::Deleted) => DeleteKind::Deleted,
             Ok(DeleteOutcome::GoneAfterRetry) => DeleteKind::GoneAfterRetry,
             // An earlier attempt can have deleted the issue (plan 7.1 for
-            // one call, here for the attempts of the host).
+            // one call, here for the attempts of the host). The `sent` flag
+            // of that attempt tells only its last send, so it does not count.
             Err(JiraError::NotFoundOrForbidden { .. })
-                if matches!(
-                    previous_attempt(ctx),
-                    Previous::MaybeSent | Previous::Unknown
-                ) =>
+                if previous_attempt(ctx) != Previous::First =>
             {
                 DeleteKind::GoneAfterRetry
             }

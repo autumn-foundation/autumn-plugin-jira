@@ -10,7 +10,7 @@ use std::time::Duration;
 use autumn_harvest::context::ActivityContext;
 use autumn_harvest::failure::{ActivityFailure, parse_typed_payload};
 use autumn_jira::JiraError;
-use autumn_jira::policy::Previous;
+use autumn_jira::policy::{OpClass, Previous};
 use serde_json::{Value, json};
 
 /// The prefix of each error type that this crate makes.
@@ -48,12 +48,6 @@ pub(crate) fn invalid_input(message: &str) -> ActivityFailure {
     ActivityFailure::non_retryable(INVALID_INPUT_ERROR, message)
 }
 
-/// The `jira.<code>` of a rate limit.
-const RATE_LIMITED_ERROR: &str = "jira.rate_limited";
-
-/// The `jira.<code>` of a network error.
-const NETWORK_ERROR: &str = "jira.network";
-
 /// `"jira.<code>"`; retryable iff `err.is_retryable()`; `RateLimited` -> `with_retry_after`;
 /// `OutcomeUnknown` with marker -> `with_retry_after(SETTLE_SECS)`; details `{code, status, sent}`.
 ///
@@ -84,13 +78,48 @@ pub fn failure_for(err: &JiraError) -> ActivityFailure {
     }
 }
 
+/// The failure of a marked write (`create_issue_idempotent`,
+/// `add_comment_idempotent`).
+///
+/// It is [`failure_for`], with one change: an error of a read operation
+/// gets `details.sent = false`. A marked write gives a read error only from
+/// the pre-lookup, before the send. A failed lookup after the send becomes
+/// `OutcomeUnknown` in the client. So a read error tells that the write did
+/// not go out, and the next attempt can send it (R5-spec-proof-1).
+#[must_use]
+pub(crate) fn marked_write_failure(err: &JiraError) -> ActivityFailure {
+    let mut failure = failure_for(err);
+    if is_read_error(err)
+        && let Some(Value::Object(details)) = failure.details.as_mut()
+    {
+        details.insert("sent".to_owned(), Value::Bool(false));
+    }
+    failure
+}
+
+/// Returns `true` when the error comes from a read operation.
+fn is_read_error(err: &JiraError) -> bool {
+    let op = match err {
+        JiraError::Upstream { op, .. }
+        | JiraError::Network { op, .. }
+        | JiraError::Redirect { op, .. }
+        | JiraError::UnexpectedStatus { op, .. }
+        | JiraError::Decode { op, .. }
+        | JiraError::PaginationStalled { op, .. }
+        | JiraError::PageLimit { op, .. }
+        | JiraError::RateLimited { op, .. } => *op,
+        _ => return false,
+    };
+    op.class() == OpClass::Read
+}
+
 /// Glue for [`autumn_jira::policy::host_may_send`] (plan section 7.2).
 ///
 /// Attempt 1 gives `First`. Else the typed failure of the previous attempt
-/// decides: `jira.outcome_pending` gives `MaybeSent`, and
-/// `jira.rate_limited` or `jira.network` with `details.sent = false` give
-/// `NotSent`. A missing or other payload gives `Unknown`: a worker crash or a
-/// `start_to_close` timeout can come after a send.
+/// decides: `jira.outcome_pending` gives `MaybeSent`, and any other
+/// `jira.*` failure with `details.sent = false` gives `NotSent`. A missing
+/// or other payload gives `Unknown`: a worker crash or a `start_to_close`
+/// timeout can come after a send.
 #[must_use]
 pub fn previous_attempt(ctx: &ActivityContext) -> Previous {
     if ctx.attempt() <= 1 {
@@ -110,13 +139,18 @@ fn previous_of(failure: &ActivityFailure) -> Previous {
         .and_then(Value::as_bool);
     match (failure.error_type.as_str(), sent) {
         (OUTCOME_PENDING_ERROR, _) => Previous::MaybeSent,
-        (RATE_LIMITED_ERROR | NETWORK_ERROR, Some(false)) => Previous::NotSent,
+        (error_type, Some(false)) if error_type.starts_with(ERROR_PREFIX) => Previous::NotSent,
         _ => Previous::Unknown,
     }
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::too_many_lines,
+    reason = "tests with tables"
+)]
 mod tests {
     use super::*;
     use autumn_harvest::failure::IntoActivityErrorString;
@@ -160,6 +194,14 @@ mod tests {
             .with_details(json!({"code": "rate_limited", "sent": true}))
             .into_error_payload();
         let no_details = ActivityFailure::retryable("jira.network", "x").into_error_payload();
+        let read = JiraError::Upstream {
+            op: Op::Search,
+            status: 503,
+        };
+        let pre_lookup = marked_write_failure(&read).into_error_payload();
+        let not_jira = ActivityFailure::retryable("CircuitOpen", "x")
+            .with_details(json!({"sent": false}))
+            .into_error_payload();
         let rows: Vec<(&str, ActivityContext, Previous)> = vec![
             ("attempt 1", ActivityContext::new_test(), Previous::First),
             (
@@ -190,6 +232,21 @@ mod tests {
             (
                 "upstream",
                 retry_ctx(2, Some(payload(&upstream))),
+                Previous::Unknown,
+            ),
+            (
+                "a failed pre-lookup",
+                retry_ctx(2, Some(pre_lookup)),
+                Previous::NotSent,
+            ),
+            (
+                "upstream of a read, not a marked write",
+                retry_ctx(2, Some(payload(&read))),
+                Previous::Unknown,
+            ),
+            (
+                "not a jira failure",
+                retry_ctx(2, Some(not_jira)),
                 Previous::Unknown,
             ),
             (
