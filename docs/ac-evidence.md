@@ -7,8 +7,9 @@ also records the spikes, the Verus result, the TDD steps, the review
 rounds and the mutation tests.
 
 Status: final, after review round 2. Wave 4 (WP7 ecosystem, WP8a guards
-and README) is done. Each row below names its tests. The mutation table is
-the one open item: see "Mutation tests".
+and README) is done. Each row below names its tests. The mutation table
+M1 to M10 and the cargo-mutants run on `policy.rs` are done: see
+"Mutation tests".
 
 Paths: `core/` is `crates/autumn-jira`, `fake/` is
 `crates/autumn-jira-fake`, `plugin/` is `crates/autumn-plugin-jira`,
@@ -39,7 +40,7 @@ a column with "test" in its header is a `fn` in the named file or module.
 | AC1 Newtypes | Done | u: `ids::{strict_rules_table, deserialize_is_strict, display_round_trip_proptest, no_panic_proptest, issue_key_parts, issue_ref_picks_by_shape, idempotency_markers}`; u: `model::response_ids_are_lenient`; `core/t/pure.rs::{idempotency_key_derive_is_stable, root_re_exports_work}` |
 | AC2 Fixed hosts, no redirects | Done (WP1, WP3). The guard is done (WP8a). | `core/t/client.rs::{a_redirect_is_not_followed, path_segments_are_encoded}`; u: `site::{base_urls, site_name_rejects_hosts}`; `core/t/guards.rs::{one_base_url_builder, one_base_url_builder_sees_a_second_builder}` |
 | AC3 API token auth | Done | `core/t/client.rs::{basic_header_is_sent, unauthorized_is_not_retried, captcha_is_typed, debug_has_no_token}`; u: `backend::direct::{transport_error_map, debug_hides_the_token, one_attempt_with_basic_auth}`; u: `site::{basic_auth_rules, debug_hides_the_email_and_the_token}` |
-| AC4 san-mateo backend | Done | u: `backend::san_mateo::{error_map_covers_every_variant, prefix_by_provider}`; u: `backend::{resolve_cloud_id_picks_jira, resolve_cloud_id_needs_a_site_when_many, requests_and_replies}`; `core/t/san_mateo.rs::{discovery_stores_the_cloud_id, metadata_cloud_id_skips_discovery, one_send_for_a_503_and_for_a_429, a_401_refreshes_once, backend_errors_are_typed}`; `core/t/san_mateo.rs::{a_reconnect_after_confirmation_is_seen, a_reconnect_after_discovery_is_seen}` (round 2) |
+| AC4 san-mateo backend | Done | u: `backend::san_mateo::{error_map_covers_every_variant, prefix_by_provider}`; u: `backend::{resolve_cloud_id_picks_jira, resolve_cloud_id_needs_a_site_when_many, requests_and_replies}`; `core/t/san_mateo.rs::{discovery_stores_the_cloud_id, metadata_cloud_id_skips_discovery, one_send_for_a_503_and_for_a_429, a_401_refreshes_once, backend_errors_are_typed}`; `core/t/san_mateo.rs::{a_reconnect_after_confirmation_is_seen, a_reconnect_after_discovery_is_seen}` (round 2); `core/t/guards.rs::{proxy_requests_set_zero_retries, proxy_requests_set_zero_retries_sees_a_default}` (mutation M5) |
 | AC5 One suite, three setups | Done. 20 suite cases on each setup. The OAuth setup expires the first token, so each case does one refresh and one cloud id discovery. | `core/t/conformance.rs::{suite_on_api_token, suite_on_san_mateo_basic, suite_on_san_mateo_oauth}` |
 | AC6 Issue CRUD | Done | suite cases `{create_get_edit_delete, notify_users_only_when_set, delete_gone_after_retry, properties_round_trip, myself_and_server_info, projects_and_one_project}`; `core/t/client.rs::{moved_issue_key_is_kept, empty_204_is_not_parsed_and_statuses_are_checked}`; u: `error::op_expected_table` |
 | AC7 Lists | Done (WP3). The guard is done (WP8a). | suite cases `{search_pages_to_the_end, search_stalls_on_a_repeated_token, search_page_limit, comments_offset_pages, projects_list_all_pages, issue_types_of_a_project, approximate_count}`; `core/t/client.rs::{short_non_last_comment_page, one_search_page_at_a_token}`; `core/t/guards.rs::{no_legacy_search_path, no_legacy_search_path_sees_the_old_path}` |
@@ -49,7 +50,7 @@ a column with "test" in its header is a `fn` in the named file or module.
 | AC11 ADF | Done | u: `adf::{text_splits_lines, no_empty_text_nodes, builder_nodes, plain_text_round_trip_proptest, links_need_https, from_value_checks_the_root, plain_text_of_unknown_and_inline_nodes}` |
 | AC12 Timestamps | Done | u: `time::{parse_table, epoch_round_trip_and_serde}` |
 | AC13 Typed errors | Done | `core/t/errors.rs::{status_table_over_memory_transport, display_has_no_secret_or_query}`; u: `error::{class_table_covers_every_variant, codes_are_unique, accessors, display_holds_no_messages, may_have_run_table}`; u: `model::decode_errors_hold_no_body_value`; u: `client::call::{classify_table, retry_after_reads_integer_seconds_only}` |
-| AC14 Retry policy | Done. Each test runs with `start_paused`. | `core/t/retry.rs::{reads_retry_server_errors, retry_after_is_the_floor, retry_after_above_the_cap_gives_up, beta_retry_after_is_ignored, jitter_uses_entropy, not_sent_transient_is_retried}` |
+| AC14 Retry policy | Done. Each test runs with `start_paused`. | `core/t/retry.rs::{reads_retry_server_errors, retry_after_is_the_floor, retry_after_above_the_cap_gives_up, beta_retry_after_is_ignored, jitter_uses_entropy, not_sent_transient_is_retried}`; u: `policy::{backoff_stops_at_the_cap_or_at_zero, retry_after_at_the_cap_is_kept}` (cargo-mutants) |
 | AC15 Unsafe writes | Done | `core/t/retry.rs::{plain_create_is_sent_once_after_503, plain_create_is_sent_once_after_a_reset, plain_create_is_not_retried_after_429, plain_transition_is_sent_once}`; `core/t/retry.rs::unsafe_writes_send_once_table` (round 1) |
 | AC16 Idempotent create | Done. The chaos proptest runs 64 cases on a paused current-thread runtime. | `core/t/idempotency.rs::{marker_goes_in_the_create_body, prelookup_hit_sends_no_post, lost_reply_is_found, lag_beyond_lookups_is_outcome_unknown, label_only_hit_is_skipped, two_hits_pick_the_lowest_id, failed_lookup_is_not_not_found, labels_not_on_screen_has_a_fix, chaos_at_most_one_issue_per_key}`; `core/t/idempotency.rs::{failed_prelookup_sends_no_post, marked_write_with_an_unexpected_2xx_looks_up_the_marker, a_bad_label_value_is_a_validation_error}` (round 1) |
 | AC17 Idempotent comment, checked transition | Done | `core/t/idempotency.rs::{lost_comment_reply_is_found, transition_after_lost_reply_is_already_there}`; `core/t/idempotency.rs::{comment_lookup_finds_marker_beyond_100, a_marker_from_another_author_is_not_found, failed_comment_lookup_after_a_lost_reply_is_outcome_unknown, transition_after_maybe_sent_stops_when_the_issue_moved_on, global_transition_after_maybe_sent_is_not_sent_again, transition_400_after_lost_reply_reads_the_status}` (round 1); `core/t/idempotency.rs::{transition_maybe_sent_on_the_last_attempt_is_outcome_unknown, a_rate_limit_after_a_maybe_sent_attempt_is_outcome_unknown, a_failed_status_read_after_a_maybe_sent_attempt_is_outcome_unknown, a_resumed_transition_at_the_target_is_already_there, a_resumed_transition_off_the_target_sends_nothing, transition_400_after_maybe_sent_when_moved_on_is_outcome_unknown, transition_with_no_is_global_after_maybe_sent_is_not_resent, comment_lookup_survives_a_delete_between_pages, a_first_attempt_comments_on_an_issue_with_many_comments}` (round 2) |
@@ -403,28 +404,53 @@ Notes on the open items of round 2:
 
 ## Mutation tests
 
-Each mutation runs in a `git clone` in the scratchpad, never in the repo,
-with its own target dir. Each one must make a named test fail.
+Each mutation ran in a `git clone` in the scratchpad, never in the repo,
+with its own target dir. The clone is at `e6ceb8e`. Merge `7f007e7` has
+the same tree. Each mutant is one exact text change. The run applied one
+mutant, ran the named tests with `cargo test --locked --all-features`,
+and then restored the clone. Postgres ran for `bridge_pg`. Before the
+mutants, each named test passed on the clean clone.
 
 | Id | Mutation | Test that must fail | Status |
 |---|---|---|---|
-| M1 | retry of an unsafe write after a 5xx | `core/t/retry.rs::plain_create_is_sent_once_after_503`; u: `policy::spec_as_test_decide_no_resend_after_maybe_sent` | pending |
-| M2 | a second send after `Confirm` finds nothing | `core/t/idempotency.rs::{lag_beyond_lookups_is_outcome_unknown, chaos_at_most_one_issue_per_key}` | pending |
-| M3 | `==` in place of the constant-time compare | `core/t/guards.rs::no_eq_on_mac_bytes` | pending |
-| M4 | `webhook_status` gives a 4xx | u: `policy::spec_as_test_webhook_status`; `plugin/t/webhook.rs::transient_is_503_then_redelivery_succeeds` | pending |
-| M5 | `retries: 0` removed | `core/t/san_mateo.rs::one_send_for_a_503_and_for_a_429` | pending |
-| M6 | `jql_quote` without the backslash escape | u: `jql::injection_stays_one_literal`; u: `policy::spec_as_test_jql_quote_round_trip` | pending |
-| M7 | the bridge maps a finished run to 503 | `harvest/t/bridge_pg.rs::finished_run_is_skipped` | pending |
-| M8 | the wait deadline from `ctx.now()` | `harvest/t/wait.rs::{ignored_signals_do_not_extend_the_deadline, a_late_wait_keeps_its_full_timeout}`; `core/t/guards.rs::no_ctx_now_in_harvest` | pending (see below) |
-| M9 | `host_may_send` ignores `MaybeSent` | u: `policy::spec_as_test_host_may_send`; `harvest/t/activities.rs::maybe_sent_attempt_looks_up_only` | pending |
-| M10 | the route mounted with `nest` | `plugin/t/install.rs::signed_delivery_reaches_the_handler_not_500` | pending |
+| M1 | retry of an unsafe write after a 5xx | `core/t/retry.rs::plain_create_is_sent_once_after_503`; u: `policy::spec_as_test_decide_no_resend_after_maybe_sent` | Killed by `plain_create_is_sent_once_after_503`, `spec_as_test_decide_no_resend_after_maybe_sent` and `spec_as_test_decide_no_resend_after_maybe_sent_small`. The mutant: `UnsafeWrite` gives `Retry` after a `ServerError` or a `MaybeSent` in `decide`. |
+| M2 | a second send after `Confirm` finds nothing | `core/t/idempotency.rs::{lag_beyond_lookups_is_outcome_unknown, chaos_at_most_one_issue_per_key}` | Killed by both tests. The mutant: `create_issue_idempotent` sends the create again after the last lookup finds nothing. |
+| M3 | `==` in place of the constant-time compare | `core/t/guards.rs::no_eq_on_mac_bytes` | Killed by `no_eq_on_mac_bytes`. The mutant: `verify_signature` compares `finalize()` bytes with `==`. |
+| M4 | `webhook_status` gives a 4xx | u: `policy::spec_as_test_webhook_status`; `plugin/t/webhook.rs::transient_is_503_then_redelivery_succeeds` | Killed by both tests (`HandlerFailed` gives 422). A second mutant (`TimedOut` gives 408) is killed by `spec_as_test_webhook_status` only, because the plugin test has no time-out. |
+| M5 | `retries: 0` removed | `core/t/san_mateo.rs::one_send_for_a_503_and_for_a_429`; `core/t/guards.rs::proxy_requests_set_zero_retries` | Survived `one_send_for_a_503_and_for_a_429` and all of `core/t/san_mateo.rs`, `core/t/conformance.rs` and u: `backend`. The san-mateo 0.1 default of `retries` is 0, so the change has no behavior today. The new guard `proxy_requests_set_zero_retries` (`bb2e9a4`) kills it at `san_mateo.rs:406`. It also kills the same change in the discovery call at `san_mateo.rs:368`. |
+| M6 | `jql_quote` without the backslash escape | u: `jql::injection_stays_one_literal`; u: `policy::spec_as_test_jql_quote_round_trip` | Killed by both tests. |
+| M7 | the bridge maps a finished run to 503 | `harvest/t/bridge_pg.rs::finished_run_is_skipped`; u: `bridge::harvest_errors_map_to_classes` | Killed by `finished_run_is_skipped` (a terminal run gives a transient error). A second mutant (`Config`, `Cancelled` and `NotFound` give a transient error in `error_outcome`) survives `finished_run_is_skipped` and is killed by `harvest_errors_map_to_classes`. |
+| M8 | the wait deadline from `ctx.now()` | `harvest/t/wait.rs::{ignored_signals_do_not_extend_the_deadline, a_late_wait_keeps_its_full_timeout}`; `core/t/guards.rs::no_ctx_now_in_harvest` | Killed by `a_late_wait_keeps_its_full_timeout` and the guard `no_ctx_now_in_harvest`. `ignored_signals_do_not_extend_the_deadline` passes on this mutant: it does not target the clock. |
+| M9 | `host_may_send` ignores `MaybeSent` | u: `policy::spec_as_test_host_may_send`; `harvest/t/activities.rs::maybe_sent_attempt_looks_up_only` | Killed by both tests. The mutant: `MaybeSent` gives `true`. |
+| M10 | the route mounted with `nest` | `plugin/t/install.rs::signed_delivery_reaches_the_handler_not_500` | Killed by `signed_delivery_reaches_the_handler_not_500`. The mutant: `.nest(&path, webhook::router("/", ..))` in place of `.merge(..)` in `plugin.rs`. |
 
-`cargo mutants -f crates/autumn-jira/src/policy.rs` with zero survivors is
-also pending (when the tool installs).
+The table names are the current test names. No name changed after
+review round 2.
 
-The final table did not run in review round 1 or round 2. A scratch clone
-needs its own target dir, and the disk had about 5 GB free. Each finding
-of round 2 has a RED commit that shows its test fail on the old code.
+cargo-mutants 27.1.0 ran in the clone:
+`cargo mutants -f crates/autumn-jira/src/policy.rs --in-place --timeout 300 -- --locked -- --skip verus_bodies_match`.
+The run skips `verus_bodies_match`, because that test fails on each
+change to a body-matched function. Without the skip, the run shows only
+that the two files differ. Result: 129 mutants in 31 minutes. 112
+caught, 11 missed, 5 unviable, 1 timeout.
+
+- The timeout is `token_page_step` with `>=` changed to `<`. A pager
+  test then fetches with no end. So the timeout also shows the mutant.
+- Two missed mutants were real gaps. New unit tests (`998e95a`) kill
+  them. A second cargo-mutants run with the new tests caught both.
+  - `policy.rs:152` `||` to `&&` in `backoff_ms`: the value is the same,
+    but `u32::MAX` rounds take 39 s. `backoff_stops_at_the_cap_or_at_zero`
+    kills it.
+  - `policy.rs:174` `>` to `>=` in `retry_wait_ms`: a `Retry-After`
+    equal to the cap gave `None`. `retry_after_at_the_cap_is_kept` kills
+    it.
+- Nine missed mutants are equivalent. Each changes a comparison at a
+  boundary where the two branches give the same value:
+  `policy.rs:95` (`<` to `<=` in `decide`), `policy.rs:176` (`>` to
+  `>=` in `retry_wait_ms`), `policy.rs:205`, `207`, `213`, `214` and
+  `216` (`apply_jitter`), `policy.rs:281` (`>` to `>=` in
+  `offset_next`), and `policy.rs:302` (`>` to `>=` in `freshness`). No
+  test can kill them.
 
 Earlier runs in the waves (not the final table):
 
@@ -433,9 +459,8 @@ Earlier runs in the waves (not the final table):
 - WP5 H0: 9 of 11 mutants of the wait and the route tags were killed. The
   single-site mutant `deadline = ctx.now() + timeout` survived the first
   run. The test `a_late_wait_keeps_its_full_timeout` (`3074d96`) now
-  targets it. The second pass did not run, because the disk was full. The
-  "no final read" mutant was not applied, because rustfmt had changed the
-  pattern text.
+  targets it. M8 above is the second pass. The "no final read" mutant
+  was not applied, because rustfmt had changed the pattern text.
 
 ## Known limits
 
