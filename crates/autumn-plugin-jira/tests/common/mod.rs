@@ -87,6 +87,8 @@ pub fn autumn_config() -> AutumnConfig {
     let mut endpoint = webhook_endpoint(PATH, "JIRA_WEBHOOK_SECRET");
     endpoint.secret = Some(SECRET.to_owned());
     cfg.security.webhooks.endpoints.push(endpoint);
+    // The tests read the indicator details.
+    cfg.health.detailed = true;
     cfg
 }
 

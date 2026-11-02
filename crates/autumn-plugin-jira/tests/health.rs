@@ -7,7 +7,6 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use autumn_jira::san_mateo::transport::HttpTransport as _;
 use autumn_jira_fake::{BOT, DEFAULT_API_TOKEN, DEFAULT_EMAIL, FakeJira, FakeOp, Fault};
 use autumn_plugin_jira::{JiraConfig, JiraPlugin};
 use autumn_web::AppState;

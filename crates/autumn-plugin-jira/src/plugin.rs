@@ -11,6 +11,7 @@ use autumn_jira::ids::{CloudId, SiteName};
 use autumn_jira::san_mateo::transport::{HttpTransport, ReqwestTransport, TransportConfig};
 use autumn_jira::{BasicAuth, Delivery, EventSink, HandlerError, JiraClient, JiraSite};
 use autumn_plugin_san_mateo::SanMateoService;
+use autumn_web::actuator::HealthIndicator;
 use autumn_web::app::AppBuilder;
 use autumn_web::plugin::Plugin;
 use autumn_web::plugin_contract::PluginContract;
@@ -24,7 +25,7 @@ use crate::secrets::Secrets;
 use crate::service::{JiraService, Tenants};
 use crate::webhook;
 use crate::webhook_config::check_webhook_endpoint;
-use crate::{AUTUMN_WEB_REQUIREMENT, DEFAULT_PREFIX, PLUGIN_NAME, SECTION};
+use crate::{AUTUMN_WEB_REQUIREMENT, DEFAULT_PREFIX, INDICATOR_NAME, PLUGIN_NAME, SECTION};
 
 /// The name of the San Mateo plugin.
 const SAN_MATEO_PLUGIN: &str = autumn_plugin_san_mateo::PLUGIN_NAME;
@@ -490,7 +491,10 @@ impl Plugin for JiraPlugin {
         let san_mateo_before = app.has_plugin(SAN_MATEO_PLUGIN);
         let cell: Cell = Arc::default();
         let health = Arc::new(JiraHealth::new(Arc::clone(&cell)));
-        let mut app = app.config_section(SECTION);
+        let mut app = app.config_section(SECTION).health_indicator(
+            INDICATOR_NAME,
+            Arc::clone(&health) as Arc<dyn HealthIndicator>,
+        );
         if self.mounts_route() {
             let path = self.webhook_path();
             app = app
