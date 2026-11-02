@@ -390,8 +390,8 @@ Notes on the open items of round 2:
   site within that time. The plugin has no manual refresh for the default
   client: `JiraService::forget` acts on `for_connection` clients only.
 - R2D-integration-2: the docs now say that an app takes the webhooks of
-  one Jira site (plan V114). The code of `crates/autumn-jira-harvest`
-  still names one endpoint for each site in the `bridge.rs` module doc.
+  one Jira site (plan V114). The `bridge.rs` module doc of
+  `crates/autumn-jira-harvest` says the same.
 - R2F-fixcheck-a-2 and R2C-harvest-4: the site check and the payload
   status apply only when the bridge knows its site host. The ecosystem
   builds its bridge with a San Mateo client and no `site_host`, so it

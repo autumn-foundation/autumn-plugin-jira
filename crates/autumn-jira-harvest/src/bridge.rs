@@ -11,8 +11,10 @@
 //! Two sites can have the same issue id, and one webhook secret can serve
 //! two sites by mistake. So the bridge does not trust the payload for the
 //! issue. It reads the status and the key from the site of its own client
-//! (R2-webhook-security-1). One bridge serves one site. Give each site its
-//! own webhook endpoint, its own webhook secret and its own bridge.
+//! (R2-webhook-security-1). One bridge serves one site. The plugin takes
+//! the webhooks of one Jira site for each app (plan V114), so an app has
+//! one webhook endpoint, one webhook secret and one bridge. A wait on an
+//! issue of another site ends by poll.
 //!
 //! When the bridge knows its site host, it also refuses a delivery whose
 //! `issue.self` names another host or no host (R2F-fixcheck-a-2). It makes
