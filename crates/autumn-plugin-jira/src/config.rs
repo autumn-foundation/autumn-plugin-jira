@@ -112,10 +112,17 @@ pub struct SanMateoTarget {
     /// tenants.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connection_id: Option<String>,
-    /// The cloud id. Optional, `atlassian` only.
+    /// The cloud id of the `connection_id` connection. Optional,
+    /// `atlassian` only. It needs `connection_id`.
+    ///
+    /// The clients of `for_connection(id)` for other ids do not use it:
+    /// each tenant gets its site from the `cloudId` in its own connection
+    /// metadata, else from a discovery with its own token.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cloud_id: Option<String>,
-    /// The site URL. Optional. It selects the site at discovery.
+    /// The site URL of the `connection_id` connection. Optional. It
+    /// selects the site at discovery. It needs `connection_id`, and other
+    /// connections do not use it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub site_url: Option<String>,
 }
@@ -369,6 +376,12 @@ impl JiraConfig {
         if let Some(target) = &self.san_mateo {
             require_text(&target.environment, "[jira.san_mateo] environment")?;
             require_text(&target.integration, "[jira.san_mateo] integration")?;
+            let set = |v: &Option<String>| v.as_deref().is_some_and(|s| !s.trim().is_empty());
+            if !set(&target.connection_id) && (set(&target.cloud_id) || set(&target.site_url)) {
+                return Err(PluginError::config(
+                    "[jira.san_mateo] cloud_id and site_url apply to connection_id only; set connection_id, or remove them and store cloudId in the metadata of each connection",
+                ));
+            }
         }
         let http = &self.http;
         require_positive(u64::from(http.max_attempts), "[jira.http] max_attempts")?;
@@ -746,6 +759,14 @@ mod tests {
             ),
             ("[jira.san_mateo]\nenvironment = \"\"\n", "environment"),
             ("[jira.san_mateo]\nintegration = \"\"\n", "integration"),
+            (
+                "[jira.san_mateo]\ncloud_id = \"11111111-2222-4333-8444-555555555555\"\n",
+                "apply to connection_id only",
+            ),
+            (
+                "[jira.san_mateo]\nsite_url = \"https://acme.atlassian.net\"\n",
+                "apply to connection_id only",
+            ),
             ("[jira.http]\nmax_attempts = 0\n", "max_attempts"),
             ("[jira.http]\nmax_pages = 0\n", "max_pages"),
             ("[jira.http]\nlookup_attempts = 0\n", "lookup_attempts"),

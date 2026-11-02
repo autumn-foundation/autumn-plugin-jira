@@ -88,6 +88,12 @@ impl JiraService {
     /// The service keeps one client for each connection id. The clients
     /// share the settings of `[jira.http]`.
     ///
+    /// `cloud_id` and `site_url` of `[jira.san_mateo]` apply only to the
+    /// client of `connection_id`. The client of another connection gets
+    /// its site from the `cloudId` in the metadata of that connection, else
+    /// from a discovery with its own token. So the token of one tenant
+    /// never goes to the site of another tenant.
+    ///
     /// # Errors
     /// [`JiraError::InvalidInput`] for an id that is empty, longer than
     /// 200 chars, or has a space or a control char.
@@ -127,6 +133,9 @@ pub(crate) struct Tenants {
     san: SanMateo,
     environment: String,
     integration: String,
+    /// The `connection_id` of `[jira.san_mateo]`. Only its client gets
+    /// `cloud_id` and `site_url`.
+    default_connection: Option<String>,
     cloud_id: Option<CloudId>,
     site_url: Option<String>,
     settings: ClientSettings,
@@ -153,6 +162,7 @@ impl Tenants {
             san,
             environment: target.environment.clone(),
             integration: target.integration.clone(),
+            default_connection: text(&target.connection_id),
             cloud_id,
             site_url: text(&target.site_url),
             settings,
@@ -179,8 +189,12 @@ impl Tenants {
                     self.environment.clone(),
                     ConnectionKey::new(self.integration.clone(), connection_id),
                 );
-                target.cloud_id.clone_from(&self.cloud_id);
-                target.site_url.clone_from(&self.site_url);
+                // The configured site is the site of the default tenant.
+                // Another tenant finds its own site.
+                if self.default_connection.as_deref() == Some(connection_id) {
+                    target.cloud_id.clone_from(&self.cloud_id);
+                    target.site_url.clone_from(&self.site_url);
+                }
                 JiraClient::san_mateo(self.san.clone(), target).with_settings(self.settings.clone())
             })
             .clone();
