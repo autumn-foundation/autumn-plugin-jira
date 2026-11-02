@@ -256,7 +256,14 @@ Rules for each example (EX8 checks them by text):
 - **What it checks:** `core/t/examples_wired.rs` reads the files as text.
   `each_example_is_wired` checks `test = true`, `RUN_TIMEOUT`,
   `#[cfg(test)]`, `fn check(`, `expect_err(`, a CI step with no `||`, and a
-  README row. `no_example_turns_on_the_dev_only_proxy_flags` checks for
+  README row. It reads code, not comments. A `RUN_TIMEOUT` must be outside
+  the tests, except in the `autumn_app` server. A CI command counts only in
+  the `run:` script of a step with no `if:`. The README command of an
+  example sets each env var that the example needs.
+  `readme_snippets_copy_their_examples` checks that a snippet that names an
+  example holds only lines of that example.
+  `docs_give_the_ci_commands_of_the_separate_workspace` checks that
+  `CLAUDE.md` and the README give the ecosystem commands of CI. `no_example_turns_on_the_dev_only_proxy_flags` checks for
   `full_migrations_sql`, `allow_private_hosts` and `allow_plain_http`.
   `each_example_file_is_in_the_list` finds an example file that is not in
   the list. `the_ecosystem_workspace_stays_apart` checks the separate
