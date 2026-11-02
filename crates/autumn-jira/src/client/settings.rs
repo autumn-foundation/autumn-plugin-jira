@@ -122,12 +122,14 @@ mod tests {
         );
         assert!(d.jitter);
         assert_eq!(d.marker_label_prefix, "autumn-idem-");
-        let mut s = ClientSettings::default();
-        s.jitter = false;
-        s.marker_label_prefix = "app-".to_owned();
-        s.max_attempts = 1;
-        s.base_backoff_ms = 10;
-        s.max_pages = 5_000;
+        let s = ClientSettings {
+            jitter: false,
+            marker_label_prefix: "app-".to_owned(),
+            max_attempts: 1,
+            base_backoff_ms: 10,
+            max_pages: 5_000,
+            ..ClientSettings::default()
+        };
         let c = s.durable();
         assert_eq!(
             (c.max_attempts, c.base_backoff_ms, c.max_pages),
@@ -162,8 +164,10 @@ mod tests {
             full.worst_case(OpClass::Read, per),
             Duration::from_secs(420)
         );
-        let mut zero = ClientSettings::default();
-        zero.max_attempts = 0;
+        let zero = ClientSettings {
+            max_attempts: 0,
+            ..ClientSettings::default()
+        };
         assert_eq!(zero.worst_case(OpClass::Read, per), per);
     }
 }

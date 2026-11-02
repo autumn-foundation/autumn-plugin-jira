@@ -261,15 +261,20 @@ impl JiraClient {
 mod tests {
     use super::*;
 
-    fn reply(status: u16, headers: &[(&str, &str)]) -> Sent {
-        Ok(ApiResponse {
+    fn response(status: u16, headers: &[(&str, &str)]) -> ApiResponse {
+        ApiResponse {
             status,
             headers: headers
                 .iter()
                 .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
                 .collect(),
             body: Vec::new(),
-        })
+        }
+    }
+
+    #[allow(clippy::unnecessary_wraps, reason = "a table row is a `Sent`")]
+    fn reply(status: u16, headers: &[(&str, &str)]) -> Sent {
+        Ok(response(status, headers))
     }
 
     #[test]
@@ -344,15 +349,15 @@ mod tests {
 
     #[test]
     fn retry_after_reads_integer_seconds_only() {
-        let read = |v: &str| retry_after(&reply(429, &[("retry-after", v)]).unwrap());
+        let read = |v: &str| retry_after(&response(429, &[("retry-after", v)]));
         assert_eq!(read("7"), Some(Duration::from_secs(7)));
         assert_eq!(read(" 7 "), Some(Duration::from_secs(7)));
         assert_eq!(read("-1"), None);
         assert_eq!(read("1.5"), None);
         assert_eq!(read("Wed, 21 Oct 2026 07:28:00 GMT"), None);
-        let beta = reply(429, &[("Beta-Retry-After", "9")]).unwrap();
+        let beta = response(429, &[("Beta-Retry-After", "9")]);
         assert_eq!(retry_after(&beta), None);
-        let seraph = reply(403, &[("x-seraph-loginreason", "AUTHENTICATION_DENIED")]).unwrap();
+        let seraph = response(403, &[("x-seraph-loginreason", "AUTHENTICATION_DENIED")]);
         assert_eq!(
             status_error(Op::Myself, &seraph),
             JiraError::CaptchaRequired { op: Op::Myself }

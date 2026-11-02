@@ -324,7 +324,10 @@ pub fn parse_event(body: &[u8]) -> Result<ParsedEvent> {
         Value::String(text) => JiraTimestamp::parse(text).ok(),
         _ => None,
     });
-    let actor = account(payload.user.as_ref());
+    // A comment event can have no top-level `user`: the actor is then the
+    // comment author.
+    let actor = account(payload.user.as_ref())
+        .or_else(|| account(payload.comment.as_ref().and_then(|c| c.get("author"))));
     let event = match name.as_str() {
         ISSUE_CREATED | ISSUE_UPDATED | ISSUE_DELETED => {
             let event = IssueEvent {

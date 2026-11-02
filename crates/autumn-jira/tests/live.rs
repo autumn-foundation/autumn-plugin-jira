@@ -81,13 +81,13 @@ impl Live {
 async fn live_account_project_and_issue_types() {
     let live = live();
     let me = live.client.myself().await.unwrap();
-    assert!(!me.account_id.as_str().is_empty());
+    assert_ne!(me.account_id.as_str().len(), 0);
     live.client.server_info().await.unwrap();
     let project = live.client.get_project(&live.project).await.unwrap();
     assert_eq!(project.key, live.project);
     let types = live.client.issue_types(&live.project).await.unwrap();
     assert!(types.iter().any(|t| t.name == live.issue_type));
-    assert!(!live.client.all_projects().await.unwrap().is_empty());
+    assert_ne!(live.client.all_projects().await.unwrap().len(), 0);
 }
 
 #[tokio::test]
