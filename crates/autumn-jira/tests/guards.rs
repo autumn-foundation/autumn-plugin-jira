@@ -510,6 +510,75 @@ mod check {
         out
     }
 
+    /// Returns `true` when `chars` holds `pattern` at `at`.
+    fn holds(chars: &[char], at: usize, pattern: &str) -> bool {
+        pattern
+            .chars()
+            .enumerate()
+            .all(|(k, c)| chars.get(at + k) == Some(&c))
+    }
+
+    /// AC4: each `fn` that makes a `ProxyRequest` sets `retries` to 0.
+    ///
+    /// san-mateo sends a call again `retries` times. The client owns the
+    /// retries (plan 7.1), so each proxy call of the backend sends one
+    /// time. The san-mateo 0.1 default is 0, so no behavior test sees a
+    /// removed `retries = 0`. The backend must not rely on that default:
+    /// a new default must not send a write a second time.
+    pub fn proxy_retry_violations(path: &str, text: &str) -> Vec<String> {
+        let src = Source::new(text);
+        let bare: Vec<char> = src.bare().chars().collect();
+        // A `fn` item starts at each `fn` keyword. Its span ends at the next one.
+        let starts: Vec<usize> = (0..bare.len())
+            .filter(|&i| holds(&bare, i, "fn ") && (i == 0 || !is_ident(bare[i - 1])))
+            .collect();
+        let next_char = |from: usize| bare[from..].iter().copied().find(|c| !c.is_whitespace());
+        let prev_char = |to: usize| {
+            bare[..to]
+                .iter()
+                .rev()
+                .copied()
+                .find(|c| !c.is_whitespace())
+        };
+        let mut out = Vec::new();
+        for i in 0..bare.len() {
+            let word = "ProxyRequest";
+            if !holds(&bare, i, word) || (i > 0 && is_ident(bare[i - 1])) {
+                continue;
+            }
+            let after = i + word.len();
+            let made = match next_char(after) {
+                Some(':') => true,
+                // A struct literal, not a type: `-> ProxyRequest {` is a type.
+                Some('{') => matches!(prev_char(i), Some('=' | '(' | ',' | '[')),
+                _ => false,
+            };
+            if !made {
+                continue;
+            }
+            let from = starts.iter().rev().copied().find(|&s| s <= i).unwrap_or(0);
+            let to = starts
+                .iter()
+                .copied()
+                .find(|&s| s > i)
+                .unwrap_or(bare.len());
+            let body: String = bare[from..to]
+                .iter()
+                .filter(|c| !c.is_whitespace())
+                .collect();
+            let sets_zero = [".retries=0;", ".retries(0)", "retries:0,", "retries:0}"]
+                .iter()
+                .any(|p| body.contains(p));
+            if !sets_zero {
+                out.push(format!(
+                    "{path}:{}: a `ProxyRequest` with no `retries = 0`: the client owns the retries",
+                    src.line_of(i)
+                ));
+            }
+        }
+        out
+    }
+
     /// AC38: no `unwrap`, `expect`, `todo!`, `unimplemented!` in code, and
     /// no `TODO` or `FIXME` in comments, outside test items.
     pub fn unwrap_todo_violations(path: &str, text: &str) -> Vec<String> {
@@ -2142,6 +2211,33 @@ fn fake_does_not_depend_on_the_client_sees_a_dependency() {
     ] {
         assert_eq!(check::fake_dependency_violations(bad).len(), 1, "{bad}");
     }
+}
+
+// --- AC4: one san-mateo send for each attempt ----------------------------
+
+#[test]
+fn proxy_requests_set_zero_retries() {
+    assert_files(
+        "proxy_requests_set_zero_retries",
+        &src_files(&CRATES),
+        check::proxy_retry_violations,
+    );
+}
+
+#[test]
+fn proxy_requests_set_zero_retries_sees_a_default() {
+    let p = "crates/autumn-jira/src/backend/san_mateo.rs";
+    let bad = "fn a() {\n    let mut r = ProxyRequest::get(PATH);\n    r.headers = h;\n}\n\
+               fn b() {\n    r.retries = 0;\n}";
+    assert_eq!(check::proxy_retry_violations(p, bad).len(), 1);
+    let literal = "fn c() {\n    let r = ProxyRequest { method: m, ..ProxyRequest::default() };\n}";
+    assert_eq!(check::proxy_retry_violations(p, literal).len(), 2);
+    let good = "// A ProxyRequest::get(P) with no retries.\n\
+                fn d() -> ProxyRequest {\n    let mut r = ProxyRequest::get(P);\n    r.retries = 0;\n    r\n}\n\
+                fn e() {\n    let r = ProxyRequest::new(\"POST\", P).retries(0);\n    let s = \"ProxyRequest::get(x)\";\n}\n\
+                fn f() {\n    let r = ProxyRequest { retries: 0, ..ProxyRequest::default() };\n}\n\
+                use san_mateo::{ConnectionKey, ProxyRequest};";
+    assert_eq!(check::proxy_retry_violations(p, good), NONE);
 }
 
 // --- AC33: no ctx.now() in harvest code ----------------------------------
