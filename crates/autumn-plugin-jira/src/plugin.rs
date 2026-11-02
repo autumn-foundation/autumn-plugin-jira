@@ -477,6 +477,16 @@ fn mode_name(client: &JiraClient) -> &'static str {
     }
 }
 
+/// A warning when the handlers can run past the autumn request timeout.
+fn handler_budget_warning(
+    handlers: usize,
+    handler_timeout_ms: u64,
+    request_timeout_ms: Option<u64>,
+) -> Option<String> {
+    let _ = (handlers, handler_timeout_ms, request_timeout_ms);
+    None
+}
+
 /// The client settings of `[jira.http]`.
 fn client_settings(http: &JiraHttpConfig) -> ClientSettings {
     let mut settings = ClientSettings::default();
@@ -588,6 +598,23 @@ mod tests {
             ContractVerdict::Compatible
         );
         assert_eq!(JiraPlugin::new().name(), PLUGIN_NAME);
+    }
+
+    /// R10-plugin-ecosystem-7: the start warns when the handlers can run
+    /// past `server.timeouts.request_timeout_ms`.
+    #[test]
+    fn handler_budget_warns_at_the_request_timeout() {
+        let w = handler_budget_warning(4, 8000, Some(30_000)).unwrap();
+        assert!(
+            w.contains("handler_timeout_ms") && w.contains("request_timeout_ms"),
+            "{w}"
+        );
+        assert!(w.contains("32000") && w.contains("30000"), "{w}");
+        assert!(handler_budget_warning(3, 10_000, Some(30_000)).is_some());
+        assert!(handler_budget_warning(3, 8000, Some(30_000)).is_none());
+        assert!(handler_budget_warning(4, 8000, None).is_none());
+        assert!(handler_budget_warning(4, 8000, Some(0)).is_none());
+        assert!(handler_budget_warning(0, 8000, Some(1)).is_none());
     }
 
     #[test]

@@ -566,3 +566,31 @@ async fn a_hung_task_stops_at_abandon_after_ms() {
     assert_eq!(details["handler_tasks"], json!(1), "{health}");
     assert_eq!(details["webhook"]["timed_out"], json!(3), "{health}");
 }
+
+/// R10-plugin-ecosystem-7: autumn stops the route at its request timeout
+/// while a handler runs. The delivery still adds one to `timed_out`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_timeout_still_counts_the_delivery() {
+    let mut cfg = autumn_config();
+    cfg.server.timeouts.request_timeout_ms = Some(150);
+    let sleep = |_delivery: Arc<Delivery>, _state: AppState| async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        Ok(())
+    };
+    let plugin = plugin_with(&FakeJira::new(), |c| c.webhook.handler_timeout_ms = 120)
+        .on_event(sleep)
+        .on_event(sleep);
+    let client = TestApp::new().config(cfg).plugin(plugin).build();
+    let r = deliver(&client, "rt-1", &fresh()).await;
+    assert!(r.status.is_server_error(), "{}", r.status);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let c = counters(&client).await;
+    let sum: u64 = c
+        .as_object()
+        .unwrap()
+        .iter()
+        .filter(|(k, _)| k.as_str() != "permanent")
+        .map(|(_, v)| v.as_u64().unwrap())
+        .sum();
+    assert_eq!((sum, c["timed_out"].as_u64()), (1, Some(1)), "{c}");
+}
