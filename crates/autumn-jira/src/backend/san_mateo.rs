@@ -36,6 +36,9 @@ const TRANSPORT_INVALID: &str = "the upstream request is not valid: ";
 /// The discovery path on `https://api.atlassian.com`.
 const RESOURCES_PATH: &str = "/oauth/token/accessible-resources";
 
+/// The shortest time between two checks of a stored cloud id.
+pub const CLOUD_ID_RECHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// The san-mateo connection that a [`SanMateoBackend`] uses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SanMateoTarget {
