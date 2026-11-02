@@ -1050,6 +1050,41 @@ mod tests {
     }
 
     #[test]
+    fn debug_holds_no_messages_or_reason() {
+        let e = JiraError::Validation {
+            op: Op::CreateIssue,
+            status: 400,
+            messages: vec!["secret one".to_owned(), "secret two".to_owned()],
+            fields: vec!["summary".to_owned()],
+        };
+        assert_eq!(
+            format!("{e:?}"),
+            "Validation { op: CreateIssue, status: 400, messages: 2, fields: [\"summary\"] }"
+        );
+        let limited = JiraError::RateLimited {
+            op: Op::Search,
+            retry_after: Some(Duration::from_secs(3)),
+            reason: Some("secret header".to_owned()),
+        };
+        assert_eq!(
+            format!("{limited:?}"),
+            "RateLimited { op: Search, retry_after: Some(3s), reason: Some(13 chars) }"
+        );
+        // The other variants keep the derived shape.
+        assert_eq!(
+            format!("{:?}", JiraError::Upstream { op: Op::Search, status: 503 }),
+            "Upstream { op: Search, status: 503 }"
+        );
+        assert_eq!(
+            format!("{:?}", JiraError::CloudId("none".to_owned())),
+            "CloudId(\"none\")"
+        );
+        for (e, ..) in samples() {
+            assert!(!format!("{e:?}").contains("secret"), "{e:?}");
+        }
+    }
+
+    #[test]
     fn marker_ref_shapes() {
         let label = MarkerRef::label("autumn-idem-x".to_owned());
         assert_eq!(label.label.as_deref(), Some("autumn-idem-x"));
