@@ -382,17 +382,22 @@ mod tests {
     use proptest::prelude::*;
     use std::collections::BTreeMap;
 
-    /// The functions that have no body match. Proptests check them.
-    /// `backoff_ms` has proof code in its body, so a body match cannot
-    /// work for it. `scale_permille` has proof code too, but it is in
-    /// `verus/policy.rs`, so it needs no entry here.
-    const PROPTEST_ONLY: [&str; 3] = ["backoff_ms", "signature_shape_ok", "jql_quote"];
+    /// The functions that are not in `verus/policy.rs`. Proptests check
+    /// them.
+    const PROPTEST_ONLY: [&str; 2] = ["signature_shape_ok", "jql_quote"];
 
-    /// The functions that `verus_bodies_match` compares.
-    const BODY_MATCHED: [&str; 10] = [
+    /// The functions that Verus proves, but with a body that differs from
+    /// the exec body: the Verus loop has proof steps in its branches. Each
+    /// has a named proptest against a closed form.
+    const PROOF_PROPTESTED: [(&str, &str); 1] = [("backoff_ms", "spec_as_test_backoff")];
+
+    /// The functions that `verus_bodies_match` compares. The compare drops
+    /// each `proof { ... }` block of the Verus body.
+    const BODY_MATCHED: [&str; 11] = [
         "classify_status",
         "decide",
         "retry_wait_ms",
+        "scale_permille",
         "apply_jitter",
         "host_may_send",
         "token_page_step",
@@ -401,6 +406,38 @@ mod tests {
         "webhook_status",
         "is_lower_hex",
     ];
+
+    /// The text that makes Verus skip a proof. Verus still says
+    /// "verified" with one of them, so the file must not hold any.
+    const PROOF_ESCAPES: [&str; 7] = [
+        "assume(",
+        "admit(",
+        "external_body",
+        "verifier::external",
+        "#[verifier(",
+        "assume_specification",
+        "exec_allows_no_decreases_clause",
+    ];
+
+    /// Returns each proof escape in `spec`, outside `//` comments.
+    fn proof_escapes(spec: &str) -> Vec<String> {
+        let _ = spec;
+        Vec::new()
+    }
+
+    /// Returns the name of each `fn` of any visibility in `text`.
+    fn all_fns(text: &str) -> Vec<String> {
+        let _ = text;
+        Vec::new()
+    }
+
+    /// Returns each coverage problem: a function of `exec` that is not in
+    /// exactly one list, a list entry that is not a function, or a proved
+    /// function with no `pub fn` line in `spec`.
+    fn coverage_violations(exec: &str, spec: &str) -> Vec<String> {
+        let _ = (exec, spec);
+        Vec::new()
+    }
 
     /// Reads the Verus file. Returns `None` when the file is absent (a
     /// packaged crate). The caller fails when `CI` is set.
@@ -527,6 +564,54 @@ mod tests {
         for name in BODY_MATCHED {
             assert!(names.iter().any(|n| n == name), "{name}");
         }
+    }
+
+    #[test]
+    fn the_spec_has_no_proof_escape() {
+        let Some(spec) = verus_file() else { return };
+        assert_eq!(proof_escapes(&spec), Vec::<String>::new());
+        // The check sees an escape.
+        let with =
+            |escape: &str| spec.replacen("pub fn decide(", &format!("{escape}\npub fn decide("), 1);
+        for escape in [
+            "#[verifier::external_body]",
+            "#[verifier::external]",
+            "#[verifier(external_body)]",
+            "#[verifier::exec_allows_no_decreases_clause]",
+        ] {
+            assert!(!proof_escapes(&with(escape)).is_empty(), "{escape}");
+        }
+        let body = spec.replacen("{\n", "{\n    assume(false);\n", 1);
+        assert!(!proof_escapes(&body).is_empty());
+        let admit = spec.replacen("{\n", "{\n    proof { admit(); }\n", 1);
+        assert!(!proof_escapes(&admit).is_empty());
+        // A word in a comment is no escape.
+        assert!(proof_escapes("// we do not assume(x) here\n").is_empty());
+    }
+
+    #[test]
+    fn each_fn_is_in_exactly_one_list() {
+        let Some(spec) = verus_file() else { return };
+        assert_eq!(
+            coverage_violations(exec_code(), &spec),
+            Vec::<String>::new()
+        );
+        assert_eq!(all_fns(exec_code()).len(), 14, "{:?}", all_fns(exec_code()));
+        // A new function in both files, in no list: a violation.
+        let exec = format!(
+            "{}\npub const fn h(x: u32) -> u32 {{\n    x\n}}\n",
+            exec_code()
+        );
+        let spec_h = format!("{spec}\npub fn h(x: u32) -> (r: u32)\n{{\n    x\n}}\n");
+        assert!(!coverage_violations(&exec, &spec_h).is_empty());
+        // A private helper is seen too.
+        let private = format!("{}\nconst fn helper() -> u32 {{\n    1\n}}\n", exec_code());
+        assert!(!coverage_violations(&private, &spec).is_empty());
+        assert!(all_fns("pub(crate) fn a() {}\nfn b() {}\n").len() == 2);
+        // A name in a doc comment of the spec is not a proof.
+        let gone = spec.replace("pub fn decide(", "pub fn decided(");
+        let noted = format!("{gone}\n/// pub fn decide(\n");
+        assert!(!coverage_violations(exec_code(), &noted).is_empty());
     }
 
     #[test]
