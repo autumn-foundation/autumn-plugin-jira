@@ -279,9 +279,7 @@ impl FakeJira {
         actor: &str,
     ) -> Result<(), FakeError> {
         let mut state = self.now();
-        let id = state
-            .find_issue(key)
-            .ok_or_else(|| FakeError::NoIssue(key.to_owned()))?;
+        let id = issue_id(&state, key)?;
         let current = state.issues[&id].status;
         let t = workflow::transitions_from(current)
             .find(|t| {
@@ -303,9 +301,7 @@ impl FakeJira {
     /// [`FakeError::NoIssue`] for an unknown key.
     pub fn human_comment(&self, key: &str, text: &str, actor: &str) -> Result<(), FakeError> {
         let mut state = self.now();
-        let id = state
-            .find_issue(key)
-            .ok_or_else(|| FakeError::NoIssue(key.to_owned()))?;
+        let id = issue_id(&state, key)?;
         let author = workflow::account_for(actor);
         api::add_comment(&mut state, id, render::adf_from_text(text), &author, true);
         Ok(())
@@ -325,9 +321,7 @@ impl FakeJira {
         actor: &str,
     ) -> Result<(), FakeError> {
         let mut state = self.now();
-        let id = state
-            .find_issue(key)
-            .ok_or_else(|| FakeError::NoIssue(key.to_owned()))?;
+        let id = issue_id(&state, key)?;
         api::edit_labels(&mut state, id, add, remove, &workflow::account_for(actor));
         Ok(())
     }
@@ -417,6 +411,13 @@ impl FakeJira {
             "issues": issues,
         })
     }
+}
+
+/// Returns the id of the issue with this key, for a person action.
+fn issue_id(state: &State, key: &str) -> Result<u64, FakeError> {
+    state
+        .find_issue(key)
+        .ok_or_else(|| FakeError::NoIssue(key.to_owned()))
 }
 
 #[async_trait]

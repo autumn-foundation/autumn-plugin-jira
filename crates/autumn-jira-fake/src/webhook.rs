@@ -66,32 +66,37 @@ pub(crate) fn emit(state: &mut State, event: &Event<'_>, issue: &Issue, actor: &
             "comment": render::comment(state, issue, comment),
             "issue": reduced_issue(state, issue),
         }),
-        Event::Created | Event::Updated { .. } | Event::Deleted => {
-            let (name, type_name) = match event {
-                Event::Created => ("jira:issue_created", "issue_created"),
-                Event::Deleted => ("jira:issue_deleted", "issue_deleted"),
-                Event::Updated { type_name, .. } => ("jira:issue_updated", *type_name),
-                Event::CommentCreated(_) => ("", ""),
-            };
-            let parts = render::BeanParts {
-                fields: render::FieldFilter::all(),
-                ..render::BeanParts::default()
-            };
-            let mut body = json!({
-                "timestamp": timestamp,
-                "webhookEvent": name,
-                "issue_event_type_name": type_name,
-                "user": render::user(state, actor),
-                "issue": render::issue_bean(state, issue, &parts),
+        Event::Created => issue_body(
+            state,
+            timestamp,
+            "jira:issue_created",
+            "issue_created",
+            issue,
+            actor,
+        ),
+        Event::Deleted => issue_body(
+            state,
+            timestamp,
+            "jira:issue_deleted",
+            "issue_deleted",
+            issue,
+            actor,
+        ),
+        Event::Updated { type_name, changes } => {
+            let mut body = issue_body(
+                state,
+                timestamp,
+                "jira:issue_updated",
+                type_name,
+                issue,
+                actor,
+            );
+            let id = state.next_change_id;
+            state.next_change_id += 1;
+            body["changelog"] = json!({
+                "id": id.to_string(),
+                "items": changes.iter().map(Change::json).collect::<Vec<_>>(),
             });
-            if let Event::Updated { changes, .. } = event {
-                let id = state.next_change_id;
-                state.next_change_id += 1;
-                body["changelog"] = json!({
-                    "id": id.to_string(),
-                    "items": changes.iter().map(Change::json).collect::<Vec<_>>(),
-                });
-            }
             body
         }
     };
@@ -100,6 +105,28 @@ pub(crate) fn emit(state: &mut State, event: &Event<'_>, issue: &Issue, actor: &
     state
         .deliveries
         .push(build(&secret, &id, body.to_string().into_bytes()));
+}
+
+/// Returns the body of an issue event, with no changelog.
+fn issue_body(
+    state: &State,
+    timestamp: i64,
+    name: &str,
+    type_name: &str,
+    issue: &Issue,
+    actor: &str,
+) -> Value {
+    let parts = render::BeanParts {
+        fields: render::FieldFilter::all(),
+        ..render::BeanParts::default()
+    };
+    json!({
+        "timestamp": timestamp,
+        "webhookEvent": name,
+        "issue_event_type_name": type_name,
+        "user": render::user(state, actor),
+        "issue": render::issue_bean(state, issue, &parts),
+    })
 }
 
 /// Returns the reduced issue of a comment event.
