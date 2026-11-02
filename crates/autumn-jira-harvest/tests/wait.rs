@@ -50,6 +50,19 @@ async fn wait_for_issue(
     await_issue_status(ctx, &input.issue_id, &input.target, &input.options).await
 }
 
+/// A workflow that waits 10 minutes, then calls the wait. In production the
+/// start-time clock of the context is 10 minutes old at the wait.
+#[workflow]
+async fn sleep_then_wait(
+    ctx: &WorkflowContext,
+    input: WaitInput,
+) -> Result<StatusWait, WorkflowFailure> {
+    ctx.timer("before-the-wait", 600)
+        .await
+        .map_err(|e| WorkflowFailure::new("test.timer", e.to_string()))?;
+    await_issue_status(ctx, &input.issue_id, &input.target, &input.options).await
+}
+
 const ISSUE: &str = "10001";
 const OTHER_ISSUE: &str = "10002";
 
@@ -146,8 +159,16 @@ async fn assert_replays(outcome: &TestRunOutcome) {
 }
 
 async fn assert_replays_with_the_clock_off(events: Vec<WorkflowEvent>) {
+    assert_replays_with_the_clock_off_as("wait_for_issue", handler(), events).await;
+}
+
+async fn assert_replays_with_the_clock_off_as(
+    name: &str,
+    handler: WorkflowHandlerFn,
+    events: Vec<WorkflowEvent>,
+) {
     let report = WorkflowReplayer::new()
-        .register_fn("wait_for_issue", handler())
+        .register_fn(name, handler)
         .replay_from_events(events)
         .await;
     assert!(
@@ -304,6 +325,26 @@ async fn the_last_read_at_the_deadline_can_reach_the_target() {
     assert_eq!(timers(run.events()), vec![90]);
     assert_eq!(run.elapsed().num_seconds(), 90);
     assert_replays_with_the_clock_off(run.events().to_vec()).await;
+}
+
+/// The deadline counts from the start of the wait, not from the start of
+/// the run. With the advancing clock OFF, a deadline from the start-time
+/// clock is 10 minutes in the past, and the replay fails.
+#[tokio::test]
+async fn a_late_wait_keeps_its_full_timeout() {
+    let handler = sleep_then_wait_info().handler;
+    let env = WorkflowTestEnv::new().mock_activity(GET_ISSUE, |_| Ok(issue_at(&in_progress())));
+    let run = env.simulation().run(3, handler, input(120, None)).await;
+    let wait: StatusWait = serde_json::from_value(run.result().clone().unwrap()).unwrap();
+    assert_eq!(
+        wait,
+        StatusWait::TimedOut {
+            last: Some(in_progress())
+        }
+    );
+    assert_eq!(timers(run.events()), vec![600, 120]);
+    assert_eq!(run.elapsed().num_seconds(), 720);
+    assert_replays_with_the_clock_off_as("sleep_then_wait", handler, run.events().to_vec()).await;
 }
 
 #[tokio::test]
