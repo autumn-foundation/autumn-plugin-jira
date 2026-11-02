@@ -87,7 +87,7 @@ a column with "test" in its header is a `fn` in the named file or module.
 | EX4 `camel_route` | Done. `cargo run --locked -p autumn-jira-camel --example camel_route` prints the summary and exits 0. | ex: `camel_route::{the_route_creates_and_moves, unknown_option_fails_at_route_add, a_wrong_value_fails_the_check}`; CI step "example: camel_route" |
 | EX5 Ecosystem happy path | Done (WP7: RED `c439a8f`, GREEN `46da54b`). `cargo run --locked` of the ecosystem prints the nine timeline lines and `check: ok`. | eco u: `tests::happy_path_timeline_is_exact`; CI job `example-ecosystem` |
 | EX6 Ecosystem failures | Done (WP7) | eco u: `tests::{lost_create_fails_closed, bad_webhook_secret_resolves_by_poll, no_webhook_no_poll_times_out, a_wrong_value_fails_the_check, the_line_format_has_an_eight_wide_tag}`; eco u: `tests::{a_run_timeout_still_stops_everything, no_worker_records_no_worker_stop}` (rounds 1 and 2) |
-| EX7 Ecosystem edges | Done (WP7). The bot copy goes to the `sink_for_all_actors` bridge: the bridge gets 2 deliveries, and `ignored_self` is 0. | eco u: `tests::{webhook_negatives, two_tenants_stay_apart, is_retryable_copy_matches_harvest_camel, boot_three_plugins_real_http}` |
+| EX7 Ecosystem edges | Done (WP7). The bot copy goes to the `sink_for_all_actors` bridge: the bridge gets 2 deliveries, and `ignored_self` is 0. | eco u: `tests::{webhook_negatives, a_delivery_of_another_site_is_refused, two_tenants_stay_apart, is_retryable_copy_matches_harvest_camel, boot_three_plugins_real_http}` |
 | EX8 Examples wired | Done (WP8a: RED `9250bd7`, GREEN `ad9dfb3`). | `core/t/examples_wired.rs::{each_example_is_wired, no_example_turns_on_the_dev_only_proxy_flags, each_example_file_is_in_the_list, the_ecosystem_workspace_stays_apart, readme_snippets_copy_their_examples, docs_give_the_ci_commands_of_the_separate_workspace, a_comment_or_a_string_is_not_code, a_time_bound_in_the_tests_is_for_a_server_only, a_step_name_or_an_if_is_not_a_run, a_readme_command_needs_its_env_vars, a_snippet_must_copy_its_example, a_doc_must_give_the_ci_commands}` |
 
 ## Spikes
@@ -358,7 +358,7 @@ The status comes from the fixer reports: 36 fixed, 1 partially fixed.
 | R2C-harvest-3 | low | The history budget claims did not hold for missed polls and stored signals. | fixed | `harvest/t/wait.rs::missed_polls_fit_the_history_cap` | b3f4392 (RED), 6c75e71 (GREEN) |
 | R2C-harvest-4 | low | A late delivery gave the status of a later read, so a short status was lost. | fixed | `harvest/t/bridge_pg.rs::a_late_delivery_of_this_site_keeps_its_reported_status` | 4b52a53 (RED), 643caa6 (GREEN) |
 | R2D-integration-1 | low | The camel redelivery headers stay on the exchange after a step recovers. | fixed | none (doc only) | bbef20c (crate docs), 48b3df6 (DOCS, README) |
-| R2D-integration-2 | low | The docs said to give each site its own endpoint and bridge, and the plugin cannot do that. | fixed | none (doc only) | 48b3df6 (DOCS) |
+| R2D-integration-2 | low | The docs said to give each site its own endpoint and bridge, and the plugin cannot do that. | fixed | none (doc only) | 48b3df6 (DOCS), 41b92c3 and 1ae5c40 (DOCS, the `bridge.rs` module doc) |
 | R2D-integration-3 | low | AUTUMN_ENV did not select the profile file of the real autumn_app path. | fixed | ex: `autumn_app::the_selector_selects_the_profile_of_the_real_path`; `scripts/smoke-autumn-example.sh` | 00d4068 (RED), a51b75b (GREEN) |
 | R2D-integration-4 | low | The 60 s timeout cap stopped a san_mateo start, where the plugin does not use the value. | fixed | u: `config::the_timeout_cap_applies_in_api_token_mode_only` | cc14e18 (RED), 528f89a (GREEN) |
 | R2D-integration-6 | low | Semaphore::new could panic at the start on a 32-bit target. | fixed | u: `runtime::the_slot_count_stays_at_the_semaphore_cap` | 1f63545 (RED), 666b9be (GREEN) |
@@ -374,7 +374,7 @@ The status comes from the fixer reports: 36 fixed, 1 partially fixed.
 | R2E-tests-guards-8 | low | An update after cd or with --manifest-path= escaped the one-version check. | fixed | `core/t/guards.rs::{weekly_updates_get_the_one_version_check, weekly_updates_get_the_one_version_check_sees_a_gap}` | 947122a (RED), d29de99 (GREEN), 2c97622 (clippy) |
 | R2E-tests-guards-9 | low | A README snippet passed in the wrong order, or with a line of a test or a comment. | fixed | `core/t/examples_wired.rs::{readme_snippets_copy_their_examples, a_snippet_must_copy_its_example}` | c33766f (RED), 2c97622 (GREEN) |
 | R2F-fixcheck-a-1 | medium | A first comment attempt could not comment on an issue with more comments than the page cap. | fixed | `core/t/idempotency.rs::a_first_attempt_comments_on_an_issue_with_many_comments`; `harvest/t/activities.rs::add_comment_on_an_issue_with_301_comments_works_on_attempt_1` | f69b66d (RED), 1f483c2 (GREEN), 3c9c7e6 (RED), 9cc7222 (GREEN, harvest) |
-| R2F-fixcheck-a-2 | low | A delivery had no site, so a bridge could not refuse a delivery of another site. | fixed | `core/t/webhook.rs::{a_delivery_keeps_the_host_of_its_site, a_site_host_has_a_strict_rule, each_fake_delivery_names_its_site}`; `harvest/t/bridge_pg.rs::a_delivery_of_another_site_is_refused` | 2193479 (RED), 66042f6 (GREEN), f63a94d (RED), 9c30715 (GREEN, harvest) |
+| R2F-fixcheck-a-2 | low | A delivery had no site, so a bridge could not refuse a delivery of another site. | fixed | `core/t/webhook.rs::{a_delivery_keeps_the_host_of_its_site, a_site_host_has_a_strict_rule, each_fake_delivery_names_its_site}`; `harvest/t/bridge_pg.rs::a_delivery_of_another_site_is_refused`; eco u: `tests::a_delivery_of_another_site_is_refused` | 2193479 (RED), 66042f6 (GREEN), f63a94d (RED), 9c30715 (GREEN, harvest), 8384844 (RED), ecaa7bd (GREEN, the ecosystem bridge) |
 | R2F-fixcheck-a-3 | low | The route tag did not bind the issue, so a copied route entry signalled the run. | fixed | `harvest/t/bridge_pg.rs::a_copied_route_does_not_signal`; u: `route::{tag_is_hmac_of_the_versioned_input, v1_tags_verify_only_as_v1}`; u: `bridge::routes_need_tag_and_allowlist` | f0da7f2 (RED), 62e6e42 (GREEN) |
 | R2F-fixcheck-a-4 | low | The stored cloud id was checked again only on the first 401 or 404. | fixed | `core/t/san_mateo.rs::a_reconnect_after_confirmation_is_seen` | e63753e (RED), 3f6d3d5 (GREEN) |
 | R2F-fixcheck-a-5 | low | outcome_pending made a sink answer 503, so a redelivery called the write again. | fixed | u: `sink::handler_error_from_jira_error` | c8407c2 (RED), 28b9066 (GREEN) |
@@ -394,8 +394,10 @@ Notes on the open items of round 2:
   `crates/autumn-jira-harvest` says the same.
 - R2F-fixcheck-a-2 and R2C-harvest-4: the site check and the payload
   status apply only when the bridge knows its site host. The ecosystem
-  builds its bridge with a San Mateo client and no `site_host`, so it
-  keeps the read status.
+  now gives its bridge the host of `transport::SITE_URL` with
+  `site_host` (8384844 RED, ecaa7bd GREEN). The test
+  `tests::a_delivery_of_another_site_is_refused` shows that the bridge
+  refuses a delivery of another site and counts it in `other_site`.
 - R2E-tests-guards-7 and R2E-tests-guards-8 were plausible. The fixes
   close the gaps in the guards, also where the old gap failed closed.
 
@@ -465,7 +467,8 @@ Earlier runs in the waves (not the final table):
 - An app takes the webhooks of one Jira site: autumn skips a second
   `JiraPlugin`. The waits on other sites end by poll (plan V114).
 - The bridge checks the site of a delivery only when it knows its site
-  host. A San Mateo client needs `site_host` for that (plan V106).
+  host. A San Mateo client needs `site_host` for that (plan V106). The
+  ecosystem sets it.
 - After a lost reply on a transition, an automation that moves the issue
   on makes the call end with `OutcomeUnknown`. A person or a later step
   must check (plan V97).
