@@ -101,9 +101,12 @@ layers multiply the sends and break the activity timeout.
   checked write up to 2 450 s. A direct client needs less: 130 s, 390 s
   and 650 s.
   So `jira_get_issue`, `jira_search_page`, `jira_edit_issue` and
-  `jira_delete_issue` get 9m. `jira_create_issue`, `jira_add_comment`,
+  `jira_delete_issue` get 9m. `jira_create_issue`,
   `jira_transition_to_status` and `jira_watch_issue` (four idempotent
-  calls, 1 960 s) get 42m. The first budgets (3m, 5m, 12m) held for a
+  calls, 1 960 s) get 42m. `jira_add_comment` gets 70m (3 920 s). It can
+  read `GET /myself` and up to 3 comment pages before and after the send
+  (`COMMENT_LOOKUP_PAGES`). At that cap the lookup fails closed with
+  `PageLimit` (plan V96). The first budgets (3m, 5m, 12m) held for a
   direct client only. A `start_to_close` timeout gives `Unknown` on the
   next attempt, so a short budget makes more lookups only, not a
   duplicate. The test `start_to_close_covers_the_client_budget` adds up

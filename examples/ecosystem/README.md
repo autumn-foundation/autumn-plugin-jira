@@ -233,12 +233,19 @@ is the signal idempotency key.
 // src/main.rs and src/app.rs
 let bridge = HarvestSignalBridge::new(pool.clone(), jira.clone(), key.clone())
     .allow_workflow(INCIDENT_FLOW);
-JiraPlugin::with_config(jira_config()?).sink(bridge)
+JiraPlugin::with_config(jira_config()?).sink_for_all_actors(bridge)
 ```
 
+The bot account `acct-bot` makes the API writes of the flow, and
+`ignore_actor_account_ids` holds it. The bridge is a sink for all actors,
+so a status that the bot sets still signals a waiting run. The bridge
+makes no write, so it cannot make a loop. Other sinks of the app do not
+get the events of the bot.
+
 Webhooks are at least once. The same delivery again gives 409 and no second
-signal. A tampered copy gives 401. A copy from the bot gives 200 and no
-sink call (`tests::webhook_negatives`).
+signal. A tampered copy gives 401. A copy from the bot gives 200 and goes
+to the bridge only. It has its own delivery id, so the run takes it as a
+late signal, or the run is already finished (`tests::webhook_negatives`).
 
 ### [8] harvest: the end of the run
 
@@ -251,6 +258,16 @@ message.
 ```rust
 // src/routes.rs
 ex.input.set_header("SanMateoProxy-Idempotency-Key", key);
+```
+
+A webhook can come after the wait, while the run adds the comment or
+tells the chat. No code reads that signal, and a strict replay fails on a
+history that ends with it. So `incident_flow` takes the late signals as
+its last step.
+
+```rust
+// src/workflow.rs
+drain_jira_signals(ctx)?;
 ```
 
 With a wrong webhook secret, every POST gives 401, and a poll ends the

@@ -74,7 +74,7 @@ a column with "test" in its header is a `fn` in the named file or module.
 | AC37 camel idempotency and errors | Done | `camel/t/route.rs::{key_header_uses_the_idempotent_path, retry_attempt_looks_up_only, opt_in_resends}`; `camel/t/retry_rule.rs::{map_keeps_the_retry_class_for_every_error, the_samples_cover_every_code, each_camel_kind_gives_its_camel_variant, messages_hold_the_code_and_no_body, outcome_unknown_with_a_key_is_io_and_without_is_validation, http_errors_have_the_plan_shape}`; u: `error::{http_errors_name_the_method_of_the_failed_call, reason_phrases}`; `camel/t/route.rs::{camel_redelivery_of_marked_create_looks_up_only, camel_redelivery_never_resends_unmarked_writes, retry_attempt_lookup_waits_for_index_lag}` (round 1) |
 | AC38 Quality gates | In progress (wave 4). Clippy pedantic and nursery `-D warnings` are clean at the end of wave 3. MSRV passed in CI. Coverage of each crate is over 85% (see "Summary"). | CI jobs `lint`, `test`, `msrv`; `core/t/guards.rs::{no_unwrap_or_todo_in_src, no_unwrap_or_todo_in_src_sees_each_kind, every_allow_has_a_reason, every_allow_has_a_reason_sees_a_bare_allow, no_continue_on_error, no_continue_on_error_sees_hidden_failures, no_session_paths, no_session_paths_sees_one}` |
 | AC39 Dependency rules | In progress (wave 4) | CI job `deps`; `core/t/guards.rs::{root_lock_is_free_of_c_builds, root_lock_is_free_of_c_builds_sees_one, ecosystem_lints_equal_the_root, the_lint_compare_sees_a_change, weekly_updates_get_the_one_version_check, weekly_updates_get_the_one_version_check_sees_a_gap, published_crates_have_metadata, published_crates_have_metadata_sees_a_gap}` |
-| AC40 Docs | In progress (wave 4). This file, `docs/plan.md` (design v3, as built) and `docs/examples-plan.md` are written. The review angle R7 is due after C4. | `core/t/guards.rs::{readme_writes_table_equals_writes, the_writes_compare_sees_a_change, evidence_names_real_tests, the_evidence_check_sees_a_missing_test, adr_files_exist, adr_files_exist_sees_a_gap, the_lexer_drops_comments_and_test_items, docs_are_ste_prose, docs_are_ste_prose_sees_a_long_sentence, docs_make_no_stale_claims, docs_make_no_stale_claims_sees_each_claim, adrs_cite_real_doc_text, adrs_cite_real_doc_text_sees_a_missing_quote, adr_0005_names_each_policy_fn, adr_0005_names_each_policy_fn_sees_a_gap}`; u: `writes::{writes_table, writes_match_the_markers}` |
+| AC40 Docs | In progress (wave 4). This file, `docs/plan.md` (design v3, as built) and `docs/examples-plan.md` are written. The review angle R7 is due after C4. | `core/t/guards.rs::{readme_writes_table_equals_writes, the_writes_compare_sees_a_change, evidence_names_real_tests, the_evidence_check_sees_a_missing_test, adr_files_exist, adr_files_exist_sees_a_gap, the_lexer_drops_comments_and_test_items, docs_are_ste_prose, docs_are_ste_prose_sees_a_long_sentence, docs_make_no_stale_claims, docs_make_no_stale_claims_sees_each_claim, adrs_cite_real_doc_text, adrs_cite_real_doc_text_sees_a_missing_quote, adr_0005_names_each_policy_fn, adr_0005_names_each_policy_fn_sees_a_gap, doc_comments_are_ste_prose, doc_comments_are_ste_prose_sees_each_kind}`; u: `writes::{writes_table, writes_match_the_markers}` |
 
 ## Acceptance criteria: examples
 
@@ -199,7 +199,8 @@ and a GREEN commit. A doc-only fix has a DOCS commit. Plan section 2.1
 (V54 to V95) gives the design change of each fix, with its finding id.
 
 The severity is the severity after the verifier. The status comes from the
-fixer reports: 72 fixed, 6 partially fixed, 1 skipped. "none" in the tests
+fixer reports and the follow-up commits after them: 77 fixed, 1
+partially fixed, 1 skipped. "none" in the tests
 column means a doc fix with no test of its own.
 
 | Id | Severity | Finding | Status | Tests | Commits |
@@ -218,17 +219,17 @@ column means a doc fix with no test of its own.
 | R2-webhook-security-2 | low | The comment actor filter used the author for an update or a delete. | fixed | u: `webhook::{comment_actor_follows_the_event, parses_all_events}` | e638c6b, 2824822 |
 | R2-webhook-security-3 | low | The boot check left out max_future_skew_secs. | fixed | `plugin/t/webhook_config.rs::max_age_and_skew_stay_inside_the_replay_window` | f6bd05c, 5d16fa0 |
 | R2-webhook-security-4 | low | ADR 0004 did not name the crash case of the replay store. | fixed | `core/t/guards.rs::docs_make_no_stale_claims` | 193a4af (RED), 28c5d04 (GREEN) |
-| R2-webhook-security-5 | low | The self filter hid the own status changes from the bridge. | fixed | `plugin/t/webhook.rs::a_sink_for_all_actors_gets_the_ignored_actor` | 29184b4 (RED), 3fc3cbf (GREEN) |
+| R2-webhook-security-5 | low | The self filter hid the own status changes from the bridge. | fixed | `plugin/t/webhook.rs::a_sink_for_all_actors_gets_the_ignored_actor`; eco u: `tests::webhook_negatives` | 29184b4 (RED), 3fc3cbf (GREEN), 578b33b (RED), 57f861c (GREEN, the ecosystem bridge) |
 | R2-webhook-security-6 | low | The route tag does not bind the issue, so a copied route entry works. | skipped | none (limit documented) | e68504a (DOCS) |
 | R2-webhook-security-7 | low | A typed or quoted comment marker counted, and the lookup did not check the author. | fixed | u: `webhook::only_a_full_last_line_marker_counts`; `core/t/idempotency.rs::a_marker_from_another_author_is_not_found` | e638c6b, 2824822, 04705d4, fa5fb0d, 4931958 |
 | R2-webhook-security-8 | low | A max_age_secs under the Jira retry horizon dropped the retries. | fixed | `plugin/t/webhook_config.rs::a_max_age_below_the_jira_retry_horizon_warns` | f6bd05c, 5d16fa0 |
-| R2-webhook-security-9 | low | The body cap is memory that an unsigned request can use. | partially fixed | none (doc only) | 5c13065 (DOCS) |
+| R2-webhook-security-9 | low | The body cap is memory that an unsigned request can use. | fixed | none (doc only) | 5c13065 (DOCS), 1fea9b3 (DOCS, README and ADR 0004) |
 | R3-secrets-ssrf-1 | medium | The property keys . and .. moved the request to another path. | fixed | `core/t/client.rs::dot_segment_property_keys_are_rejected` | d94f304, 13f4557 |
 | R3-secrets-ssrf-2 | low | One configured cloud id pinned each tenant token to one site. | fixed | `plugin/t/lifecycle.rs::the_configured_cloud_id_is_for_the_default_connection_only` | e36f5e7, d8d9d1a |
 | R3-secrets-ssrf-3 | low | A stored cloud id was trusted for ever. | fixed | `core/t/san_mateo.rs::a_stale_metadata_cloud_id_is_checked_after_a_404` | 76c9731, f8849ae (RED fixed: my first stale id was the fake's own default id), 8e2a3d4 |
 | R3-secrets-ssrf-4 | low | A secret in email_env or token_env showed in the error. | fixed | u: `config::env_keys_hold_env_var_names`; `plugin/t/webhook_config.rs::the_fix_never_prints_a_secret_env_value_that_is_not_a_name` | b717333 (RED), 0385b6e (GREEN) |
 | R4-harvest-determinism-1 | high | One failed poll read ended the durable wait. | fixed | `harvest/t/wait.rs::{a_failed_poll_is_a_missed_poll, a_failed_last_read_times_out, a_signal_after_a_failed_poll_ends_the_wait, a_non_retryable_poll_failure_ends_the_wait}`; `harvest/t/activities.rs::failure_for_table` | 9479c97 (RED), 284bdaf (GREEN) |
-| R4-harvest-determinism-2 | medium | A signal after the wait broke a strict replay. | fixed | `harvest/t/wait.rs::a_signal_after_the_wait_needs_the_drain` | f509647 (RED), 71d1053 (GREEN), a77491c (DOCS) |
+| R4-harvest-determinism-2 | medium | A signal after the wait broke a strict replay. | fixed | `harvest/t/wait.rs::a_signal_after_the_wait_needs_the_drain`; eco u: `tests::a_late_jira_signal_replays` | f509647 (RED), 71d1053 (GREEN), a77491c (DOCS), 578b33b (RED), 57f861c (GREEN, the ecosystem drain) |
 | R4-harvest-determinism-3 | medium | The reads did not move the stale-signal time. | fixed | `harvest/t/wait.rs::a_signal_older_than_a_read_is_skipped` | 9479c97 (RED), 284bdaf (GREEN) |
 | R4-harvest-determinism-4 | medium | No bound on the rounds of a wait, so the history could reach its cap. | fixed | `harvest/t/wait.rs::{too_many_poll_rounds_fail_at_once, the_round_bound_fits_the_history_cap}` | 9479c97 (RED), 284bdaf (GREEN) |
 | R4-harvest-determinism-5 | low | The wait deadline did not fit the execution deadline of the run. | fixed | u: `wait::the_deadline_fits_the_run` | 51ef333 (RED), 3c26e47 (GREEN) |
@@ -243,7 +244,7 @@ column means a doc fix with no test of its own.
 | R5-spec-proof-7 | low | The offset pager and the token pager disagreed at max_pages = 0. | fixed | `core/t/client.rs::offset_pager_reads_the_first_page_like_the_token_pager` | 925becb, d158c70 |
 | R5-spec-proof-8 | low | The signature shape tests missed a bad byte after the right prefix. | fixed | u: `policy::{spec_as_test_signature_shape_mixed_case, spec_as_test_signature_shape_one_bad_byte, signature_and_quote_examples}` | ecd58ed |
 | R5-spec-proof-9 | low | No code bounded max_future_skew_secs by MAX_FUTURE_SKEW_MS. | fixed | `plugin/t/webhook_config.rs::max_future_skew_has_the_policy_bound` | f6bd05c, 5d16fa0 |
-| R5-spec-proof-10 | low | The docs of the verified core did not match the lists. | partially fixed | `core/t/guards.rs::adr_0005_names_each_policy_fn` | 193a4af (RED), d8b3bbd (GREEN) |
+| R5-spec-proof-10 | low | The docs of the verified core did not match the lists. | fixed | `core/t/guards.rs::adr_0005_names_each_policy_fn` | 193a4af (RED), d8b3bbd (GREEN), 1b45ebc (the `verus/policy.rs` header and the `PROPTEST_ONLY` doc) |
 | R6-fake-fidelity-1 | high | The parser and the fake used ADF where Jira webhooks send REST v2 strings. | fixed | u: `webhook::v2_string_comment_body_is_read`; `fake/t/fake.rs::deliveries_use_the_v2_shape` | e638c6b (RED), 2824822 (GREEN) |
 | R6-fake-fidelity-2 | medium | The parser dropped the comment of an issue_commented update. | fixed | u: `webhook::issue_commented_update_keeps_the_comment`; `fake/t/fake.rs::{deliveries_use_the_v2_shape, deliveries_are_signed}` | e638c6b, 2824822 |
 | R6-fake-fidelity-3 | medium | A bad label value became LabelsNotOnScreen. | fixed | `core/t/idempotency.rs::{a_bad_label_value_is_a_validation_error, labels_not_on_screen_has_a_fix}` | 4f4dc75, 57c043c |
@@ -258,8 +259,8 @@ column means a doc fix with no test of its own.
 | R7-api-docs-9 | low | The for_connection cache had no bound. | fixed | u: `service::the_cache_has_a_bound_and_drops_the_least_recently_used` | 7c4af9c, e9b79ee |
 | R7-api-docs-11 | low | CLAUDE.md gave a short lock command and left out ecosystem CI commands. | fixed | `core/t/examples_wired.rs::{docs_give_the_ci_commands_of_the_separate_workspace, a_doc_must_give_the_ci_commands}` | 570bdfd (RED), 6ce8c1f (GREEN) |
 | R7-api-docs-12 | low | ADRs, examples-plan and plan 8 had stale text. | fixed | `core/t/guards.rs::{adrs_cite_real_doc_text, adrs_cite_real_doc_text_sees_a_missing_quote, adr_0005_names_each_policy_fn, adr_0005_names_each_policy_fn_sees_a_gap}` | 193a4af (RED), 28c5d04 and d8b3bbd (GREEN) |
-| R7-api-docs-14 | low | Prose docs broke ASD-STE100. | partially fixed | `core/t/guards.rs::{docs_are_ste_prose, docs_are_ste_prose_sees_a_long_sentence}` | 193a4af (RED), 3b900b8 (GREEN) |
-| R7-api-docs-15 | low | Code comments broke ASD-STE100. | partially fixed | none (doc only) | 873f0cc (DOCS); the camel lib.rs rewrite (2) is in 686364d |
+| R7-api-docs-14 | low | Prose docs broke ASD-STE100. | fixed | `core/t/guards.rs::{docs_are_ste_prose, docs_are_ste_prose_sees_a_long_sentence}` | 193a4af (RED), 3b900b8 (GREEN), 1fea9b3 (DOCS, item 7) |
+| R7-api-docs-15 | low | Code comments broke ASD-STE100. | fixed | `core/t/guards.rs::{doc_comments_are_ste_prose, doc_comments_are_ste_prose_sees_each_kind}` | 873f0cc (DOCS); the camel lib.rs rewrite (2) is in 686364d, 578b33b (RED), 1b45ebc (GREEN) |
 | R8-build-ci-1 | medium | The README example rows left out the env vars. | fixed | `core/t/examples_wired.rs::{each_example_is_wired, a_readme_command_needs_its_env_vars}` | 570bdfd (RED), 6ce8c1f (GREEN) |
 | R8-build-ci-2 | low | The weekly cargo update got no one-version check. | fixed | `core/t/guards.rs::{weekly_updates_get_the_one_version_check, weekly_updates_get_the_one_version_check_sees_a_gap}` | 193a4af (RED), b60d833 (GREEN) |
 | R8-build-ci-3 | low | examples_wired took comments, strings and step names as evidence. | fixed | `core/t/examples_wired.rs::{a_comment_or_a_string_is_not_code, a_time_bound_in_the_tests_is_for_a_server_only, a_step_name_or_an_if_is_not_a_run}` | 570bdfd (RED), 6ce8c1f (GREEN), b35580f (DOCS) |
@@ -272,7 +273,7 @@ column means a doc fix with no test of its own.
 | R9-test-quality-2 | low | The chaos proptest could not fail a lookup. | fixed | `core/t/idempotency.rs::chaos_at_most_one_issue_per_key` | 5eb281a |
 | R9-test-quality-4 | low | The boot child blocked on a full stderr pipe. | fixed | `plugin/t/boot.rs::{the_app_boots_and_takes_a_signed_post, missing_secret_exits_and_names_the_variable}` | 79911f4 (RED), aa461e8 (GREEN) |
 | R9-test-quality-5 | low | Two 503 paths of the route had no test. | fixed | `plugin/t/webhook.rs::a_panicking_sink_is_503`; u: `webhook::a_delivery_before_the_start_is_503` | 27cd236 |
-| R9-test-quality-6 | low | The budget test fixed the transport timeout at 60 s. | partially fixed | `harvest/t/activities.rs::start_to_close_covers_the_client_budget` | 3424c78 (RED), b066c73 + 945c3226 (GREEN) |
+| R9-test-quality-6 | low | The budget test fixed the transport timeout at 60 s. | fixed | `harvest/t/activities.rs::start_to_close_covers_the_client_budget`; u: `config::validation_rules`; `harvest/t/activities.rs::the_comment_lookup_reads_at_most_its_page_cap` | 3424c78 (RED), b066c73 + 945c3226 (GREEN), 578b33b (RED), 57f861c (GREEN) |
 | R9-test-quality-11 | low | AC15 did not test each unsafe write with each trigger. | fixed | `core/t/retry.rs::unsafe_writes_send_once_table` | d2f9f1e, ebedb95 (clippy) |
 | R9-test-quality-12 | low | No test counted the upstream calls of a san_mateo start. | fixed | `plugin/t/lifecycle.rs::san_mateo_startup_makes_no_network_call` | 27cd236 |
 | R10-plugin-ecosystem-1 | medium | for_connection copied the default cloud id to each tenant. | fixed | `plugin/t/lifecycle.rs::the_configured_cloud_id_is_for_the_default_connection_only`; u: `config::validation_rules` | e36f5e7 (RED), d8d9d1a (GREEN) |
@@ -294,21 +295,27 @@ Notes on the open items of round 1:
   PUT after the create. That breaks the one-call create
   (`create_with_a_route_tracks_the_issue_in_one_call`). The limit and its
   bounds are in plan 9.4 and ADR 0006. The lead decides on a v2 tag.
-- R2-webhook-security-9: the plugin fixer changed the rustdoc. The docs
-  sync of round 1 added the same note to the README and ADR 0004.
-- R5-spec-proof-10: ADR 0005 names each policy function, and a guard
-  checks it. The header of `verus/policy.rs` and the `PROPTEST_ONLY` doc
-  belong to the core crate.
-- R7-api-docs-14: the guard `docs_are_ste_prose` covers the root docs. The
-  docs sync of round 1 rewrote item 7 in `examples/ecosystem/README.md`.
-- R7-api-docs-15: the fixers rewrote the comments in their own paths. The
-  rewrites in `autumn-jira` and `autumn-jira-harvest` and a comment guard
-  went to the lead.
-- R9-test-quality-6: the budget test covers transport timeouts up to
-  `MAX_TRANSPORT_TIMEOUT` (60 s). The cap of `[jira.http] timeout_secs` at
-  60 is in the plugin config (plan V64).
+- R2-webhook-security-9: fixed. The plugin fixer changed the rustdoc. The
+  docs sync `1fea9b3` added the same note to the README and ADR 0004.
+- R5-spec-proof-10: fixed. ADR 0005 names each policy function, and a
+  guard checks it. The follow-up `1b45ebc` fixed the header of
+  `verus/policy.rs` and the `PROPTEST_ONLY` doc.
+- R7-api-docs-14: fixed. The guard `docs_are_ste_prose` covers the root
+  docs. The docs sync `1fea9b3` rewrote item 7 in
+  `examples/ecosystem/README.md`.
+- R7-api-docs-15: fixed. The fixers rewrote the comments in their own
+  paths. The follow-up RED commit `578b33b` adds the guard
+  `doc_comments_are_ste_prose` over `crates/*/src` and the ecosystem, and
+  `1b45ebc` makes it pass.
+- R9-test-quality-6: fixed. The budget test covers transport timeouts up
+  to `MAX_TRANSPORT_TIMEOUT` (60 s). The follow-up `57f861c` caps
+  `[jira.http] timeout_secs` at `MAX_TRANSPORT_TIMEOUT_SECS` (60) and caps
+  the comment lookup of `jira_add_comment` at 3 pages (plan V64, V96).
 - R2-webhook-security-5: the fix is the builder `sink_for_all_actors`. An
-  app that ignores its own account registers the bridge with it.
+  app that ignores its own account registers the bridge with it. The
+  ecosystem does so since `57f861c`.
+- R4-harvest-determinism-2: the ecosystem `incident_flow` calls
+  `drain_jira_signals` since `57f861c`.
 
 ## Mutation tests
 

@@ -395,8 +395,10 @@ let (registry, _dags, _schedules, config) = HarvestBuilder::new()
 | `jira_watch_issue` | Adds a route to an issue that a person made. A second call sends no PUT. |
 
 The `start_to_close` of a read or an edit is 9 minutes. A create, a
-comment, a transition and a watch get 42 minutes. These budgets hold for a
-San Mateo send of four transport calls of 60 s each.
+transition and a watch get 42 minutes, and a comment gets 70 minutes.
+These budgets hold for a San Mateo send of four transport calls of 60 s
+each. The comment lookup of `jira_add_comment` reads at most 3 pages. At
+that cap it fails closed and never sends the comment again.
 
 `await_issue_status` waits until an issue reaches a status. Webhooks make
 the wait faster. The wait does not need them: a poll ends it too.

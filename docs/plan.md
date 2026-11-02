@@ -112,7 +112,7 @@ row.
 
 Each row is one change from design v2. The section column names the part
 of this file that now shows the change. The waves of section 17.1 found
-the changes V1 to V53. Review round 1 found V54 to V95, and each of these
+the changes V1 to V53. Review round 1 found V54 to V96, and each of these
 rows names its finding id. The wave and fixer reports give the full
 text.
 
@@ -154,7 +154,7 @@ text.
 | V34 | `autumn_app` takes the real path when `JIRA_SITE` is set. | The plugin then names a missing `JIRA_API_TOKEN`. The autumn text for a missing webhook secret names no variable. | 12 |
 | V35 | `await_issue_status` drains `jira.event` before it returns. | Strict replay of harvest 0.8 gives `EarlyCompletion` for a history that ends with signals that no code read. | 9.3, ADR 0006 |
 | V36 | `poll_every` under `MIN_POLL_EVERY` (1 s) fails with `jira.invalid_input`. | A zero poll gives a hot loop of reads. | 9.3 |
-| V37 | `start_to_close` is 3m (get, search), 5m (edit, delete) and 12m (create, transition, comment, watch). | Durable `worst_case` at 60 s for each request is 390 s for a marked write and 650 s for a checked write. The watch makes four calls: 520 s. | 7.2, 9.2, ADR 0003 |
+| V37 | `start_to_close` is 3m (get, search), 5m (edit, delete) and 12m (create, transition, comment, watch). | Durable `worst_case` at 60 s for each request is 390 s for a marked write and 650 s for a checked write. The watch makes four calls: 520 s. | 7.2, 9.2, ADR 0003 (V64 changes the values) |
 | V38 | After a maybe-sent attempt, a lookup that fails with a retryable error stays `jira.outcome_pending`. | Else a lookup that gets a 429 (`sent = false`) lets the next attempt send again. | 7.2, ADR 0003 |
 | V39 | `jira_delete_issue` gives `gone_after_retry` for a 404 after a maybe-sent attempt. | The delete rule of 7.1, across harvest attempts. | 9.2 |
 | V40 | New harvest public items: the timeout constants, the `*Kind` enums, `BridgeCounters`, the input builders, the activity fns and their `*_info()`. | Workflows and tests use them. | 9 |
@@ -213,6 +213,7 @@ text.
 | V93 | The ecosystem run deadline wraps only the drive, so the stops always run. | A run timeout stopped nothing (R10-plugin-ecosystem-8). | 11.4 |
 | V94 | New `scripts/one-version.sh`. `scripts/extract-jira-schemas.py` needs the spec path. | One check for each lock, and no session path in the repo (R8-build-ci-2, R8-build-ci-5). | 14 |
 | V95 | ADR 0004 names the crash case of the replay store. | A crash after the keys are stored loses the event (R2-webhook-security-4). | ADR 0004 |
+| V96 | `jira_add_comment` reads at most `COMMENT_LOOKUP_PAGES` (3) comment pages, and its `start_to_close` is 70m (`COMMENT_START_TO_CLOSE`). New `autumn_jira::client::MAX_TRANSPORT_TIMEOUT_SECS` (60), the cap of `timeout_secs`. | The paged lookup of V62 and the cold `GET /myself` did not fit the 42m budget (follow-up of R1-write-safety-9 and R9-test-quality-6). | 7.2, 8.1, 9.2 |
 
 ---
 
@@ -612,6 +613,10 @@ after the last attempt; `Auth` gives `Auth { code }`.
 ```rust
 #[derive(Clone)]
 pub struct JiraClient { backend: Arc<dyn JiraBackend>, settings: ClientSettings, entropy: Arc<dyn Entropy>, myself: Arc<OnceCell<AccountId>> }
+
+/// V96: the longest transport timeout of one request. The plugin caps
+/// `[jira.http] timeout_secs` at it; the harvest budgets hold for it.
+pub const MAX_TRANSPORT_TIMEOUT_SECS: u64 = 60;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -1515,7 +1520,8 @@ sequenceDiagram
   |---|---|---|---|
   | `jira_get_issue`, `jira_search_page` | 1 read | 490 s | `"9m"` (`READ_START_TO_CLOSE`, 540 s) |
   | `jira_edit_issue`, `jira_delete_issue` | 1 idempotent write | 490 s | `"9m"` (`WRITE_START_TO_CLOSE`, 540 s) |
-  | `jira_create_issue`, `jira_add_comment` | 1 marked write | 1 470 s | `"42m"` (`LONG_WRITE_START_TO_CLOSE`, 2 520 s) |
+  | `jira_create_issue` | 1 marked write | 1 470 s | `"42m"` (`LONG_WRITE_START_TO_CLOSE`, 2 520 s) |
+  | `jira_add_comment` | `GET /myself` (a cold cache), then 1 marked write with up to `COMMENT_LOOKUP_PAGES` (3) comment pages before and after the send (V96) | 3 920 s | `"70m"` (`COMMENT_START_TO_CLOSE`, 4 200 s) |
   | `jira_transition_to_status` | 1 checked write | 2 450 s | `"42m"` |
   | `jira_watch_issue` | GET issue, GET property, PUT property, PUT edit | 4 x 490 s = 1 960 s | `"42m"` |
 
@@ -1526,6 +1532,12 @@ sequenceDiagram
   60 (V64). The one-time cloud id discovery and the cloud id check (V55)
   are not in the model: the backend caches the first and does the second
   only once.
+- Comment lookup cap (V96): `jira_add_comment` gives its client
+  `max_pages = min(max_pages, COMMENT_LOOKUP_PAGES)`, so its budget is
+  finite. An issue can get more comments between two attempts than 3
+  pages hold. Then the lookup stops with `PageLimit` and does not report
+  "not found", so no attempt sends the comment again. The activity fails,
+  and it never writes a duplicate.
 
 ### 7.3 Residual risks (ADR 0003)
 
@@ -1755,9 +1767,10 @@ Config rules of round 1 (V64, V73 to V77):
   settings (V77).
 - `max_handler_tasks = 0` is a config error. `abandon_after_ms` below
   `handler_timeout_ms` is a config error (V73).
-- `timeout_secs` is 1 to 60. 60 s is
-  `autumn_jira_harvest::activities::MAX_TRANSPORT_TIMEOUT`, the bound of
-  the harvest budgets. The error names the key (V64). In san_mateo mode,
+- `timeout_secs` is 1 to `autumn_jira::client::MAX_TRANSPORT_TIMEOUT_SECS`
+  (60), the bound of the harvest budgets. A harvest test keeps it equal to
+  `autumn_jira_harvest::activities::MAX_TRANSPORT_TIMEOUT`. The error
+  names the key (V64). In san_mateo mode,
   the San Mateo transport owns the timeout, so the plugin does not use
   this value.
 - `JiraPlugin::with_config` uses the config as given. It reads no file and
@@ -1989,7 +2002,7 @@ ctx).await`. All return `Result<T, ActivityFailure>` [V typed failure rule].
 | `jira_search_page` | `SearchPageInput { client, jql: String, fields: Option<Vec<FieldId>>, max_results: u32, token: Option<String> }` -> `SearchPageOutput { issues: Vec<IssueSummary>, next_token: Option<String> }` | read; one page per call (F26) with `JiraClient::search_page_at`. Jira gives back the input token: `jira.pagination_stalled`. An empty token: `jira.invalid_input`. | 9m | exponential(5, 1s) |
 | `jira_edit_issue` | `EditIssueInput { client, issue, set_summary: Option<String>, add_labels, remove_labels, fields, notify_users: Option<bool> }` -> `EditIssueOutput {}` | PUT idempotent | 9m | exponential(5, 1s) |
 | `jira_transition_to_status` | `TransitionInput { client, issue, target: StatusTarget, fields: Map<String, Value> }` -> `TransitionOutput { outcome: TransitionKind, status: StatusSummary, via: Option<TransitionId> }` (`moved` or `already_there`) | state check | 42m | exponential(5, 2s) |
-| `jira_add_comment` | `AddCommentInput { client, issue, text: String, resend_after_negative_lookup: bool, settle_secs: Option<u64> }` -> `CommentOutput { id: CommentId, outcome: CreateKind }` | marker from `ctx.idempotency_key()`; host rule | 42m | exponential(5, 2s) |
+| `jira_add_comment` | `AddCommentInput { client, issue, text: String, resend_after_negative_lookup: bool, settle_secs: Option<u64> }` -> `CommentOutput { id: CommentId, outcome: CreateKind }` | marker from `ctx.idempotency_key()`; host rule; at most `COMMENT_LOOKUP_PAGES` comment pages (V96) | 70m | exponential(5, 2s) |
 | `jira_delete_issue` | `DeleteIssueInput { client, issue, delete_subtasks: bool }` -> `DeleteOutput { outcome: DeleteKind }` (`deleted` or `gone_after_retry`) | DELETE idempotent; a 404 on any attempt after the first gives `gone_after_retry` (V39, V70) | 9m | exponential(5, 1s) |
 | `jira_watch_issue` | `WatchIssueInput { client, issue, route: SignalRoute }` -> `WatchOutput { issue: IssueSummary }` | GET issue, GET property, PUT property (merge route), PUT edit label `autumn-tracked`: all idempotent (R6, G10). It keeps each entry of another run as it is. | 42m | exponential(5, 1s) |
 
@@ -2002,7 +2015,8 @@ New public items (V40), re-exported from `lib.rs`:
 - `activities::{GET_ISSUE, READ_START_TO_CLOSE (9m), WRITE_START_TO_CLOSE
   (9m), LONG_WRITE_START_TO_CLOSE (42m), get_issue_retry()}`;
 - `activities::{MAX_TRANSPORT_TIMEOUT (60 s), SAN_MATEO_CALLS_PER_SEND (4)}`
-  (V64; not re-exported at the root);
+  (V64) and `activities::{COMMENT_LOOKUP_PAGES (3), COMMENT_START_TO_CLOSE
+  (70m)}` (V96), not re-exported at the root;
 - `wait::{MAX_POLL_ROUNDS (3000), MAX_SIGNAL_ROUNDS (1000), LAST_READ_MARGIN
   (46 min), drain_jira_signals}` (V83), re-exported at the root;
 - the enums `CreateKind { Created, Found }`, `TransitionKind { Moved,
@@ -2086,7 +2100,7 @@ Steps (D12, W2, B1, B5, Y2):
 2. One read: `jira_get_issue` on `ctx.queue_name()` with
    `execute_activity_with_opts(&jira_get_issue_info(), read,
    Some(ctx.queue_name()), None, None)` [V GOTCHA]. The info defaults are
-   exponential(5, 1s) and 3m. At the target: `Reached { source: Initial }`.
+   exponential(5, 1s) and 9m (V64). At the target: `Reached { source: Initial }`.
    So an issue already done returns at once (R6). A failure of this first
    read keeps its error type and ends the wait.
 3. `deadline = min(ctx.system_now() + timeout, ctx.deadline() -
@@ -2492,8 +2506,13 @@ Each tool has one job, and the code says it in one line (R9):
   `pg_advisory_lock` [V W20], `HarvestRunner::start` with
   `HarvestMode::External` [V], a per-run queue and nonce ids.
 - autumn app (in process, `TestApp` [V ADR 0006]): `SanMateoPlugin` then
-  `JiraPlugin` (san_mateo mode, sink = `HarvestSignalBridge` with
-  `allow_workflow("incident_flow")`), route `GET /incidents/{key}`. CSRF on.
+  `JiraPlugin` (san_mateo mode, `sink_for_all_actors` = `HarvestSignalBridge`
+  with `allow_workflow("incident_flow")`), route `GET /incidents/{key}`. CSRF
+  on. The bot account `acct-bot` makes the API writes and is in
+  `ignore_actor_account_ids`. The bridge is a sink for all actors (V71), so
+  a status that the bot sets still signals the run. The bridge makes no
+  write, so it cannot make a loop.
+- `incident_flow` calls `drain_jira_signals(ctx)?` as its last step (V84).
 - A rustls crypto provider is installed once in `main` before any client is
   built, when spike S3 shows two providers in this graph (B18).
 
