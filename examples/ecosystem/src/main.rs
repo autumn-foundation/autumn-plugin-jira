@@ -381,11 +381,15 @@ impl StopLog {
 
 /// Stops the worker in `runner`, when there is one, and records the stop
 /// in `flag`.
+///
+/// The flag records a real stop only. A deadline in the worker swap of
+/// step [6] can leave no worker. Then the flag stays `false`, so a test
+/// sees that no worker stopped (R2D-integration-7).
 async fn stop_worker(runner: Option<HarvestRunner>, flag: &AtomicBool) {
     if let Some(runner) = runner {
         runner.stop().await;
+        StopLog::stopped(flag);
     }
-    StopLog::stopped(flag);
 }
 
 /// [`run`] with the time limit `limit`. `stops` records each stop.
