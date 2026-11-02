@@ -2287,10 +2287,19 @@ fn pg_runtime_violations(path: &str, text: &str) -> Vec<String> {
         .collect()
 }
 
+/// The scan reads every crate, with its tests and its examples, and the
+/// ecosystem. A Postgres test in a crate example runs in CI too
+/// (R3-tests-docs-guards-1).
 #[test]
 fn postgres_tests_share_one_runtime() {
-    let mut files = files_under(&root().join("crates/autumn-jira-harvest/tests"), &["rs"]);
+    let mut files = files_under(&root().join("crates"), &["rs"]);
     files.extend(files_under(&root().join("examples/ecosystem/src"), &["rs"]));
+    assert!(
+        files
+            .iter()
+            .any(|f| rel(f) == "crates/autumn-jira-harvest/examples/harvest_workflow.rs"),
+        "the scan reads the crate examples"
+    );
     assert_files(
         "postgres_tests_share_one_runtime",
         &files,
