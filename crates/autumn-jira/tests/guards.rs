@@ -2587,10 +2587,15 @@ fn docs_make_no_stale_claims_sees_each_claim() {
     assert_eq!(check::stale_claim_violations(p, good), NONE);
 }
 
+/// The docs that an ADR can cite with `The docs say "..."`.
+fn cited_docs() -> Vec<PathBuf> {
+    claim_docs()
+}
+
 #[test]
 fn adrs_cite_real_doc_text() {
-    let mut corpus = read("README.md");
-    for doc in claim_docs() {
+    let mut corpus = String::new();
+    for doc in cited_docs() {
         corpus.push_str(&std::fs::read_to_string(doc).unwrap());
     }
     let mut found = Vec::new();
@@ -2612,6 +2617,17 @@ fn adrs_cite_real_doc_text_sees_a_missing_quote() {
     );
     let corpus = "The opt-in is best effort; no duplicate here, mostly.";
     assert_eq!(check::cited_doc_violations("a", adr, corpus), NONE);
+    // A quote in another ADR is not a doc that says the text (R2E-tests-guards-2).
+    let cite = "The docs say \"gone text\".";
+    let other_adr = "Other ADR: The docs say \"gone text\".";
+    assert_eq!(check::cited_doc_violations("a", cite, other_adr).len(), 1);
+}
+
+#[test]
+fn adrs_cite_real_doc_text_reads_no_adr() {
+    let corpus = cited_docs();
+    assert!(corpus.iter().all(|p| !rel(p).starts_with("docs/adr")), "{corpus:?}");
+    assert!(corpus.iter().any(|p| rel(p) == "README.md"), "{corpus:?}");
 }
 
 #[test]
