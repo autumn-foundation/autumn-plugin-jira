@@ -11,7 +11,7 @@ use serde_json::{Map, Value, json};
 use crate::error::{JiraError, Result};
 
 /// An ADF document with a valid `doc` root, version 1.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Adf(Value);
 
 impl Adf {
@@ -19,12 +19,10 @@ impl Adf {
     /// empty paragraph, never an empty text node.
     #[must_use]
     pub fn text(text: &str) -> Self {
-        let _ = text;
-        Self(json!({}))
+        Self(doc(&paragraphs(text)))
     }
 
     /// Starts a builder.
-    #[must_use]
     pub fn builder() -> AdfBuilder {
         AdfBuilder::default()
     }
@@ -33,7 +31,7 @@ impl Adf {
     /// its text.
     #[must_use]
     pub fn to_plain_text(&self) -> String {
-        String::new()
+        plain_text(&self.0)
     }
 
     /// Returns `true` when the plain text holds `needle`.
@@ -44,8 +42,10 @@ impl Adf {
 
     /// Adds one paragraph per line of `text` at the end.
     #[must_use]
-    pub fn with_paragraph(self, text: &str) -> Self {
-        let _ = text;
+    pub fn with_paragraph(mut self, text: &str) -> Self {
+        if let Some(content) = self.0.get_mut("content").and_then(Value::as_array_mut) {
+            content.extend(paragraphs(text));
+        }
         self
     }
 
@@ -62,8 +62,17 @@ impl Adf {
     /// `JiraError::InvalidInput` when the root is not `{"type": "doc",
     /// "version": 1, "content": [...]}`.
     pub fn from_value(value: Value) -> Result<Self> {
-        let _ = value;
-        Err(JiraError::invalid("adf", "not ready"))
+        let ok = value.get("type").and_then(Value::as_str) == Some("doc")
+            && value.get("version").and_then(Value::as_u64) == Some(1)
+            && value.get("content").is_some_and(Value::is_array);
+        if ok {
+            Ok(Self(value))
+        } else {
+            Err(JiraError::invalid(
+                "adf",
+                "the root must be {\"type\": \"doc\", \"version\": 1, \"content\": [...]}",
+            ))
+        }
     }
 }
 
@@ -154,43 +163,82 @@ pub struct AdfBuilder {
 
 impl AdfBuilder {
     /// Adds a paragraph. A `\n` gives a hard break.
-    pub fn paragraph(self, text: &str) -> Self {
-        let _ = text;
+    pub fn paragraph(mut self, text: &str) -> Self {
+        self.content.push(paragraph(&inline_lines(text)));
         self
     }
 
     /// Adds a paragraph of spans.
-    pub fn paragraph_spans(self, spans: &[Span]) -> Self {
-        let _ = spans;
+    pub fn paragraph_spans(mut self, spans: &[Span]) -> Self {
+        let mut inline = Vec::new();
+        for span in spans.iter().filter(|s| !s.text.is_empty()) {
+            let mark = match &span.mark {
+                Mark::Plain => None,
+                Mark::Strong => Some(json!({"type": "strong"})),
+                Mark::Em => Some(json!({"type": "em"})),
+                Mark::Code => Some(json!({"type": "code"})),
+                Mark::Link(url) => {
+                    if !is_https_url(url) {
+                        self.error = Some("a link must be https:// with a host and no space");
+                    }
+                    Some(json!({"type": "link", "attrs": {"href": url}}))
+                }
+            };
+            let mut node = Map::new();
+            node.insert("type".to_owned(), json!("text"));
+            node.insert("text".to_owned(), json!(span.text));
+            if let Some(mark) = mark {
+                node.insert("marks".to_owned(), json!([mark]));
+            }
+            inline.push(Value::Object(node));
+        }
+        self.content.push(paragraph(&inline));
         self
     }
 
     /// Adds a heading. `level` is 1 to 6, else `build` fails.
-    pub fn heading(self, level: u8, text: &str) -> Self {
-        let _ = (level, text);
+    pub fn heading(mut self, level: u8, text: &str) -> Self {
+        if !(1..=6).contains(&level) {
+            self.error = Some("a heading level must be 1 to 6");
+        }
+        self.content.push(json!({
+            "type": "heading",
+            "attrs": {"level": level},
+            "content": inline_lines(text),
+        }));
         self
     }
 
     /// Adds a bullet list with one item for each entry.
-    pub fn bullet_list(self, items: &[&str]) -> Self {
-        let _ = items;
+    pub fn bullet_list(mut self, items: &[&str]) -> Self {
+        self.content.push(list("bulletList", items));
         self
     }
 
     /// Adds an ordered list with one item for each entry.
-    pub fn ordered_list(self, items: &[&str]) -> Self {
-        let _ = items;
+    pub fn ordered_list(mut self, items: &[&str]) -> Self {
+        self.content.push(list("orderedList", items));
         self
     }
 
     /// Adds a code block.
-    pub fn code_block(self, language: Option<&str>, text: &str) -> Self {
-        let _ = (language, text);
+    pub fn code_block(mut self, language: Option<&str>, text: &str) -> Self {
+        let mut node = Map::new();
+        node.insert("type".to_owned(), json!("codeBlock"));
+        if let Some(language) = language {
+            node.insert("attrs".to_owned(), json!({"language": language}));
+        }
+        node.insert(
+            "content".to_owned(),
+            Value::Array(text_node(text).into_iter().collect()),
+        );
+        self.content.push(Value::Object(node));
         self
     }
 
     /// Adds a horizontal rule.
-    pub fn rule(self) -> Self {
+    pub fn rule(mut self) -> Self {
+        self.content.push(json!({"type": "rule"}));
         self
     }
 
@@ -201,15 +249,95 @@ impl AdfBuilder {
     /// `JiraError::InvalidInput` for a heading level out of 1 to 6, or a link
     /// that is not `https://`.
     pub fn build(self) -> Result<Adf> {
-        let _ = (self.content, self.error);
-        Err(JiraError::invalid("adf", "not ready"))
+        match self.error {
+            Some(reason) => Err(JiraError::invalid("adf", reason)),
+            None => Ok(Adf(doc(&self.content))),
+        }
     }
 }
 
-/// Keeps `Map` in use for the GREEN code.
-#[allow(dead_code, reason = "the GREEN code uses it")]
-fn empty_map() -> Map<String, Value> {
-    Map::new()
+/// Returns the root node.
+fn doc(content: &[Value]) -> Value {
+    json!({"type": "doc", "version": 1, "content": content})
+}
+
+/// Returns a text node, or `None` for empty text (F38).
+fn text_node(text: &str) -> Option<Value> {
+    (!text.is_empty()).then(|| json!({"type": "text", "text": text}))
+}
+
+fn paragraph(inline: &[Value]) -> Value {
+    json!({"type": "paragraph", "content": inline})
+}
+
+/// One paragraph for each line.
+fn paragraphs(text: &str) -> Vec<Value> {
+    text.split('\n')
+        .map(|line| paragraph(&text_node(line).into_iter().collect::<Vec<_>>()))
+        .collect()
+}
+
+/// Inline nodes for text: a `\n` gives a hard break.
+fn inline_lines(text: &str) -> Vec<Value> {
+    let mut inline = Vec::new();
+    for (i, line) in text.split('\n').enumerate() {
+        if i > 0 {
+            inline.push(json!({"type": "hardBreak"}));
+        }
+        inline.extend(text_node(line));
+    }
+    inline
+}
+
+fn list(kind: &str, items: &[&str]) -> Value {
+    let items: Vec<Value> = items
+        .iter()
+        .map(|item| json!({"type": "listItem", "content": [paragraph(&inline_lines(item))]}))
+        .collect();
+    json!({"type": kind, "content": items})
+}
+
+/// `https://` and a host, with no white space or control char.
+fn is_https_url(url: &str) -> bool {
+    url.strip_prefix("https://").is_some_and(|rest| {
+        !rest.is_empty()
+            && !rest.starts_with('/')
+            && !rest.chars().any(|c| c.is_whitespace() || c.is_control())
+    })
+}
+
+/// The node types whose children are inline: their text joins with no separator.
+const INLINE_PARENTS: [&str; 3] = ["paragraph", "heading", "codeBlock"];
+
+/// Returns the plain text of a node.
+fn plain_text(node: &Value) -> String {
+    let Some(map) = node.as_object() else {
+        return String::new();
+    };
+    if let Some(text) = map.get("text").and_then(Value::as_str) {
+        return text.to_owned();
+    }
+    let kind = map.get("type").and_then(Value::as_str).unwrap_or("");
+    if kind == "hardBreak" {
+        return "\n".to_owned();
+    }
+    if let Some(text) = map
+        .get("attrs")
+        .and_then(|a| a.get("text"))
+        .and_then(Value::as_str)
+    {
+        return text.to_owned();
+    }
+    let children = map
+        .get("content")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
+    let parts = children.iter().map(plain_text);
+    if INLINE_PARENTS.contains(&kind) {
+        parts.collect()
+    } else {
+        parts.collect::<Vec<_>>().join("\n")
+    }
 }
 
 #[cfg(test)]
@@ -411,7 +539,7 @@ mod tests {
         #[test]
         fn plain_text_round_trip_proptest(text in any::<String>()) {
             let adf = Adf::text(&text);
-            prop_assert_eq!(adf.to_plain_text(), text.clone());
+            prop_assert_eq!(adf.to_plain_text(), text.as_str());
             prop_assert!(!has_empty_text(adf.as_value()));
             prop_assert!(adf.contains_text(&text));
             let back = Adf::from_value(adf.as_value().clone()).unwrap();

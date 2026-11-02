@@ -65,8 +65,34 @@ pub enum JqlField {
 impl JqlField {
     /// Returns the JQL name, or `None` for a bad custom field or property.
     fn name(&self) -> Option<String> {
-        let _ = self;
-        None
+        let name = match self {
+            Self::Project => "project",
+            Self::Key => "key",
+            Self::Labels => "labels",
+            Self::Status => "status",
+            Self::StatusCategory => "statusCategory",
+            Self::IssueType => "issuetype",
+            Self::Assignee => "assignee",
+            Self::Created => "created",
+            Self::Updated => "updated",
+            Self::Custom(0) => return None,
+            Self::Custom(n) => return Some(format!("cf[{n}]")),
+            Self::Property { key, path } => {
+                return (is_property_key(key) && is_property_path(path))
+                    .then(|| format!("issue.property[{key}].{path}"));
+            }
+        };
+        Some(name.to_owned())
+    }
+
+    fn checked_name(&self) -> Result<String> {
+        self.name().ok_or_else(|| {
+            JiraError::invalid(
+                "jql field",
+                "a custom field must be above 0; a property needs a key of \
+                 [A-Za-z0-9._-]{1,255} and a path of [A-Za-z0-9_] names joined by '.'",
+            )
+        })
     }
 }
 
@@ -96,8 +122,7 @@ impl JqlClause {
     ///
     /// `JiraError::InvalidInput` for a bad field or a control char in the value.
     pub fn eq(self, value: impl AsRef<str>) -> Result<JqlCondition> {
-        let _ = value;
-        Err(JiraError::invalid("jql", "not ready"))
+        self.binary("=", value.as_ref())
     }
 
     /// `field != "value"`.
@@ -106,8 +131,7 @@ impl JqlClause {
     ///
     /// `JiraError::InvalidInput` for a bad field or a control char in the value.
     pub fn ne(self, value: impl AsRef<str>) -> Result<JqlCondition> {
-        let _ = value;
-        Err(JiraError::invalid("jql", "not ready"))
+        self.binary("!=", value.as_ref())
     }
 
     /// `field in ("a", "b")`.
@@ -117,8 +141,15 @@ impl JqlClause {
     /// `JiraError::InvalidInput` for a bad field, an empty list or a control
     /// char in a value.
     pub fn in_<S: AsRef<str>>(self, values: &[S]) -> Result<JqlCondition> {
-        let _ = values;
-        Err(JiraError::invalid("jql", "not ready"))
+        let name = self.field.checked_name()?;
+        if values.is_empty() {
+            return Err(JiraError::invalid("jql value", "an in list needs a value"));
+        }
+        let quoted = values
+            .iter()
+            .map(|v| quote(v.as_ref()))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(JqlCondition(format!("{name} in ({})", quoted.join(", "))))
     }
 
     /// `field is EMPTY`.
@@ -127,7 +158,13 @@ impl JqlClause {
     ///
     /// `JiraError::InvalidInput` for a bad field.
     pub fn is_empty(self) -> Result<JqlCondition> {
-        Err(JiraError::invalid("jql", "not ready"))
+        let name = self.field.checked_name()?;
+        Ok(JqlCondition(format!("{name} is EMPTY")))
+    }
+
+    fn binary(self, op: &str, value: &str) -> Result<JqlCondition> {
+        let name = self.field.checked_name()?;
+        Ok(JqlCondition(format!("{name} {op} {}", quote(value)?)))
     }
 }
 
@@ -135,8 +172,11 @@ impl Jql {
     /// `project = "KEY"`: a bounded start. Jira rejects an unbounded search.
     #[must_use]
     pub fn project(key: &ProjectKey) -> Self {
-        let _ = key;
-        Self::raw("")
+        Self {
+            text: format!("project = {}", jql_quote(key.as_str())),
+            order_at: None,
+            raw: false,
+        }
     }
 
     /// Starts a clause on `name`.
@@ -147,15 +187,46 @@ impl Jql {
     /// Adds `AND condition`. Raw text goes in parentheses first, so an `OR`
     /// in it cannot change the meaning.
     #[must_use]
-    pub fn and(self, condition: JqlCondition) -> Self {
-        let _ = condition;
+    pub fn and(mut self, condition: JqlCondition) -> Self {
+        if self.raw {
+            self.text = format!("({})", self.text);
+            self.raw = false;
+        }
+        let JqlCondition(text) = condition;
+        let clause = format!(" AND {text}");
+        match self.order_at {
+            Some(at) => {
+                self.text.insert_str(at, &clause);
+                self.order_at = Some(at + clause.len());
+            }
+            None => self.text.push_str(&clause),
+        }
         self
     }
 
     /// Adds a sort key. A bad custom field or property is skipped.
     #[must_use]
-    pub fn order_by(self, field: JqlField, order: Order) -> Self {
-        let _ = (field, order);
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "builder style: the caller hands over the field"
+    )]
+    pub fn order_by(mut self, field: JqlField, order: Order) -> Self {
+        let Some(name) = field.name() else {
+            return self;
+        };
+        let order = match order {
+            Order::Asc => "ASC",
+            Order::Desc => "DESC",
+        };
+        if self.order_at.is_some() {
+            self.text.push_str(", ");
+        } else {
+            self.order_at = Some(self.text.len());
+            self.text.push_str(" ORDER BY ");
+        }
+        self.text.push_str(&name);
+        self.text.push(' ');
+        self.text.push_str(order);
         self
     }
 
@@ -183,9 +254,30 @@ impl fmt::Display for Jql {
 }
 
 /// Quotes a value. A control char gives `InvalidInput`.
-#[allow(dead_code, reason = "the GREEN code uses it")]
 fn quote(value: &str) -> Result<String> {
+    if value.chars().any(char::is_control) {
+        return Err(JiraError::invalid(
+            "jql value",
+            "a value must not hold a control char",
+        ));
+    }
     Ok(jql_quote(value))
+}
+
+/// 1 to 255 chars of `[A-Za-z0-9._-]`.
+fn is_property_key(key: &str) -> bool {
+    (1..=255).contains(&key.len())
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+/// Names of `[A-Za-z0-9_]` joined by `.`.
+fn is_property_path(path: &str) -> bool {
+    path.len() <= 255
+        && path
+            .split('.')
+            .all(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))
 }
 
 #[cfg(test)]
