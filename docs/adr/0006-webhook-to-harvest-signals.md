@@ -1,6 +1,7 @@
 # ADR 0006: From Jira webhooks to harvest signals
 
-- Status: Accepted
+- Status: Accepted. Amended for design v3 (as built): the end-of-wait
+  drain.
 - Date: 2026-11-02
 
 ## Context
@@ -39,6 +40,17 @@ records the wall clock in history.
   `jira_get_issue`. The workflow checks the issue id and the timestamp of
   each signal. Webhooks make the wait fast. The poll makes it correct when a
   delivery is lost.
+- Drain (design v3): before it returns, `await_issue_status` takes each
+  `jira.event` signal that is already in the history
+  (`ctx.drain_signals_raw`). Strict replay in harvest 0.8 (the sweep,
+  `replay_check` and `WorkflowReplayer`) gives `EarlyCompletion` for a
+  completed history that ends with signals that no code read. A minimal
+  `race(signal, timer)` workflow that ignores signals failed on 18 of 64
+  seeds without the drain, and passed on 64 of 64 with it. Live mode did
+  not fail. A drain on the `TimedOut` path only does not help: a `Reached`
+  result can also leave signals in the history.
+- `poll_every` must be 1 s or more (`MIN_POLL_EVERY`). A zero poll gives a
+  hot loop of reads.
 
 ## Consequences
 
@@ -51,4 +63,13 @@ records the wall clock in history.
   watchers at the same moment can lose one route.
 - Bad: the bridge resolves runs on one shard. A multi-shard engine needs a
   fan-out lookup.
+- Bad: the drain takes each `jira.event` signal that came before the end of
+  the wait. A workflow that reads `jira.event` itself after the wait does
+  not get them. A later wait reads the issue first, so it does not need
+  them.
+- Bad: the bridge returns 503 at the first transient route error. The
+  routes before it can already have their signal. Jira sends the delivery
+  again, and those routes then give `Duplicate`, so the result is correct.
+- Upstream: the `EarlyCompletion` behaviour of strict replay is a harvest
+  0.8 issue. When harvest fixes it, the drain can go.
 - Later: issue-keyed workflows started with `signal_with_start`.

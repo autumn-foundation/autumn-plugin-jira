@@ -1,8 +1,11 @@
 # Plan: autumn-plugin-jira and the ecosystem example
 
-- Status: Accepted (design v2). This file is the only source for the
-  implementers. Follow it literally. A change to a public signature changes
-  this file in the same commit.
+- Status: Accepted (design v3, as built). This file is the only source for
+  the implementers. Follow it literally. A change to a public signature
+  changes this file in the same commit. Design v3 records the code of the
+  five library crates as built. Where this file and the code differ, the
+  code is correct and this file needs a fix. Section 2.1 lists each change
+  from design v2.
 - Date: 2026-11-02
 - Style: ASD-STE100. Short sentences. Active voice. Present tense.
 - Inputs: `docs/planning/brainstorm.md`, `docs/planning/reverse-brainstorm.md`,
@@ -19,7 +22,7 @@
 ## Contents
 
 1. Goals and non-goals
-2. Decisions
+2. Decisions (2.1: as-built changes)
 3. Workspace and crates
 4. Public API: `autumn-jira`
 5. Public API: `autumn-jira-fake`
@@ -105,6 +108,68 @@ row.
 | D14 | The ecosystem example is a separate cargo workspace `examples/ecosystem` with its own `Cargo.lock` and CI job. `harvest-camel` needs `autumn-harvest-plugin` with `connectors`, which turns on autumn-web default features and the C builds `pq-src` and `libsqlite3-sys` [V]. | 0008 |
 | D15 | Verified pure core `autumn_jira::policy`, mirrored in `verus/policy.rs`. `verus_bodies_match` and a drift-completeness test. Verus runs in CI only. | 0005 |
 
+### 2.1 As-built changes (design v3)
+
+Each row is one change from design v2. The section column names the part
+of this file that now shows the change. The waves of section 17.1 found
+these changes. The wave reports give the full text.
+
+| # | Change | Reason | Section |
+|---|---|---|---|
+| V1 | `IdempotencyKey` is in `ids`. `client` and the crate root re-export it. | WP1 owns its test (AC1). `client` belongs to WP3. | 4.1, 4.2 |
+| V2 | `MarkerRef` is in `error`, with `MarkerRef::label` and `MarkerRef::comment`. `client` re-exports it. | `JiraError::OutcomeUnknown` holds it. | 4.5, 4.6 |
+| V3 | The clause methods return `Result<JqlCondition>`. `Jql::and` takes a `JqlCondition`. | An incomplete clause cannot go into `and`. | 4.7 |
+| V4 | New `policy::scale_permille`. `apply_jitter` calls it. | The multiply needs proof code (`nonlinear_arith`) in the Verus body, so a proptest checks it, not a body match. | 6 |
+| V5 | `decide` retries `UnsafeWrite` with `NotSent` while attempts are left. | The request did not leave the process. Design v2 gave no rule. | 6 |
+| V6 | Small public helpers in `ids`, `model`, `request`, `webhook` and `error`. | Tests and adapters need them. | 4.2 to 4.8 |
+| V7 | Model `Deserialize` reads the Jira wire format through `model::wire`. `Serialize` writes the Rust field names. | A harvest history holds `IssueSummary`, `StatusSummary` and `IssueRefs`. | 4.5 |
+| V8 | The attempt loop is in `client/call.rs`. | One file for the classify glue, the status map and `Retry-After`. | 3.1, 7.1 |
+| V9 | `ApiRequest` builders, `Method::as_str`, `DirectBackend::site`, `SanMateoBackend::target`, `SanMateoTarget` builders. | Tests and adapters build requests and targets. | 4.4 |
+| V10 | New `JiraClient::account_id`. | One cached `GET /myself` for the own account id. | 4.5 |
+| V11 | New `JiraClient::search_page_at` and `client::IssuePage`. | `jira_search_page` and camel `search` read one page at a given token. | 4.5 |
+| V12 | New `JiraError::may_have_run` and `error::NOT_SENT_NETWORK_CODES`. | One "sent" rule for harvest and camel. The san-mateo map test pins the codes. | 4.6, 7.2 |
+| V13 | Five more `san_mateo::Error` variants map to `NotSent { transient: false }`. | The design v2 table had no row for them. | 4.4 |
+| V14 | Cloud id discovery rules for a wrong provider, a bad metadata value and a failure inside `send`. | Design v2 did not give them. | 4.4 |
+| V15 | `get_issue_property` gives `Ok(None)` for each 404. | Jira gives 404 for a missing issue and for a missing property. | 4.5 |
+| V16 | `SearchPager::next_page` gives the error on the page where the stop happens. | One simple loop. The issues of that page are lost (known limit). | 4.5 |
+| V17 | The comment lookup reads the 100 newest comments, once, with no delay. | The comment list is strongly consistent (A3). | 7.1 |
+| V18 | `parse_event` takes the actor from `comment.author` when a comment event has no `user`. | The Jira webhook page shows no top-level `user` on comment events. | 4.8 |
+| V19 | `FakeJira` has default constants, a `FakeProject` builder and a fixed workflow with ids. | Tests and examples need stable names and ids. | 5 |
+| V20 | Exact fault rules: `BadJson` keeps the 2xx status of the op, faults apply after the auth check, 429 entries share the fault queue. | Design v2 left these open. | 5 |
+| V21 | The fallback also serves another site, another cloud id, an unknown OAuth client and an unknown Bearer token. | Two fakes then serve two tenants (EX7). | 5.1 |
+| V22 | The spec fixture has 23 schemas. The count schema is `JQLCountResultsBean`. | The spec has no schema `IssueCount`. | 5.3 |
+| V23 | The fake has its own HMAC over `sha2`. It has no `hmac` dependency. | It shares no code with the client (D13). | 3.2, 5 |
+| V24 | `autumn-plugin-jira` has the public modules `config` and `webhook_config`. | Apps and tests read the config and call the pure boot check. | 8, 8.1, 8.4 |
+| V25 | `JiraPlugin` has a manual `Default`. The prefix builder normalizes its input. | The default prefix is `/jira`. | 8 |
+| V26 | A startup error is `AutumnError::internal_server_error_msg(e.to_string())`. | The panic of `TestApp` and the boot error of `run()` then show the `Display` text with the fix. | 8.2 |
+| V27 | `SanMateoAfterJira` comes from the health indicator registry. | A re-check in `on_startup` does not work in `TestApp`. | 8.2 |
+| V28 | san_mateo mode without `connection_id`: `client()` never sends and gives `Config { code: "no_connection_id" }`. | A multi-tenant app uses `for_connection` only. | 8, 8.2 |
+| V29 | One more conflict: `transport(..)` with `client(..)`. | A prebuilt client has its own transport. | 8.1 |
+| V30 | Health stops the call at 90% of `timeout_ms` and adds `error` to the details. | A slow Jira gives `DOWN` with `timeout`, not the `UNKNOWN` of autumn. | 8.3 |
+| V31 | The route answers 503 before the start. No delivery id counts as `undecodable`. A panic counts as `handler_failed`. | Jira sends the delivery again. The route never answers 4xx after verification. | 8.4 |
+| V32 | The S1 pass test is in `install.rs`. `spike_mount.rs` keeps only the `nest` evidence. | AC24 names `install.rs`. | 16.1, 17.1 |
+| V33 | WP4 built service and health before the route pipeline. | The route needs the started runtime cell, and the tests read the counters from the health details. | 18 |
+| V34 | `autumn_app` takes the real path when `JIRA_SITE` is set. | The plugin then names a missing `JIRA_API_TOKEN`. The autumn text for a missing webhook secret names no variable. | 12 |
+| V35 | `await_issue_status` drains `jira.event` before it returns. | Strict replay of harvest 0.8 gives `EarlyCompletion` for a history that ends with signals that no code read. | 9.3, ADR 0006 |
+| V36 | `poll_every` under `MIN_POLL_EVERY` (1 s) fails with `jira.invalid_input`. | A zero poll gives a hot loop of reads. | 9.3 |
+| V37 | `start_to_close` is 3m (get, search), 5m (edit, delete) and 12m (create, transition, comment, watch). | Durable `worst_case` at 60 s for each request is 390 s for a marked write and 650 s for a checked write. The watch makes four calls: 520 s. | 7.2, 9.2, ADR 0003 |
+| V38 | After a maybe-sent attempt, a lookup that fails with a retryable error stays `jira.outcome_pending`. | Else a lookup that gets a 429 (`sent = false`) lets the next attempt send again. | 7.2, ADR 0003 |
+| V39 | `jira_delete_issue` gives `gone_after_retry` for a 404 after a maybe-sent attempt. | The delete rule of 7.1, across harvest attempts. | 9.2 |
+| V40 | New harvest public items: the timeout constants, the `*Kind` enums, `BridgeCounters`, the input builders, the activity fns and their `*_info()`. | Workflows and tests use them. | 9 |
+| V41 | `failure_for` sets `details.sent` from `JiraError::may_have_run`. | One rule in the core (V12). | 9.1 |
+| V42 | `routes_from_property` gives `Signalled` for a route that passes both checks. It means "to signal". | It keeps the design v2 signature. | 9.4 |
+| V43 | The deadline tests of the wait use the seeded `Simulation`. | In `WorkflowTestEnv`, `system_now` reads the real clock. | 9.3, 13 |
+| V44 | New `Operation` enum and public `EndpointOptions` fields. | A typed form of the URI path and the options. | 10 |
+| V45 | The URI parser applies the Ops column and the required options. An unknown `connection` gives `CamelError::Config`. | Each wrong URI fails at route add. | 10 |
+| V46 | An override header equal to the option passes without `allowHeaderOverrides`. | The `JiraIssueKey` out header of an earlier step on the same issue is common. | 10 |
+| V47 | A `JiraJql` header next to the `project` option always fails. | Raw JQL drops the project filter. | 10 |
+| V48 | Exact reply bodies, out headers, `maxPages` and `throwExceptionOnFailure` rules. | Design v2 left these open. | 10 |
+| V49 | `to_camel_error` gives `Io` or `ValidationError` when the harvest HTTP rule and `retryable` disagree. | The retry class holds for each value. | 10 |
+| V50 | The component does not call `.durable()`. The app registers durable clients. | The app owns the client settings. | 10 |
+| V51 | `live.rs` has five own ignored cases and does not run the suite. | The suite needs a `FakeJira`. | 13 |
+| V52 | Two suite cases are in `core/t/client.rs` over `MemoryTransport`. | The fake cannot move an issue or serve a short page that is not the last. | 16.1 |
+| V53 | Test and coverage are one CI job. The weekly steps are in the jobs. | The tests run once, under coverage. | 14 |
+
 ---
 
 ## 3. Workspace and crates
@@ -131,15 +196,18 @@ autumn-plugin-jira/
   .github/workflows/ci.yml
   crates/
     autumn-jira/              # core client
-      src/ tests/ examples/embedded.rs
+      src/ (client.rs + client/{call,idempotent,pager,settings}.rs)
+      tests/ examples/embedded.rs
     autumn-jira-fake/         # FakeJira
       src/ tests/ tests/fixtures/schemas.json
     autumn-plugin-jira/       # autumn-web 0.9 plugin
-      src/ tests/ examples/autumn_app/{main.rs, autumn.toml, autumn-prod.toml}
+      src/{config, webhook_config, plugin, runtime, service, health, webhook, secrets, error, testing}.rs
+      tests/ examples/autumn_app/{main.rs, autumn.toml, autumn-prod.toml}
     autumn-jira-harvest/      # harvest activities, wait helper, bridge
       src/ tests/ examples/harvest_workflow.rs
     autumn-jira-camel/        # jira: component
-      src/ tests/ examples/camel_route.rs
+      src/{component, options, headers, input, producer, error}.rs
+      tests/ examples/camel_route.rs
   examples/
     ecosystem/                # SEPARATE workspace
       Cargo.toml  Cargo.lock  README.md  compose.yaml  autumn.toml
@@ -152,10 +220,10 @@ autumn-plugin-jira/
 | Crate | Purpose | Normal dependencies | Features |
 |---|---|---|---|
 | `autumn-jira` | Client, ids, models, ADF, JQL, errors, verified `policy`, `JiraBackend`, `DirectBackend`, `SanMateoBackend`, webhook types and signature check, `EventSink`, `WRITES`. | `san-mateo = "0.1"`, `async-trait 0.1`, `serde 1` (`derive`), `serde_json 1`, `chrono 0.4` (no default; `clock`, `serde`), `thiserror 2`, `tokio 1` (`time`, `sync`), `hmac 0.12`, `sha2 0.10`, `data-encoding 2`, `percent-encoding 2`, `tracing 0.1`. | none |
-| `autumn-jira-fake` | `FakeJira`: a stateful in-memory Jira Cloud. | `san-mateo = "0.1"` (transport types only), `async-trait`, `serde_json`, `hmac`, `sha2`, `base64 0.22`, `tokio` (`time`, `sync`), `chrono`. NOT `autumn-jira` (guard test). | none |
+| `autumn-jira-fake` | `FakeJira`: a stateful in-memory Jira Cloud. | `san-mateo = "0.1"` (transport types only), `async-trait`, `serde_json`, `sha2` (own HMAC code, no `hmac`), `base64 0.22`, `thiserror`, `tokio` (`time`, `sync`), `chrono`. NOT `autumn-jira` (guard test). | none |
 | `autumn-plugin-jira` | autumn-web plugin: `[jira]` config, `JiraService`, health, webhook route, dispatch. | `autumn-jira`, `autumn-web = { version = "0.9", default-features = false }`, `autumn-plugin-san-mateo = "0.2"`, `san-mateo`, `async-trait`, `serde`, `serde_json`, `toml 0.9`, `thiserror`, `tracing`, `tokio`. | `testing`: optional dep `autumn-jira-fake`; test helpers. |
 | `autumn-jira-harvest` | Activities, `await_issue_status`, `HarvestSignalBridge`. | `autumn-jira`, `autumn-harvest = "0.8.0"` (default features), `san-mateo`, `async-trait`, `serde`, `serde_json`, `thiserror`, `hmac`, `sha2`, `chrono`, `tracing`, `diesel-async 0.9` (`postgres`, `deadpool`), `deadpool 0.13`. | none |
-| `autumn-jira-camel` | Producer-only `jira:` component. | `autumn-jira`, `camel-api = "0.57"`, `camel-component-api = "0.57"`, `async-trait`, `serde_json`, `tower 0.5` (`util`). | none |
+| `autumn-jira-camel` | Producer-only `jira:` component. | `autumn-jira`, `camel-api = "0.57"`, `camel-component-api = "0.57"`, `async-trait`, `serde_json`, `tower 0.5` (`util`), `tracing`. | none |
 | `ecosystem` (example, `publish = false`) | The full loop (section 11). | The four library crates by `path` (`autumn-plugin-jira` with `testing`), `autumn-jira-fake` by `path`, `san-mateo`, `autumn-plugin-san-mateo`, `san-mateo-harvest = "0.2"`, `san-mateo-camel = "0.1"`, `harvest-camel = "0.2.0"`, `autumn-harvest = "0.8.0"`, `autumn-harvest-plugin = "0.8.0"` (`connectors`), `autumn-web = "0.9"`, `camel-{api,builder,component-direct,core} = "0.57"`, `tokio`, `tokio-util`, `deadpool`, `diesel-async`, `serde_json`, `reqwest` (test only, inbound POST). | none |
 
 Dev-dependencies (house pattern): `autumn-jira-fake` by path, `tokio`
@@ -221,8 +289,9 @@ flowchart LR
   `camel-api`, `camel-core`, `camel-component-api` in both locks (CI, F29).
 - Each crate `lib.rs` has a crate doc with one compiled example. The root
   `README.md` snippets compile as doctests through
-  `#[cfg(doctest)] #[doc = include_str!("../../../README.md")] pub struct ReadmeDoctests;`
-  in `crates/autumn-plugin-jira/src/lib.rs` (F47).
+  `#[cfg(all(doctest, feature = "testing"))] #[doc = include_str!("../../../README.md")] pub struct ReadmeDoctests;`
+  in `crates/autumn-plugin-jira/src/lib.rs` (F47). The snippets use
+  `FakeJira` and the `testing` helpers, so they need the `testing` feature.
 
 ---
 
@@ -236,17 +305,17 @@ grow are `#[non_exhaustive]`. Builders return `Self` and are `#[must_use]`.
 
 | Module | Contents |
 |---|---|
-| `ids` | Newtypes (4.2). |
+| `ids` | Newtypes (4.2) and `IdempotencyKey`. |
 | `site` | `JiraSite`, `BasicAuth`. |
 | `model` | Response models: `Issue`, `IssueFields`, `Status`, `StatusCategory`, `StatusSummary`, `IssueSummary`, `IssueType`, `ProjectRef`, `Project`, `User`, `Comment`, `CommentPage`, `Transition`, `CreatedIssue`, `IssueRefs`, `ServerInfo`, `AccessibleResource`, `Page<T>`. |
-| `request` | `NewIssue`, `IssueTypeRef`, `IssueEdit`, `EditOptions`, `FieldSet`, `SearchRequest`, `StatusTarget`, `TransitionFields`. |
+| `request` | `NewIssue`, `IssueTypeRef`, `IssueEdit`, `EditOptions`, `FieldSet`, `SearchRequest`, `StatusTarget`, `TransitionFields`, `MAX_SEARCH_RESULTS` (100), `MAX_SEARCH_PROPERTIES` (5). |
 | `adf` | `Adf`, `AdfBuilder`, `Span`. |
-| `jql` | `Jql`, `JqlField`, `JqlClause`, `Order`. |
+| `jql` | `Jql`, `JqlField`, `JqlClause`, `JqlCondition`, `Order`. |
 | `time` | `JiraTimestamp`. |
-| `error` | `JiraError`, `Op`, `UnknownCause`, `ErrorClass`, `CamelKind`, `Result`. |
+| `error` | `JiraError`, `Op`, `UnknownCause`, `MarkerRef`, `ErrorClass`, `CamelKind`, `Result`, `SCOPE_HINT`, `NOT_SENT_NETWORK_CODES`. |
 | `policy` | Verified pure core (section 6). |
 | `backend` | `JiraBackend`, `ApiRequest`, `ApiResponse`, `Method`, `BackendError`, `BackendInfo`, `BackendMode`, `DirectBackend`, `SanMateoBackend`, `SanMateoTarget`, `resolve_cloud_id`. |
-| `client` | `JiraClient`, `ClientSettings`, `SearchPager`, `CreateOutcome`, `CommentOutcome`, `TransitionOutcome`, `DeleteOutcome`, `IdempotencyKey`, `MarkerRef`. |
+| `client` | `JiraClient`, `ClientSettings`, `SearchPager`, `IssuePage`, `CreateOutcome`, `CommentOutcome`, `TransitionOutcome`, `DeleteOutcome`. Re-exports `IdempotencyKey` (from `ids`) and `MarkerRef` (from `error`). The private `client/call.rs` holds the attempt loop, the classify glue, the status-to-error map and the `Retry-After` parse. |
 | `webhook` | `Delivery`, `DeliveryMeta`, `Flow`, `JiraEvent`, `IssueEvent`, `CommentEvent`, `WebhookIssue`, `WebhookFields`, `WebhookComment`, `ChangeItem`, `StatusChange`, `StatusRef`, `ParsedEvent`, `parse_event`, `verify_signature`, `sign`, header constants. |
 | `sink` | `EventSink`, `HandlerError`. |
 | `writes` | `JiraWrite`, `WriteKind`, `WRITES`. |
@@ -276,11 +345,12 @@ private wire types (`model::wire`) with `pub(crate) fn from_response(String)
 | `CloudId` | UUID text, lower case, 36 chars |
 | `SiteName` | `^[a-z0-9][a-z0-9-]{0,62}$` (same as the `jira-basic` provider pattern [V]) |
 | `StatusCategoryKey` | 1..=64 chars of `[a-z0-9-]`. Constants `NEW = "new"`, `INDETERMINATE = "indeterminate"`, `DONE = "done"`. Lenient for responses (the spec shows `in-flight`) [V]. |
-| `FieldId` | `^[a-z][A-Za-z0-9_]{0,63}$` or `^customfield_[0-9]{1,10}$` |
+| `FieldId` | `^[a-z][A-Za-z0-9_]{0,63}$` or `^customfield_[0-9]{1,10}$`. The rule is literal: `customfield_12345678901` passes through the first form. |
 | `WebhookDeliveryId` | 1..=200 printable ASCII, no space |
 | `PageToken` | opaque, non-empty; `Debug` shows only the length |
 
-`IdempotencyKey` (in `client`): 1..=200 printable ASCII, no space.
+`IdempotencyKey` (in `ids`; `client` and the crate root re-export it, V1):
+1..=200 printable ASCII, no space.
 - `IdempotencyKey::parse(&str) -> Result<Self>`
 - `IdempotencyKey::derive(parts: &[&str]) -> Self`: `"d1-"` plus the lower
   hex SHA-256 of the parts, each part prefixed by its byte length and `:`.
@@ -289,6 +359,19 @@ private wire types (`model::wire`) with `pub(crate) fn from_response(String)
   chars of lower-case RFC 4648 base32 of SHA-256(key) (130 bits).
 - `comment_marker(&self) -> String`: `"autumn-ref: "` plus the same 26 chars.
 - `as_str(&self) -> &str`. `Debug` shows the key (it is not a secret).
+
+Helpers that design v2 did not list (V6): `Delivery::new(meta,
+ParsedEvent)`, `DeliveryMeta::new`, `StatusSummary::new`, `IssueRefs::new`,
+`From<CreatedIssue> for IssueRefs`, `Issue::{property, field, status}`,
+`Status::summary`, `NewIssue::{project_key, summary_text, label_list}`,
+`SearchRequest::{jql, page_size}`, `FieldSet::{ids, to_csv}`,
+`EditOptions::notify_users(bool)`, `TransitionFields::{field, resolution}`,
+`IssueEdit::is_empty`, `Op::ALL`, `error::SCOPE_HINT`, and `JiraEvent:
+Display`. Some are `const fn` where design v2 shows `fn`:
+`JiraTimestamp::epoch_ms`, `JiraError::{status, retry_after}`,
+`StatusTarget::{done, in_progress, todo}` and `Flow::parse`. `Adf`,
+`Delivery` and the webhook types also derive `Eq`. `User` has a `Debug`
+that hides the email.
 
 ### 4.3 Site and auth (`site`)
 
@@ -319,6 +402,8 @@ impl Debug for BasicAuth { /* "BasicAuth { email: \"<redacted>\", token: \"<reda
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Method { Get, Post, Put, Delete }
 
+impl Method { pub const fn as_str(self) -> &'static str; }   // "GET", ...
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiRequest {
     pub op: Op,
@@ -328,6 +413,12 @@ pub struct ApiRequest {
     pub query: Vec<(String, String)>,
     /// JSON bytes. `None` for no body.
     pub body: Option<Vec<u8>>,
+}
+impl ApiRequest {                                                    // V9
+    pub fn new(op: Op, method: Method, path: impl Into<String>) -> Self;
+    #[must_use] pub fn query(self, name: &str, value: impl Into<String>) -> Self;
+    #[must_use] pub fn json(self, value: &serde_json::Value) -> Self;
+    pub fn path_and_query(&self) -> String;                          // encoded query
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiResponse { pub status: u16, pub headers: Vec<(String, String)>, pub body: Vec<u8> }
@@ -361,6 +452,7 @@ pub trait JiraBackend: Send + Sync + 'static {
 pub struct DirectBackend { /* site, auth, Arc<dyn HttpTransport> */ }
 impl DirectBackend {
     pub fn new(site: JiraSite, auth: BasicAuth, transport: Arc<dyn HttpTransport>) -> Self;
+    pub const fn site(&self) -> &JiraSite;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -372,9 +464,15 @@ pub struct SanMateoTarget {
     /// Picks one site from `accessible-resources`, for example `https://acme.atlassian.net`.
     pub site_url: Option<String>,
 }
+impl SanMateoTarget {                                                // V9
+    pub fn new(environment: impl Into<String>, connection: ConnectionKey) -> Self;
+    #[must_use] pub fn cloud_id(self, cloud_id: CloudId) -> Self;
+    #[must_use] pub fn site_url(self, url: impl Into<String>) -> Self;
+}
 pub struct SanMateoBackend { /* SanMateo, target, tokio::sync::OnceCell<String> prefix */ }
 impl SanMateoBackend {
     pub fn new(san: SanMateo, target: SanMateoTarget) -> Self;
+    pub const fn target(&self) -> &SanMateoTarget;
     /// Reads accessible-resources, picks the site, stores `cloudId` in the
     /// connection metadata (merge = true), and returns it.
     pub async fn discover_cloud_id(&self) -> Result<CloudId>;
@@ -419,12 +517,26 @@ application/json`, `content-type: application/json` when a body exists,
 | `UpstreamTooLarge` | `MaybeSent { code: "upstream_too_large" }` |
 | `Store(_)`, `RefreshCooldown` | `NotSent { transient: true, code }` |
 | `Provider { status, .. }` | `NotSent { transient: status.map_or(true, \|s\| s >= 500 \|\| matches!(s, 408 \| 425 \| 429)), code: "provider" }` |
-| `UnknownIntegration`, `UnknownConnection`, `UnknownProvider`, `Template`, `ForbiddenHost`, `Invalid`, `MissingField`, `UnsupportedAuthMode`, `IntegrationNotAllowed`, `Crypto`, `Internal` | `NotSent { transient: false, code: err.code() }` |
+| `UnknownIntegration`, `UnknownConnection`, `UnknownProvider`, `Template`, `ForbiddenHost`, `Invalid`, `MissingField`, `UnsupportedAuthMode`, `IntegrationNotAllowed`, `Crypto`, `Internal`, and (V13) `InvalidConnectSession`, `InvalidOAuthState`, `Conflict`, `UnknownFunction`, `Function` | `NotSent { transient: false, code: err.code() }` |
 | `RefreshExhausted`, `Unauthorized(_)` | `Auth { code: err.code() }` |
 | `_` (future variant) | `MaybeSent { code: "unknown" }` (the safe side for writes, B11) |
 
 Note [V]: when a 401 refresh fails inside the proxy, san-mateo returns the
 401 reply, not an error. The client maps it to `Unauthorized`.
+
+Discovery rules (V14):
+- `discover_cloud_id` on a provider that is not `atlassian` gives
+  `JiraError::CloudId`.
+- A metadata `cloudId` that does not parse counts as no value, so the
+  backend runs the discovery.
+- A discovery that fails inside `send` gives `NotSent { transient:
+  e.is_retryable(), code: e.code() }`: the Jira call did not leave the
+  process.
+
+One map from a `BackendError` to a `JiraError` (`backend::backend_error`,
+crate-private): `NotSent { transient: false }` gives `Config { code }`;
+`NotSent { transient: true }` and `MaybeSent` give `Network { op, code }`
+after the last attempt; `Auth` gives `Auth { code }`.
 
 ### 4.5 Client (`client`)
 
@@ -452,6 +564,9 @@ impl ClientSettings {
     /// Keeps `jitter` and `marker_label_prefix`; caps the other fields at the durable values.
     #[must_use] pub fn durable(self) -> Self;
     /// Worst-case wall time of one client call of `class`, for a transport timeout `per_request`.
+    /// Durable settings at 60 s: Read, IdempotentWrite, UnsafeWrite 130 s;
+    /// MarkedWrite 390 s (pre-lookup, write, one lookup); CheckedWrite 650 s
+    /// (each of 2 attempts reads the status and the transitions, then sends).
     pub fn worst_case(&self, class: OpClass, per_request: Duration) -> Duration;
 }
 
@@ -466,7 +581,8 @@ impl JiraClient {
     pub fn info(&self) -> BackendInfo;
 
     // Account and site
-    pub async fn myself(&self) -> Result<User>;                     // caches account id
+    pub async fn myself(&self) -> Result<User>;                     // always calls Jira; fills the cache
+    pub async fn account_id(&self) -> Result<AccountId>;            // V10: one GET /myself, then the cache
     pub async fn server_info(&self) -> Result<ServerInfo>;
 
     // Projects and issue types (lists)
@@ -503,7 +619,13 @@ impl JiraClient {
     pub fn search(&self, request: SearchRequest) -> SearchPager;
     pub async fn search_all(&self, request: SearchRequest, max_issues: usize) -> Result<Vec<Issue>>;
     pub async fn approximate_count(&self, jql: &Jql) -> Result<u64>;
+    /// V11: one page at `token`. The host checks for a repeated token.
+    pub async fn search_page_at(&self, request: &SearchRequest, token: Option<&PageToken>) -> Result<IssuePage>;
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct IssuePage { pub issues: Vec<Issue>, pub next_token: Option<PageToken> }  // next_token None on the last page
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CreateOutcome { Created(CreatedIssue), Found(IssueRefs) }
@@ -513,12 +635,16 @@ pub enum CommentOutcome { Created(Comment), Found(Comment) }
 pub enum TransitionOutcome { AlreadyThere(StatusSummary), Moved { via: TransitionId, to: StatusSummary } }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeleteOutcome { Deleted, GoneAfterRetry }  // GoneAfterRetry: 404 on a retry after a maybe-sent attempt
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// In `error` (V2); `client` re-exports it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MarkerRef { pub label: Option<String>, pub comment_marker: Option<String> }
+impl MarkerRef { pub const fn label(label: String) -> Self; pub const fn comment(marker: String) -> Self; }
 
 pub struct SearchPager { /* client, request, token, seen tokens (BTreeSet<String>), pages */ }
 impl SearchPager {
     /// `Ok(None)` at the end. `PaginationStalled` on a repeated token. `PageLimit` at `max_pages`.
+    /// The error comes on the page where the stop happens, and the issues of
+    /// that page are lost (V16). The next call gives `Ok(None)`.
     pub async fn next_page(&mut self) -> Result<Option<Vec<Issue>>>;
     pub const fn pages(&self) -> u32;
 }
@@ -535,19 +661,30 @@ NewIssue::new(project: ProjectKey, issue_type: IssueTypeRef, summary: impl Into<
     .property(key: impl Into<String>, value: Value)
 IssueEdit::new().set_summary(..).set_description(Adf).add_label(..).remove_label(..)
     .set_assignee(Option<AccountId>).set_field(FieldId, Value)
-#[derive(Default)] pub struct EditOptions { pub notify_users: Option<bool> }  // sent only when Some (F44)
+#[derive(Default)] pub struct EditOptions { pub notify_users: Option<bool> }  // sent only when Some (F44); EditOptions::notify_users(bool)
 FieldSet::default()   // summary,status,issuetype,project,assignee,labels,created,updated,description (F17)
 FieldSet::new(impl IntoIterator<Item = FieldId>) .with(FieldId)
 SearchRequest::new(Jql).fields(FieldSet).max_results(1..=100).properties([..; <=5])   // POST /search/jql
+    // max_results clamps to 1..=MAX_SEARCH_RESULTS. More than MAX_SEARCH_PROPERTIES keys gives InvalidInput at send.
 pub enum StatusTarget { Name(String), Id(StatusId), Category(StatusCategoryKey) }   // Serialize, Deserialize
 impl StatusTarget { pub fn done() -> Self; pub fn in_progress() -> Self; pub fn todo() -> Self;
     pub fn matches(&self, status: &StatusSummary) -> bool; }  // name: ASCII case-insensitive
 #[derive(Default)] pub struct TransitionFields { pub fields: Map<String, Value>, pub update: Map<String, Value> }
+TransitionFields::default().field(name, Value).resolution("Done")   // {"resolution": {"name": "Done"}}
 ```
 
 Models (`model`) read Jira replies leniently: unknown keys are ignored; ids
 are strings; `StatusCategory.id` is an integer [V]; `IssueBean.properties` is
 an object (key to value) [V]; `nextPageToken` is absent on the last page [V].
+`Deserialize` reads the wire format through `model::wire`. `Serialize`
+writes the Rust field names (V7). `StatusSummary`, `IssueSummary` and
+`IssueRefs` derive both with the same names, so a harvest history holds
+them. A search page with no `isLast` and no token is the last page, and an
+empty `nextPageToken` counts as no token.
+
+Read rules (V15): `get_issue_property` gives `Ok(None)` for each 404, so a
+missing issue also gives `None`. `delete_issue` always sends
+`deleteSubtasks=true|false`.
 
 ```rust
 pub struct StatusSummary { pub id: StatusId, pub name: String, pub category: StatusCategoryKey }
@@ -623,7 +760,14 @@ impl JiraError {
     pub fn status(&self) -> Option<u16>;
     pub fn messages(&self) -> &[String];           // Jira errorMessages; not in Display
     pub fn retry_after(&self) -> Option<Duration>;
+    /// V12: `false` only when the request cannot have run in Jira. The one
+    /// "sent" rule of harvest (`details.sent`) and camel.
+    pub fn may_have_run(&self) -> bool;
 }
+/// V12: the `Network` codes that did not leave the process (from
+/// `BackendError::NotSent { transient: true }`). The san-mateo map test pins them.
+pub const NOT_SENT_NETWORK_CODES: [&str; 3] = ["store_error", "connection_refresh_backoff", "provider"];
+pub const SCOPE_HINT: &str = "needs read:jira-work write:jira-work read:jira-user (OAuth) or a valid API token";
 ```
 
 The class table (one `match`, tested over every variant):
@@ -662,6 +806,12 @@ Rules:
 - `X-Seraph-LoginReason: AUTHENTICATION_DENIED` gives `CaptchaRequired` (F32).
 - `retry_after` reads integer seconds from `Retry-After` only. Never `Beta-*` (F34).
 - 400 with `errors.labels` on an idempotent create gives `LabelsNotOnScreen`.
+- `may_have_run` is `false` for `InvalidInput`, `Config`, `Auth`,
+  `CloudId`, `NotFoundOrForbidden`, `Unauthorized`, `CaptchaRequired`,
+  `Validation`, `Conflict`, `Gone`, `PayloadTooLarge`, `RateLimited`,
+  `TransitionNotAvailable`, `LabelsNotOnScreen`, and `Network` with a code
+  in `NOT_SENT_NETWORK_CODES`. It is `true` for each other error: that is
+  the safe side.
 
 ### 4.7 ADF, JQL, time
 
@@ -683,16 +833,29 @@ AdfBuilder: paragraph(&str) | paragraph_spans(&[Span]) | heading(level: u8 /*1..
 Span: text(&str) | strong(&str) | em(&str) | code(&str) | link(text: &str, url: &str /* https only */)
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Jql(String);
+pub struct Jql { /* text, ORDER BY offset, raw flag */ }
 pub enum Order { Asc, Desc }
+pub struct JqlClause { /* field */ }                        // waits for its operator
+pub struct JqlCondition(String);                            // V3: a complete condition
+impl JqlClause {
+    pub fn eq(self, value: impl AsRef<str>) -> Result<JqlCondition>;
+    pub fn ne(self, value: impl AsRef<str>) -> Result<JqlCondition>;
+    pub fn in_<S: AsRef<str>>(self, values: &[S]) -> Result<JqlCondition>;   // empty list: InvalidInput
+    pub fn is_empty(self) -> Result<JqlCondition>;
+}
+impl JqlCondition { pub fn as_str(&self) -> &str; }
 impl Jql {
     pub fn project(key: &ProjectKey) -> Self;              // a bounded start
-    pub fn field(name: JqlField) -> JqlClause;              // .eq(v) .ne(v) .in_(&[v]) .is_empty() -> Result<Jql-fragment>
-    #[must_use] pub fn and(self, clause: JqlClause) -> Self;
+    pub const fn field(name: JqlField) -> JqlClause;
+    #[must_use] pub fn and(self, condition: JqlCondition) -> Self;
     #[must_use] pub fn order_by(self, field: JqlField, order: Order) -> Self;
     pub fn raw(jql: impl Into<String>) -> Self;             // explicit name: the app owns the text
     pub fn as_str(&self) -> &str;
 }
+// jql.and(Jql::field(JqlField::Labels).eq("x")?) reads the same as design v2.
+// `and` after `raw` puts the raw text in parentheses, so an OR in it cannot
+// change the meaning. `and` after `order_by` puts the condition before ORDER BY.
+// `order_by` skips a bad custom field or property (it returns Self, not a Result).
 pub enum JqlField { Project, Key, Labels, Status, StatusCategory, IssueType, Assignee, Created, Updated,
     Custom(u64) /* cf[N] */, Property { key: String, path: String } }
 // Values go through policy::jql_quote. A control char in a value gives InvalidInput.
@@ -745,6 +908,9 @@ impl JiraEvent {
 }
 pub struct ParsedEvent { pub event: JiraEvent, pub timestamp: Option<JiraTimestamp>, pub actor: Option<AccountId> }
 /// Parses after verification. Accepts `changelog.id` as a string or a number (F40).
+/// The actor is `user.accountId`. A comment event with no top-level `user`
+/// gives the actor from `comment.author` (V18). The issue `key` is lenient
+/// (F42). The issue id and the comment id must be numeric.
 pub fn parse_event(body: &[u8]) -> Result<ParsedEvent>;
 /// HMAC-SHA256 in constant time (`Mac::verify_slice`). Checks the header
 /// shape first with `policy::signature_shape_ok`. For apps that do not use autumn.
@@ -796,8 +962,15 @@ A complete in-memory Jira Cloud, not a script. It reads the Jira wire format
 from the spec on its own. It shares no code with `autumn-jira` (D13).
 
 ```rust
+pub const DEFAULT_SITE: &str = "acme";
+pub const DEFAULT_CLOUD_ID: &str = "11111111-2222-4333-8444-555555555555";
+pub const DEFAULT_EMAIL: &str = "bot@acme.example";     // the default Basic auth user (the bot)
+pub const DEFAULT_API_TOKEN: &str = "fake-api-token";
+pub const ANN: &str = "acct-ann";                       // a person; person actions also take "ann"
+pub const BOT: &str = "acct-bot";                       // the API account; every API call acts as BOT
+
 #[derive(Clone)]
-pub struct FakeJira { /* Arc<Mutex<State>> */ }   // clones share state
+pub struct FakeJira { /* Arc<Mutex<State>> */ }   // clones share state; Default; Debug with counts only
 
 impl FakeJira {
     /// Site "acme", cloud id `11111111-2222-4333-8444-555555555555`, project OPS
@@ -847,14 +1020,23 @@ pub enum Fault {
     TimeoutThenCommit(Duration), // TransportError::Timeout; the write happens after the delay
     Redirect,                    // 302 with Location https://evil.example/
     RepeatToken,                 // search repeats the last nextPageToken
-    BadJson,                     // 200 with a body that is not JSON
+    BadJson,                     // the write happens; the normal 2xx status of the op (201 create, else 200) with a body that is not JSON
 }
 #[non_exhaustive]
 pub enum FakeOp { Myself, ServerInfo, GetProject, ProjectSearch, CreateMeta, CreateIssue, GetIssue,
     EditIssue, DeleteIssue, GetProperty, SetProperty, GetTransitions, DoTransition, GetComments,
     AddComment, Search, Count, AccessibleResources, Token }
-pub struct FakeProject { /* key, id, issue types, workflow; builder */ }
-pub struct FakeDelivery { pub headers: Vec<(String, String)>, pub body: Vec<u8> }
+pub struct FakeProject { /* key, id, name, issue types, lead */ }
+impl FakeProject {
+    pub fn new(key: &str, id: &str, name: &str) -> Self;
+    #[must_use] pub fn issue_type(self, id: &str, name: &str) -> Self;
+    #[must_use] pub fn lead(self, account_id: &str) -> Self;   // default lead: ANN
+    pub fn key(&self) -> &str;
+}
+// with_project adds a project, or replaces the project with the same key.
+#[derive(Clone)]
+pub struct FakeDelivery { pub headers: Vec<(String, String)>, pub body: Vec<u8>, /* private secret */ }
+// The private secret field stops a struct literal outside the crate. Debug leaves the secret out.
 impl FakeDelivery { pub fn id(&self) -> &str; pub fn header(&self, name: &str) -> Option<&str>;
     #[must_use] pub fn tampered(&self) -> Self; #[must_use] pub fn with_actor(&self, account_id: &str) -> Self; }
 pub struct FakeRequest { pub method: String, pub host: String, pub path: String, pub query: String }
@@ -874,8 +1056,26 @@ pub fn sign(secret: &[u8], body: &[u8]) -> String;
   checks the client id, secret and refresh token, rotates both tokens, gives
   `expires_in: 3600` (W27, Y3).
 - Other hosts: the fallback transport, else `TransportError::Connect`.
+  Only the async `send` uses the fallback; `handle()` gives
+  `TransportError::Connect` for another host. `send` also uses the
+  fallback for another `*.atlassian.net` site, another cloud id on the
+  gateway, a token request of an unknown OAuth client, and an unknown
+  Bearer token on accessible-resources (V21). So
+  `fake_a.with_fallback(Arc::new(fake_b))` serves two tenants (EX7). A
+  request that goes to the fallback is not in `requests()`.
 - Wrong or missing auth: 401. An old access token after
   `expire_access_token`: 401.
+- Faults (V20): a fault is used only after the auth check passes. `count(op)`
+  also counts 401 replies and faulted calls. `rate_limit` puts its 429
+  entries in the same FIFO queue as `fault`. Each 429 has `Retry-After`,
+  `RateLimit-Reason: jira-burst-based` and `X-RateLimit-Reset`.
+  `RepeatToken` sets `nextPageToken` to the last token that the fake gave
+  out and `isLast = false`.
+- Tokens: OAuth tokens are `<site>-at-<n>` and `<site>-rt-<n>`. The old
+  refresh token stops at once (no reuse leeway). An access token from before
+  a refresh stays valid until `expire_access_token`. A page token belongs to
+  one JQL text.
+- The project lead is in the reply only with `expand=lead` (W23).
 - Endpoints: `myself`, `serverInfo`, `project/{key}`, `project/search`
   (PageBean), `issue/createmeta/{key}/issuetypes`, issue create, get, edit,
   delete (`deleteSubtasks` as a string [V]), `issue/{id}/properties/{key}` GET
@@ -887,10 +1087,14 @@ pub fn sign(secret: &[u8], body: &[u8]) -> String;
 
 ### 5.2 Model
 
-- Projects with issue types and a workflow graph: To Do (`new`) to In
-  Progress (`indeterminate`) to Done (`done`), and Done to To Do. The
-  transition to Done needs `fields.resolution` (B13); without it: 400 with
-  `errors.resolution`.
+- Projects with issue types and one fixed workflow for all projects (V19).
+  Statuses: To Do `10000` (`new`), In Progress `10001` (`indeterminate`),
+  Done `10002` (`done`). Transitions: `21` "Start work" (To Do to In
+  Progress), `31` "Resolve" (In Progress to Done), `11` "Reopen" (Done to To
+  Do; it clears the resolution). The transition names differ from the
+  status names on purpose. "Resolve" needs `fields.resolution` (B13);
+  without it: 400 with `errors.resolution`. Resolutions: Done `10000`,
+  Won't Do `10001`, Duplicate `10002`, Cannot Reproduce `10003`.
 - Per-project key counter. Keys are never reused.
 - Labels, properties, comments, `created` and `updated` in `+0000` format.
 - JQL subset: `clause (AND clause)* [ORDER BY field [ASC|DESC]]`. Clause:
@@ -898,29 +1102,47 @@ pub fn sign(secret: &[u8], body: &[u8]) -> String;
   `key`/`issuekey`, `labels`, `status`, `statusCategory`, `issuetype`,
   `assignee`. Value escapes `\"` and `\\`. An unbounded query (no clause) or
   an unknown field gives 400 with an `ErrorCollection`. Token pages with
-  `nextPageToken` and `isLast`.
+  `nextPageToken` and `isLast`. The subset also takes single quotes, `IS
+  [NOT] EMPTY`, `= EMPTY`, `NOT IN` and `currentUser()`. It sorts on
+  `created`, `updated`, `summary`, `priority`, `key`, `status`,
+  `issuetype`, `labels` and `assignee`. `OR` gives 400. A project value that
+  names no project gives 400, as in Jira. With no `ORDER BY`, the newest
+  issue comes first (id DESC). Labels are a sorted set, as in Jira.
 - Index lag: a new or changed issue is visible to search only after `lag`
   of `tokio::time::Instant` time. `GET /issue`, properties and the comment
-  list are always current (G13).
+  list are always current (G13). Search matches on the index and shows the
+  current issue.
 - Deliveries: with a webhook secret, each change (create, edit, transition,
   comment, delete) queues a `FakeDelivery`: body per the webhook page
   (`timestamp` epoch ms, `webhookEvent`, `user.accountId`, `issue`,
   `changelog`), headers `X-Hub-Signature`, `X-Atlassian-Webhook-Identifier`
   (unique), `X-Atlassian-Webhook-Flow: Primary`. API writes by the bot also
-  queue deliveries (the loop case, F09).
+  queue deliveries (the loop case, F09). Delivery ids are `<site>-<n>`.
+- Delivery details: a `comment_created` body has no top-level `user`; the
+  actor is in `comment.author` [U, the Jira webhook page]. `with_actor` sets
+  `user` when the body has one, and `comment.author` and `updateAuthor`
+  otherwise; its new id is `<id>-as-<account>`, and it signs again. A
+  comment in `update.comment` of an edit or a transition has no delivery of
+  its own. An edit that changes nothing sends no delivery. A property PUT
+  sends no delivery and does not reindex. Each change queues exactly one
+  delivery.
 
 ### 5.3 Spec shape check
 
 `scripts/extract-jira-schemas.py` reads `swagger-v3.json` and writes
-`crates/autumn-jira-fake/tests/fixtures/schemas.json`: for about 20 response
+`crates/autumn-jira-fake/tests/fixtures/schemas.json`: for the response
 schemas (`IssueBean`, `CreatedIssue`, `SearchAndReconcileResults`,
 `PageOfComments`, `Comment`, `Transitions`, `PageBeanProject`, `Project`,
 `PageOfCreateMetaIssueTypes`, `User`, `ServerInformation`, `ErrorCollection`,
-`EntityProperty`, `IssueCount`, ...) it keeps property names and JSON types
-only. No descriptions. The test `fake_replies_match_the_spec_shapes` walks
-each fake reply and fails on a key that the schema does not list, or on a
-wrong JSON type (B14, G14). A weekly CI step re-extracts the file from the
-current spec and fails on a diff.
+`EntityProperty`, `JQLCountResultsBean`, ...) it keeps property names and
+JSON types only. The fixture has 23 schemas. The count schema is
+`JQLCountResultsBean`: the spec has no schema `IssueCount` (V22). No
+descriptions. The test `fake_replies_match_the_spec_shapes` walks each fake
+reply and fails on a key that the schema does not list, or on a
+wrong JSON type (B14, G14). It walks more than 100 objects: each 2xx reply,
+the search pages, the `ErrorCollection` of 400, 401, 404, 410, 429 and 503,
+and the issue and comment inside deliveries. A weekly CI step re-extracts
+the file from the current spec and fails on a diff.
 
 ---
 
@@ -958,10 +1180,11 @@ pub enum Verdict { Accepted, Ignored, HandlerFailed, TimedOut }
 | Function | Signature | Spec (proved) | Body match |
 |---|---|---|---|
 | `classify_status` | `(status: u16) -> Outcome` | 200..=299 `Success`; 429 `RateLimited`; 300..=399 `Redirect`; 408, 425, 500..=599 and >= 600 `ServerError`; other `ClientError`. | yes |
-| `decide` | `(class: OpClass, outcome: Outcome, attempt: u32, max_attempts: u32) -> Decision` | (a) `Success` ==> `Done`. (b) `ClientError` or `Redirect` ==> `Stop`. (c) **`no_resend_after_maybe_sent`**: `class` in {`UnsafeWrite`, `MarkedWrite`} and `outcome` in {`ServerError`, `MaybeSent`} ==> result in {`Unknown`, `Confirm`}; `UnsafeWrite` gives `Unknown`, `MarkedWrite` gives `Confirm`. (d) `UnsafeWrite` and `RateLimited` ==> `Stop`. (e) `Retry` ==> `attempt < min(max_attempts, MAX_ATTEMPTS)`. (f) the other classes retry `RateLimited`, `ServerError`, `NotSent`, `MaybeSent` while attempts are left, else `Stop`. (g) `MarkedWrite` retries `RateLimited` and `NotSent` while attempts are left. | yes |
+| `decide` | `(class: OpClass, outcome: Outcome, attempt: u32, max_attempts: u32) -> Decision` | (a) `Success` ==> `Done`. (b) `ClientError` or `Redirect` ==> `Stop`. (c) **`no_resend_after_maybe_sent`**: `class` in {`UnsafeWrite`, `MarkedWrite`} and `outcome` in {`ServerError`, `MaybeSent`} ==> result in {`Unknown`, `Confirm`}; `UnsafeWrite` gives `Unknown`, `MarkedWrite` gives `Confirm`. (d) `UnsafeWrite` and `RateLimited` ==> `Stop`. (e) `Retry` ==> `attempt < min(max_attempts, MAX_ATTEMPTS)`. (f) the other classes retry `RateLimited`, `ServerError`, `NotSent`, `MaybeSent` while attempts are left, else `Stop`. (g) `MarkedWrite` retries `RateLimited` and `NotSent` while attempts are left. (h) V5: `UnsafeWrite` retries `NotSent` while attempts are left: the request did not leave the process. | yes |
 | `backoff_ms` | `(initial_ms: u64, attempt: u32, cap_ms: u64) -> u64` | Copied from san-mateo with its proof [V]: `result <= cap_ms`; monotone in `attempt`; no overflow. | no (loop with proof code); a differential proptest checks it equals `san_mateo::policy::backoff_ms` |
 | `retry_wait_ms` | `(attempt: u32, base_ms: u64, cap_ms: u64, retry_after_ms: Option<u64>) -> Option<u64>` | `None` iff `retry_after_ms > cap_ms`. `Some(w)` ==> `w <= cap_ms` and `w >= retry_after_ms.unwrap_or(0)`. | yes |
-| `apply_jitter` | `(wait_ms: u64, permille: u32, floor_ms: u64, cap_ms: u64) -> u64` | permille clamped to 700..=1300; `floor_ms <= r <= max(cap_ms, floor_ms)`. | yes |
+| `scale_permille` (V4) | `(value: u64, permille: u32) -> u64` | `value * permille / 1000` with no overflow. A `value` above `u64::MAX / 1300` or a `permille` above 1300 gives `value` with no change. The Verus body has proof code (`lemma_scale_fits`, `by (nonlinear_arith)`). | no (proof code in the body); proptest `spec_as_test_scale_permille`; it is in `verus/policy.rs`, so it needs no `PROPTEST_ONLY` entry |
+| `apply_jitter` | `(wait_ms: u64, permille: u32, floor_ms: u64, cap_ms: u64) -> u64` | permille clamped to 700..=1300, then `scale_permille`; `floor_ms <= r <= max(cap_ms, floor_ms)`. | yes |
 | `host_may_send` | `(previous: Previous, resend_opt_in: bool) -> bool` | `result == (previous == First \|\| previous == NotSent \|\| resend_opt_in)`. So a "maybe sent" or unknown previous attempt never leads to a send without the opt-in. | yes |
 | `token_page_step` | `(pages_done: u32, max_pages: u32, is_last: bool, has_token: bool, repeated: bool) -> PageStep` | `Fetch` ==> `pages_done < max_pages && !is_last && has_token && !repeated`. Lemma `token_pager_terminates`: a loop that adds 1 to `pages_done` on each `Fetch` ends within `max_pages` steps. | yes |
 | `offset_next` | `(start_at: u64, returned: u64, total: u64) -> Option<u64>` | `Some(n)` ==> `n > start_at && n < total`. `None` when `returned == 0` or `start_at + returned >= total` (saturating). | yes |
@@ -995,7 +1218,8 @@ false}` and `Auth` stop with `Config` or `Auth`; `MaybeSent` to
 
 Verus CI: copy the san-mateo `verus` job (pinned `VERUS_REV`, built from
 source, cached `target-verus`, `VERUS_Z3_PATH`) [V W9]. Run
-`verus verus/policy.rs`. No `assume` in proofs (review angle R5).
+`verus verus/policy.rs`. No `assume` in proofs (review angle R5). As built:
+"31 verified, 0 errors" (CI run 41387106070, head `59dc5d4`).
 
 ---
 
@@ -1053,7 +1277,9 @@ Rules:
 - `add_comment_idempotent`: `MarkedWrite`. The ADF body gets a last
   paragraph `key.comment_marker()`. Lookup: `GET .../comment?orderBy=-created
   &maxResults=100`, then a match on the marker text in `to_plain_text`. The
-  comment list is strongly consistent [U A3], so `lookup_attempts = 1`.
+  comment list is strongly consistent [U A3], so after a lost reply the
+  client does one lookup with no delay. `lookup_attempts` does not apply to
+  comments (V17). The lookup reads only the 100 newest comments.
 - `transition_to_status`: `CheckedWrite`. Before each attempt: `GET
   issue?fields=status`. At the target: `AlreadyThere`. Else `GET
   transitions`, pick the first transition whose `to` matches the target, and
@@ -1097,9 +1323,20 @@ sequenceDiagram
   `ctx.previous_failure()` with `parse_typed_payload` [V]. `jira.rate_limited`
   and `jira.network` with `details.sent = false` give `NotSent`.
   `jira.outcome_pending` gives `MaybeSent`. A missing or other payload (a
-  worker crash, a `start_to_close` timeout) gives `Unknown`.
+  worker crash, a `start_to_close` timeout) gives `Unknown`. `details.sent`
+  is `JiraError::may_have_run` (V12, V41).
 - `host_may_send` false: lookup only. Found: `outcome = "found"`. None:
   non-retryable `jira.outcome_unknown`. The workflow sees a typed failure.
+- Lookup failure (V38): when the lookup-only path fails with a retryable
+  error, the failure stays `jira.outcome_pending` (`details.sent = true`,
+  `retry_after` = the settle delay). So the next attempt also looks up only.
+  Without this rule, a lookup that gets a 429 (`sent = false`) lets the
+  attempt after it send the write again. A non-retryable lookup error keeps
+  `failure_for`.
+- Delete across attempts (V39): `jira_delete_issue` gives
+  `gone_after_retry` for a 404 when the previous attempt is `MaybeSent` or
+  `Unknown`. This is the delete rule of 7.1, applied across harvest
+  attempts.
 - Opt-in: `resend_after_negative_lookup = true` on the activity input, or
   `resendAfterNegativeLookup=true` on the camel URI. Then a negative lookup
   leads to one more `create_issue_idempotent`. ADR 0003 states the residual
@@ -1107,10 +1344,22 @@ sequenceDiagram
 - Settle delay: `SETTLE_SECS = 30` as `with_retry_after` on
   `jira.outcome_pending`. The input field `settle_secs` overrides it (tests
   and examples use 3).
-- Budget (B2): `start_to_close` of each activity is larger than
-  `ClientSettings::for_durable_host().worst_case(class, 60 s)` (the
-  `ReqwestTransport` default timeout [V]). Writes: `"5m"`. Reads: `"3m"`.
-  Test `start_to_close_covers_the_client_budget` uses the real constants.
+- Budget (B2, V37): `start_to_close` of each activity is larger than the
+  sum of `ClientSettings::for_durable_host().worst_case(class, 60 s)` over
+  its client calls (60 s is the `ReqwestTransport` default timeout [V]).
+  The durable worst cases are 130 s for a read, an idempotent write and an
+  unsafe write, 390 s for a marked write and 650 s for a checked write.
+
+  | Activity | Client calls | Worst case | `start_to_close` |
+  |---|---|---|---|
+  | `jira_get_issue`, `jira_search_page` | 1 read | 130 s | `"3m"` (`READ_START_TO_CLOSE`) |
+  | `jira_edit_issue`, `jira_delete_issue` | 1 idempotent write | 130 s | `"5m"` (`WRITE_START_TO_CLOSE`) |
+  | `jira_create_issue`, `jira_add_comment` | 1 marked write | 390 s | `"12m"` (`LONG_WRITE_START_TO_CLOSE`) |
+  | `jira_transition_to_status` | 1 checked write | 650 s | `"12m"` |
+  | `jira_watch_issue` | GET issue, GET property, PUT property, PUT edit | 4 x 130 s = 520 s | `"12m"` |
+
+  Test `start_to_close_covers_the_client_budget` adds up the client calls
+  of each activity with the real constants.
 
 ### 7.3 Residual risks (ADR 0003)
 
@@ -1140,21 +1389,25 @@ pub fn plugin_contract() -> PluginContract;                 // SMP pattern [V]
 
 pub use autumn_jira as jira;
 pub use autumn_jira::{Adf, Delivery, EventSink, HandlerError, IssueKey, JiraClient, JiraError, JiraEvent, Jql, StatusTarget};
+pub use config::JiraConfig;            // V24: `pub mod config` (8.1)
+pub use health::JiraHealth;
+pub mod webhook_config;                // V24: the pure boot check (8.4)
+#[cfg(feature = "testing")] pub mod testing;
 
-#[derive(Default)]
-pub struct JiraPlugin { /* config, prefix, transport, client, sinks, secrets, opt-ins */ }
+/// A manual `Default` (V25): the default prefix is `/jira`. `Debug` shows env var names only.
+pub struct JiraPlugin { /* config, prefix, transport, client, handlers, secrets, opt-ins */ }
 impl JiraPlugin {
     pub fn new() -> Self;
     #[must_use] pub fn with_config(config: JiraConfig) -> Self;
-    #[must_use] pub fn prefix(self, prefix: &str) -> Self;                   // mount-time (builder, not config)
+    #[must_use] pub fn prefix(self, prefix: &str) -> Self;                   // mount-time (builder, not config); adds a leading "/", drops a trailing "/"; "" and "/" give "/webhook"
     #[must_use] pub fn transport(self, transport: Arc<dyn HttpTransport>) -> Self;  // api_token mode
     #[must_use] pub fn client(self, client: JiraClient) -> Self;              // prebuilt client
     #[must_use] pub fn sink(self, sink: impl EventSink) -> Self;              // mounts the webhook route
     #[must_use] pub fn on_event<F, Fut>(self, f: F) -> Self
         where F: Fn(Arc<Delivery>, AppState) -> Fut + Send + Sync + 'static,
               Fut: Future<Output = Result<(), HandlerError>> + Send + 'static;
-    #[must_use] pub fn webhook_route(self) -> Self;                           // route with no handler (log only)
-    #[must_use] pub fn allow_webhooks_without_replay_protection(self) -> Self; // explicit unsafe opt-in
+    #[must_use] pub const fn webhook_route(self) -> Self;                     // route with no handler (log only)
+    #[must_use] pub const fn allow_webhooks_without_replay_protection(self) -> Self; // explicit unsafe opt-in
     pub fn route_prefix(&self) -> &str;
     pub fn webhook_path(&self) -> String;                                     // "{prefix}/webhook"
     pub fn start(self, state: &AppState) -> Result<JiraRuntime, PluginError>;
@@ -1177,9 +1430,14 @@ impl JiraService {
     pub fn require(state: &AppState) -> AutumnResult<Self>;        // 503 "Jira has not started"
     pub const fn client(&self) -> &JiraClient;
     /// San Mateo mode: a client for another connection of the same integration (multi-tenant, R15).
-    /// Cached per connection id.
+    /// Cached per connection id. The id: 1..=200 printable ASCII, no space (else
+    /// `InvalidInput`). Outside san_mateo mode: `Config { code: "for_connection_needs_san_mateo" }`.
+    /// The client of `[jira.san_mateo] connection_id` is in the same cache.
     pub fn for_connection(&self, connection_id: &str) -> Result<JiraClient, JiraError>;
 }
+// V28: san_mateo mode without `connection_id`: `client()` (and `Deref`) is a
+// client over a private backend that never sends. Each call gives
+// `JiraError::Config { code: "no_connection_id" }`. Use `for_connection(id)`.
 impl Deref for JiraService { type Target = JiraClient; }
 impl FromRequestParts<AppState> for JiraService { type Rejection = AutumnError; }
 pub fn autumn_error(err: &JiraError) -> AutumnError;    // status from err.class().http_status; hides Decode and Config text
@@ -1190,6 +1448,7 @@ impl<T> JiraResultExt<T> for Result<T, JiraError>
 pub struct WebhookCounters { pub accepted: u64, pub ignored_stale: u64, pub ignored_future: u64,
     pub ignored_no_timestamp: u64, pub ignored_self: u64, pub ignored_unknown: u64,
     pub undecodable: u64, pub permanent: u64, pub handler_failed: u64, pub timed_out: u64 }
+// `JiraRuntime::new` is crate-private. `JiraService` has a doc test.
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -1204,6 +1463,50 @@ pub enum PluginError {
 }
 ```
 
+The `fix` of `WebhookEndpoint` starts with a TOML comment line that names
+the wrong field, for example `# signature_header is not set, so autumn
+reads X-Webhook-Signature; it must be "X-Hub-Signature"`. The
+`webhook_endpoint_toml(..)` block with the configured endpoint name
+follows it.
+
+`config` module (V24). All structs are `#[serde(default,
+deny_unknown_fields)] #[non_exhaustive]`:
+
+```rust
+pub struct JiraConfig { pub api_token: Option<ApiTokenConfig>, pub san_mateo: Option<SanMateoTarget>,
+    pub http: JiraHttpConfig, pub webhook: JiraWebhookConfig, pub health: JiraHealthConfig }
+pub enum JiraMode { ApiToken, SanMateo }   // as_str(): "api_token" | "san_mateo"
+pub struct ApiTokenConfig { pub site: Option<String>, pub cloud_id: Option<String>, pub email_env: String, pub token_env: String }
+pub struct SanMateoTarget { pub environment: String, pub integration: String, pub connection_id: Option<String>,
+    pub cloud_id: Option<String>, pub site_url: Option<String> }   // the [jira.san_mateo] table
+pub struct JiraHttpConfig { pub max_attempts: u32, pub base_backoff_ms: u64, pub max_backoff_ms: u64, pub max_pages: u32,
+    pub lookup_attempts: u32, pub lookup_delay_ms: u64, pub timeout_secs: u64 }
+pub struct JiraWebhookConfig { pub endpoint_name: String, pub max_age_secs: u64, pub max_future_skew_secs: u64,
+    pub handler_timeout_ms: u64, pub ignore_actor_account_ids: Vec<String> }   // Debug shows the count of ids only
+pub struct JiraHealthConfig { pub cache_secs: u64, pub timeout_ms: u64 }
+impl JiraConfig {
+    pub fn from_toml_str(autumn_toml: &str) -> Result<Self, PluginError>;
+    pub fn load_from_dir(manifest_dir: &Path, profile_names: &[String], env: impl IntoIterator<Item = (String, String)>) -> Result<Self, PluginError>;
+    pub fn load(profile: Option<&str>) -> Result<Self, PluginError>;   // AUTUMN_ENV, then AUTUMN_PROFILE, as autumn-web
+    pub fn validate(&self) -> Result<(), PluginError>;
+    pub fn mode(&self) -> Result<Option<JiraMode>, PluginError>;       // both tables: Config
+}
+```
+
+`webhook_config` module (V24):
+
+```rust
+pub const DEFAULT_SECRET_ENV: &str = "JIRA_WEBHOOK_SECRET";
+pub const SIGNATURE_HEADER: &str = "X-Hub-Signature";
+pub const SIGNATURE_PREFIX: &str = "sha256=";
+pub const DELIVERY_ID_HEADER: &str = "X-Atlassian-Webhook-Identifier";
+pub fn webhook_endpoint(path: &str, secret_env: &str) -> WebhookEndpointConfig;
+pub fn webhook_endpoint_toml(path: &str, secret_env: &str) -> String;
+/// Pure. Returns the warnings to log. `PluginError::WebhookEndpoint` with the fix on a mismatch.
+pub fn check_webhook_endpoint(endpoints: &[WebhookEndpointConfig], webhook_path: &str,
+    settings: &JiraWebhookConfig, allow_without_replay_protection: bool) -> Result<Vec<String>, PluginError>;
+```
+
 ### 8.1 Config `[jira]`
 
 `#[serde(default, deny_unknown_fields)] #[non_exhaustive]`. Layers:
@@ -1211,7 +1514,7 @@ pub enum PluginError {
 (the SMP loader pattern [V]). Secrets by env var NAME only (F12). `Debug`
 hides values. The mode comes from the table that exists (R14). Both tables:
 `Config("set [jira.api_token] or [jira.san_mateo], not both")`. None: the
-plugin starts with no client only when `client(..)` was called, else
+plugin starts with no mode table only when `client(..)` was called, else
 `Config("set [jira.api_token] or [jira.san_mateo]")`.
 
 ```toml
@@ -1251,7 +1554,9 @@ timeout_ms = 5000
 A key `token`, `api_token` or `password` fails with a text that names
 `token_env`. Builder conflicts fail `on_startup` (R12):
 `client(..)` with a `[jira.*]` mode table, `transport(..)` in san_mateo
-mode.
+mode, and (V29) `transport(..)` with `client(..)`: `Conflict("transport(..)",
+"client(..)")`. In api_token mode a missing or empty env var gives
+`MissingSecret { env }`; the text names the variable, never a value.
 
 ### 8.2 Lifecycle
 
@@ -1259,9 +1564,22 @@ Copy the SMP pattern [V]: the state initializer builds the client and
 inserts `JiraService`; a failure is stored and returned from `on_startup`.
 No network call at startup (F20). In `build`, the plugin records
 `app.has_plugin("autumn-plugin-san-mateo")` [V]. In san_mateo mode the
-initializer reads `SanMateoService::from_state`; none gives
-`SanMateoAfterJira` when SMP was registered later, else `SanMateoMissing`
-(R11).
+initializer reads `SanMateoService::from_state`. When it is absent (V27):
+- SMP was registered before: `Config("SanMateoPlugin did not start; see
+  its error")`.
+- Else, when `state.health_indicator_registry()` contains
+  `autumn_plugin_san_mateo::INDICATOR_NAME`: `SanMateoAfterJira`. autumn
+  registers all health indicators before it runs any state initializer, in
+  `run()` and in `TestApp`.
+- Else: `SanMateoMissing` (R11).
+
+A re-check in `on_startup` does not work: `TestApp` runs the startup hook
+of each plugin right after its own initializer.
+
+`on_startup` returns `AutumnError::internal_server_error_msg(e.to_string())`
+(V26). So the panic of `TestApp` and the boot error of `run()` both show the
+`Display` text: the fix TOML, the env var name, "register it before
+JiraPlugin".
 
 ### 8.3 Health
 
@@ -1269,10 +1587,17 @@ Indicator `jira`, `IndicatorGroup::HealthOnly` [V] (F21). `timeout_ms()`
 returns `[jira.health] timeout_ms`. `check` calls `myself` with
 `max_attempts = 1` at most once per `cache_secs` (a TTL memo; the actuator
 already runs one check at a time [V Y8]). A Jira 503 gives `DOWN` inside the
-timeout. Details: `mode`, `site`, `status` code of the last check,
-`checked_at`, the webhook counters, `self_filter` (`on` when
-`ignore_actor_account_ids` is not empty), `max_body_bytes` of the endpoint.
-No email, no account id, no token. Before start: `DOWN` with `"not started"`.
+timeout. The plugin stops the call at 90% of `timeout_ms` (V30), so a slow
+Jira gives `DOWN` with `error = "timeout"`, not the `UNKNOWN` of autumn.
+Details: `mode`, `site`, `status` code of the last check, `checked_at`,
+the webhook counters (`webhook`), `self_filter` (`on` when
+`ignore_actor_account_ids` is not empty), `max_body_bytes` of the endpoint,
+and `error` (the `JiraError` code) when `DOWN`. `mode` of a prebuilt
+`client(..)` comes from `client.info().mode`. No email, no account id, no
+token. Before start: `DOWN` with `reason = "not started"`; after a failed
+start: `reason = "start failed"`. `/actuator/health` shows the details only
+with `[health] detailed = true`: the test configs, `testing::app_config()`
+and the example `autumn.toml` set it; `autumn-prod.toml` sets it to false.
 
 ### 8.4 Webhook route
 
@@ -1303,12 +1628,18 @@ flowchart TB
 ```
 
 - Mount: `app.merge(Router::new().route(&webhook_path, post(handler)))` [V W1].
-  Not `nest`, not `scoped`. Declared with `declare_plugin_routes`:
+  Not `nest`, not `scoped`. The router lives in `src/webhook.rs`. Declared with `declare_plugin_routes`:
   `RouteInfo { method: "POST", path: webhook_path, classification:
   RouteClassification::Public, module: Some("autumn_plugin_jira::webhook"),
   ..RouteInfo::default() }` [V]. Mounted only when a sink exists or
   `webhook_route()` was called.
-- `now_ms` for `freshness` is `SignedWebhook::received_at()` [V W16].
+- `now_ms` for `freshness` is `SignedWebhook::received_at()` [V W16]. It is
+  the ambient system time: real time outside a Sim, not the clock of
+  `TestApp::with_clock`.
+- Before the start the route answers 503 (`Verdict::TimedOut`), so Jira
+  sends the delivery again (V31). A delivery with no parsable delivery id
+  counts as `undecodable` (200). A sink task that panics counts as
+  `handler_failed` (503).
 - Sinks run in order. Each runs in `tokio::spawn`. The route waits for each
   task under `handler_timeout_ms`. On a timeout the route answers 503 and
   the task runs to its end (B16). A sink after a `Transient` does not run.
@@ -1324,7 +1655,9 @@ flowchart TB
   opt-in; `max_age_secs <= replay_window_secs`. On a mismatch the start fails
   with `WebhookEndpoint { fix: webhook_endpoint_toml(..) }`.
   `max_body_bytes < MIN_MAX_BODY_BYTES` logs a `warn` with the fix (the app
-  owns the choice).
+  owns the choice). The pure function
+  `webhook_config::check_webhook_endpoint` does the check. The startup hook
+  reads the endpoints from `state.config_arc().security.webhooks.endpoints`.
 - autumn itself enforces the 32-byte production secret and fails a memory
   replay store in prod unless `allow_memory_in_production` [V W15]. The
   docs show both. The `autumn_app` prod profile sets a 32+ byte secret and
@@ -1344,7 +1677,8 @@ flowchart TB
 pub mod testing {
     /// A plugin wired to the fake: transport, secrets and the test webhook secret.
     pub fn plugin_for(fake: &FakeJira) -> JiraPlugin;
-    /// An AutumnConfig with the Jira endpoint (secret TEST_WEBHOOK_SECRET) and CSRF on.
+    /// An AutumnConfig with the Jira endpoint (secret TEST_WEBHOOK_SECRET), CSRF on,
+    /// and `[health] detailed = true`.
     pub fn app_config() -> AutumnConfig;
     pub const TEST_WEBHOOK_SECRET: &str = "test-webhook-secret-0123456789abcdef";  // 36 bytes
     #[async_trait]
@@ -1364,7 +1698,7 @@ impl JiraPlugin { #[doc(hidden)] #[cfg(feature = "testing")] pub fn secret_env(s
 #[derive(Clone)]
 pub struct JiraClients { /* default: JiraClient, named: BTreeMap<String, JiraClient> */ }
 impl JiraClients {
-    pub fn new(default: JiraClient) -> Self;
+    pub const fn new(default: JiraClient) -> Self;
     #[must_use] pub fn with(self, name: &str, client: JiraClient) -> Self;
 }
 /// Which client an activity uses. Serializable, so it sits in activity input (Y4).
@@ -1376,21 +1710,24 @@ pub enum ClientRef {
     Connection { environment: String, integration: String, connection_id: String },
 }
 /// Named and Default read ctx.state::<JiraClients>(). Connection reads ctx.state::<SanMateo>().
-/// The result is always `.durable()`.
+/// The result is always `.durable()`. Each Connection part is 1..=200 printable
+/// chars with no space, else `jira.invalid_input`. Missing state: `jira.config`.
 pub fn client_for(ctx: &ActivityContext, client: &ClientRef) -> Result<JiraClient, ActivityFailure>;
 
 /// The key for route tags (D11). From an env var at startup. Debug hides it.
 #[derive(Clone)] pub struct RouteKey(/* Secret */);
-impl RouteKey { pub fn new(secret: Secret) -> Result<Self, JiraError>; }   // >= 32 bytes
+impl RouteKey { pub fn new(secret: Secret) -> Result<Self, JiraError>; }   // >= MIN_ROUTE_KEY_BYTES (32)
 
 pub const ERROR_PREFIX: &str = "jira.";
 pub const CONFIG_ERROR: &str = "jira.config";
 pub const INVALID_INPUT_ERROR: &str = "jira.invalid_input";
 pub const OUTCOME_PENDING_ERROR: &str = "jira.outcome_pending";
 pub const OUTCOME_UNKNOWN_ERROR: &str = "jira.outcome_unknown";
+pub const WORKFLOW_ERROR: &str = "jira.workflow";   // a workflow failure with no activity error type
 pub const SETTLE_SECS: u64 = 30;
 /// "jira.<code>"; retryable iff err.is_retryable(); RateLimited -> with_retry_after;
 /// OutcomeUnknown with marker -> with_retry_after(SETTLE_SECS); details {code, status, sent}.
+/// `sent` is `err.may_have_run()` (V41). A RateLimited with no Retry-After gets no hint.
 pub fn failure_for(err: &JiraError) -> ActivityFailure;
 /// Glue for policy::host_may_send (section 7.2).
 pub fn previous_attempt(ctx: &ActivityContext) -> Previous;
@@ -1409,20 +1746,35 @@ ctx).await`. All return `Result<T, ActivityFailure>` [V typed failure rule].
 
 | Activity | Input -> Output | Safety | `start_to_close` | retry |
 |---|---|---|---|---|
-| `jira_create_issue` | `CreateIssueInput { client, project: ProjectKey, issue_type: IssueTypeRef, summary, description_text: Option<String>, labels: Vec<String>, assignee: Option<AccountId>, fields: BTreeMap<FieldId, Value>, route: Option<SignalRoute>, resend_after_negative_lookup: bool, settle_secs: Option<u64> }` -> `CreateIssueOutput { id: IssueId, key: IssueKey, outcome: CreateKind }` (`created` or `found`) | key from `ctx.idempotency_key()` (same for each attempt [V]); section 7.2 host rule | 5m | exponential(5, 2s) |
+| `jira_create_issue` | `CreateIssueInput { client, project: ProjectKey, issue_type: IssueTypeRef, summary, description_text: Option<String>, labels: Vec<String>, assignee: Option<AccountId>, fields: BTreeMap<FieldId, Value>, route: Option<SignalRoute>, resend_after_negative_lookup: bool, settle_secs: Option<u64> }` -> `CreateIssueOutput { id: IssueId, key: IssueKey, outcome: CreateKind }` (`created` or `found`) | key from `ctx.idempotency_key()` (same for each attempt [V]); section 7.2 host rule | 12m | exponential(5, 2s) |
 | `jira_get_issue` | `GetIssueInput { client, issue: IssueRef, fields: Option<Vec<FieldId>> }` -> `IssueSummary` | read | 3m | exponential(5, 1s) |
-| `jira_search_page` | `SearchPageInput { client, jql: String, fields: Option<Vec<FieldId>>, max_results: u32, token: Option<String> }` -> `SearchPageOutput { issues: Vec<IssueSummary>, next_token: Option<String> }` | read; one page per call (F26) | 3m | exponential(5, 1s) |
+| `jira_search_page` | `SearchPageInput { client, jql: String, fields: Option<Vec<FieldId>>, max_results: u32, token: Option<String> }` -> `SearchPageOutput { issues: Vec<IssueSummary>, next_token: Option<String> }` | read; one page per call (F26) with `JiraClient::search_page_at`. Jira gives back the input token: `jira.pagination_stalled`. An empty token: `jira.invalid_input`. | 3m | exponential(5, 1s) |
 | `jira_edit_issue` | `EditIssueInput { client, issue, set_summary: Option<String>, add_labels, remove_labels, fields, notify_users: Option<bool> }` -> `EditIssueOutput {}` | PUT idempotent | 5m | exponential(5, 1s) |
-| `jira_transition_to_status` | `TransitionInput { client, issue, target: StatusTarget, fields: Map<String, Value> }` -> `TransitionOutput { outcome: TransitionKind, status: StatusSummary, via: Option<TransitionId> }` | state check | 5m | exponential(5, 2s) |
-| `jira_add_comment` | `AddCommentInput { client, issue, text: String, resend_after_negative_lookup: bool, settle_secs: Option<u64> }` -> `CommentOutput { id: CommentId, outcome: CreateKind }` | marker from `ctx.idempotency_key()`; host rule | 5m | exponential(5, 2s) |
-| `jira_delete_issue` | `DeleteIssueInput { client, issue, delete_subtasks: bool }` -> `DeleteOutput { outcome: DeleteKind }` (`deleted` or `gone_after_retry`) | DELETE idempotent | 5m | exponential(5, 1s) |
-| `jira_watch_issue` | `WatchIssueInput { client, issue, route: SignalRoute }` -> `WatchOutput { issue: IssueSummary }` | GET property, PUT property (merge route), PUT edit label `autumn-tracked`: all idempotent (R6, G10) | 5m | exponential(5, 1s) |
+| `jira_transition_to_status` | `TransitionInput { client, issue, target: StatusTarget, fields: Map<String, Value> }` -> `TransitionOutput { outcome: TransitionKind, status: StatusSummary, via: Option<TransitionId> }` (`moved` or `already_there`) | state check | 12m | exponential(5, 2s) |
+| `jira_add_comment` | `AddCommentInput { client, issue, text: String, resend_after_negative_lookup: bool, settle_secs: Option<u64> }` -> `CommentOutput { id: CommentId, outcome: CreateKind }` | marker from `ctx.idempotency_key()`; host rule | 12m | exponential(5, 2s) |
+| `jira_delete_issue` | `DeleteIssueInput { client, issue, delete_subtasks: bool }` -> `DeleteOutput { outcome: DeleteKind }` (`deleted` or `gone_after_retry`) | DELETE idempotent; a 404 after a maybe-sent attempt gives `gone_after_retry` (V39) | 5m | exponential(5, 1s) |
+| `jira_watch_issue` | `WatchIssueInput { client, issue, route: SignalRoute }` -> `WatchOutput { issue: IssueSummary }` | GET issue, GET property, PUT property (merge route), PUT edit label `autumn-tracked`: all idempotent (R6, G10). It keeps each entry of another run as it is. | 12m | exponential(5, 1s) |
 
 `pub fn activities() -> Vec<ActivityInfo>` returns the eight in this order. A
-unit test pins the names.
+unit test pins the names. Section 7.2 gives the budget of each
+`start_to_close` (V37).
+
+New public items (V40), re-exported from `lib.rs`:
+- the eight `jira_*` fns and their `jira_*_info()`;
+- `activities::{GET_ISSUE, READ_START_TO_CLOSE (3m), WRITE_START_TO_CLOSE
+  (5m), LONG_WRITE_START_TO_CLOSE (12m), get_issue_retry()}`;
+- the enums `CreateKind { Created, Found }`, `TransitionKind { Moved,
+  AlreadyThere }`, `DeleteKind { Deleted, GoneAfterRetry }` (serde
+  `snake_case`);
+- a `new(..)` builder on each input, and `GetIssueInput::client(ClientRef)`;
+- `BridgeCounters` (9.4).
+
+`CreateIssueInput.settle_secs` and `AddCommentInput.settle_secs` override
+`SETTLE_SECS` (tests and examples use 3).
 
 ```rust
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "RawRoute")]   // Deserialize checks the R5 rule
 pub struct SignalRoute { pub workflow_name: String, pub workflow_id: String }
 impl SignalRoute {
     /// Each part: 1..=200 chars of [A-Za-z0-9._:-] (no space, R5).
@@ -1430,7 +1782,11 @@ impl SignalRoute {
     /// HMAC-SHA256(key, "v1\n" + name + "\n" + id), first 32 lower hex chars.
     pub fn tag(&self, key: &RouteKey) -> String;
     pub fn verify(&self, key: &RouteKey, tag: &str) -> bool;   // constant time
+    pub fn property_entry(&self, key: &RouteKey) -> Value;     // {"wf", "id", "tag"}
 }
+pub const MIN_ROUTE_KEY_BYTES: usize = 32;
+pub const TAG_LEN: usize = 32;
+pub const MAX_ROUTE_PART: usize = 200;
 pub const ROUTES_PROPERTY: &str = "autumn-jira-routes";   // {"routes":[{"wf","id","tag"}]}
 pub const TRACKED_LABEL: &str = "autumn-tracked";
 ```
@@ -1451,8 +1807,10 @@ pub struct IssueSignal { pub delivery_id: WebhookDeliveryId, pub event: String,
     pub timestamp_ms: Option<i64> }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WaitOptions { pub timeout: Duration, pub poll_every: Option<Duration>, pub client: ClientRef }
-impl WaitOptions { pub fn new(timeout: Duration) -> Self; /* poll_every 15 min */ }
+impl WaitOptions { pub const fn new(timeout: Duration) -> Self; /* poll_every DEFAULT_POLL_EVERY */ }
 pub const MAX_WAIT: Duration = Duration::from_secs(29 * 24 * 3600);
+pub const MIN_POLL_EVERY: Duration = Duration::from_secs(1);            // V36
+pub const DEFAULT_POLL_EVERY: Duration = Duration::from_secs(15 * 60);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WaitSource { Initial, Signal, Poll }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1465,10 +1823,14 @@ pub async fn await_issue_status(ctx: &WorkflowContext, issue_id: &IssueId, targe
 
 Steps (D12, W2, B1, B5, Y2):
 1. `options.timeout > MAX_WAIT` gives a non-retryable `WorkflowFailure`
-   (`jira.invalid_input`) (B6).
+   (`jira.invalid_input`) (B6). `poll_every` under `MIN_POLL_EVERY` gives
+   the same failure (V36): a zero poll gives a hot loop of reads.
 2. One read: `jira_get_issue` on `ctx.queue_name()` with
-   `execute_activity_with_opts` [V GOTCHA]. At the target: `Reached
-   { source: Initial }`. So an issue already done returns at once (R6).
+   `execute_activity_with_opts(&jira_get_issue_info(), read,
+   Some(ctx.queue_name()), None, None)` [V GOTCHA]. The info defaults are
+   exponential(5, 1s) and 3m. At the target: `Reached { source: Initial }`.
+   So an issue already done returns at once (R6). A failed read keeps its
+   error type.
 3. `deadline = ctx.system_now() + timeout` [V: `system_now` records the wall
    clock in history]. Loop with an index `i`:
    - `remaining = deadline - ctx.system_now()`. `remaining <= 0`: one last
@@ -1477,15 +1839,35 @@ Steps (D12, W2, B1, B5, Y2):
      The race arms a fresh timer each round, so there is no stale timer.
    - A signal win: decode `IssueSignal`. Skip it when `issue_id` differs, or
      when `timestamp_ms` is older than the newest seen timestamp (F45). When
-     `status` matches: `Reached { Signal }`.
+     `status` matches: `Reached { Signal }`. The newest timestamp comes only
+     from signals of this issue. A signal with no timestamp is never older.
+     A payload that is not an `IssueSignal` is skipped with `ctx.log_warn`
+     (no payload in the log). A signal win runs no poll read in that round.
    - A timer win with `poll_every`: `jira_get_issue`. A match gives
      `Reached { Poll }`.
 4. No `ctx.now()` anywhere in `autumn-jira-harvest/src` (guard test). A test
    runs the wait with the advancing clock OFF (W2).
+5. Drain (V35): before it returns, the wait takes each `jira.event` signal
+   that is already in the history (`ctx.drain_signals_raw(SIGNAL)`). Strict
+   replay of harvest 0.8 (sweep, `replay_check`, `WorkflowReplayer`) gives
+   `EarlyCompletion` for a history that ends with signals that no code
+   read. Without the drain, a minimal `race(signal, timer)` workflow failed
+   on 18 of 64 seeds; with it, 64 of 64 pass. The cost: a workflow that
+   reads `jira.event` itself after the wait does not get the signals that
+   came before the end of the wait. A later wait reads the issue first, so
+   it does not need them. ADR 0006 records this.
+
+Test harness (V43, spike S2): in `WorkflowTestEnv`, `ctx.system_now()`
+reads the real wall clock, so a deadline from it never comes there. The
+deadline tests use the seeded `Simulation` (`env.simulation()`), which gives
+`system_now` the virtual time. "Advancing clock OFF" means
+`WorkflowReplayer::new()` with no `with_advancing_timer_clock`. Each history
+replays there, and `replay_check` also runs.
 
 ### 9.4 Signal bridge
 
 ```rust
+#[derive(Clone)]   // Debug hides the route key
 pub struct HarvestSignalBridge { /* pool: DbPool, client: JiraClient, key: RouteKey, allowed: BTreeSet<String>, counters */ }
 impl HarvestSignalBridge {
     pub fn new(pool: autumn_harvest::worker::DbPool, client: JiraClient, key: RouteKey) -> Self;   // [V DbPool]
@@ -1496,9 +1878,15 @@ impl HarvestSignalBridge {
 }
 #[async_trait] impl EventSink for HarvestSignalBridge { .. }
 pub enum RouteOutcome { Signalled, Duplicate, NoRun, Finished, NotAllowed, BadTag }
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct BridgeCounters { pub deliveries: u64, pub skipped: u64, pub signalled: u64, pub duplicate: u64,
+    pub no_run: u64, pub finished: u64, pub not_allowed: u64, pub bad_tag: u64, pub transient: u64 }
 /// Pure: does this delivery need routing? jira:issue_created, or jira:issue_updated with a status change (B4, W26).
 pub fn wants(event: &JiraEvent) -> bool;
-/// Pure: the routes in a property value, kept only when allowed and the tag verifies.
+/// Pure: the routes in a property value, each with its check result.
+/// `Signalled` means "passes both checks; to signal" (V42). `BadTag` and
+/// `NotAllowed` are the rejects. The tag check comes first. A malformed entry
+/// (no wf, id or tag string, or a name that breaks R5) is left out.
 pub fn routes_from_property(value: &Value, key: &RouteKey, allowed: &BTreeSet<String>) -> Vec<(SignalRoute, RouteOutcome)>;
 ```
 
@@ -1506,7 +1894,9 @@ pub fn routes_from_property(value: &Value, key: &RouteKey, allowed: &BTreeSet<St
 1. `wants(event)` false: `Ok(())`.
 2. `issue.fields.labels` present and without `autumn-tracked`: `Ok(())`.
 3. `client.get_issue_property(issue_id, ROUTES_PROPERTY)` (a strongly
-   consistent GET, G10). A `JiraError` gives `HandlerError::from(err)`.
+   consistent GET, G10). A `JiraError` gives `HandlerError::from(err)`. A
+   404 (no routes) gives `Ok` with nothing to route. A delivery with no
+   outcomes counts as `skipped`.
 4. For each route: tag check in constant time (forged: `BadTag`, counted,
    `warn`, no DB call, B10). Not in the allowlist: `NotAllowed`.
 5. `resolve_execution_id_by_workflow_id(conn, name, id)` [V]. `None`:
@@ -1515,8 +1905,12 @@ pub fn routes_from_property(value: &Value, key: &RouteKey, allowed: &BTreeSet<St
    Some(delivery_id))` [V]. `Ok(true)`: `Signalled`. `Ok(false)`:
    `Duplicate`.
 7. Errors (W19, B4): `HarvestError::Config`, `Cancelled`, `NotFound` give
-   `Finished` (200). `ShardUnavailable`, `Database`, pool errors give
-   `HandlerError::Transient` (503). One test per class (Postgres).
+   `Finished` (200). `ShardUnavailable`, `Database`, pool errors and each
+   other `HarvestError` give `HandlerError::Transient` (503), with a fixed
+   message that holds no database text. One test per class (Postgres). The
+   bridge returns at the first transient route error. The routes before it
+   can already have their signal; Jira sends the delivery again, and those
+   routes then give `Duplicate`.
 8. Limits (ADR 0006): one shard; a multi-shard engine needs a fan-out
    lookup. The workflow checks `issue_id` in each signal, so a route on
    another issue cannot move a workflow.
@@ -1544,16 +1938,65 @@ impl JiraComponent {
     pub fn endpoint_options(&self, uri: &str) -> Result<EndpointOptions, CamelError>;
 }
 impl Component for JiraComponent { /* scheme, metadata (producer only, uri_options), create_endpoint */ }
-#[non_exhaustive] pub struct EndpointOptions { /* parsed, checked options */ }
+
+/// V44: the path of a `jira:` URI. Exact match: `createissue` fails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Operation { CreateIssue, GetIssue, EditIssue, TransitionToStatus, AddComment, Search }
+impl Operation { pub const ALL: [Self; 6]; pub const fn name(self) -> &'static str; pub fn parse(name: &str) -> Option<Self>; }
+impl Display for Operation   // name()
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct EndpointOptions {            // V44: parsed, checked options
+    pub operation: Operation,
+    pub connection: String,
+    pub project: Option<ProjectKey>,
+    pub issue_type: Option<IssueTypeRef>,
+    pub issue_key: Option<IssueRef>,
+    pub status: Option<StatusTarget>,
+    pub jql: Option<String>,
+    pub fields: Option<FieldSet>,       // None: the default set
+    pub max_results: u32,
+    pub max_pages: u32,
+    pub require_idempotency_key: bool,
+    pub resend_after_negative_lookup: bool,
+    pub notify_users: Option<bool>,
+    pub allow_header_overrides: bool,
+    pub throw_exception_on_failure: bool,
+    pub max_body_size: usize,
+}
 pub fn uri_options() -> Vec<UriOption>;
 pub fn to_camel_error(err: &JiraError, operation: &str) -> CamelError;   // from err.class().camel
 ```
+
+The component does not call `.durable()` on its clients (V50). The app
+registers `client.durable()` for routes under harvest. The `camel_route`
+example does that.
 
 URI `jira:<operation>?<options>`. Producer only: `create_consumer` gives
 `EndpointCreationFailed("jira: is producer-only; use it in to(...), not in from(...)")`.
 Every option is checked at route add. An unknown option gives `InvalidUri`
 that lists all names. Idempotency comes from the harvest-camel header
 `HarvestIdempotencyKey` [V], the only source (W12).
+
+URI rules (V45):
+- The Ops column applies. An option of another operation gives
+  `InvalidUri("option '<x>' does not apply to <op>; it applies to <ops>")`.
+- Required options give `InvalidUri` when absent: `createIssue` needs
+  `project` and `issueType`; `getIssue`, `editIssue`, `transitionToStatus`
+  and `addComment` need `issueKey`; `transitionToStatus` also needs
+  `status`; `search` needs `project` or `jql`. Each of these, except the
+  `createIssue` options, is required only without
+  `allowHeaderOverrides=true`, because a header can then give the value.
+- An unknown `connection` gives `CamelError::Config("no jira connection 'x'
+  for jira:<op>; the connections are a, b")`: the URI is well formed, but
+  it names a client that is not registered.
+- Values: `issueType` with only digits is an `IssueTypeId`; other trimmed
+  text is a name. `status` takes `id:<n>`, `category:<key>` or a trimmed
+  name. A `jql` in `RAW(...)` is taken as it is. `fields` is a csv of
+  `FieldId` with no empty item. `maxResults` is `1..=MAX_SEARCH_RESULTS`.
+  `maxPages` is `1..=1000`. The bool options use `parse_bool_param`.
 
 | Option | Default | Rule | Ops |
 |---|---|---|---|
@@ -1569,7 +2012,7 @@ that lists all names. Idempotency comes from the harvest-camel header
 | `requireIdempotencyKey` | `false` | bool | createIssue, addComment |
 | `resendAfterNegativeLookup` | `false` | bool; explicit unsafe opt-in | createIssue, addComment |
 | `notifyUsers` | unset | bool | editIssue |
-| `allowHeaderOverrides` | `false` | bool. Only then do `JiraIssueKey`, `JiraJql`, `JiraStatus` replace options. Such a header without the flag fails the exchange with `ValidationError` that names `allowHeaderOverrides` (R18). | all |
+| `allowHeaderOverrides` | `false` | bool. Only then do `JiraIssueKey`, `JiraJql`, `JiraStatus` replace options. Such a header without the flag fails the exchange with `ValidationError` that names `allowHeaderOverrides` (R18), unless the header equals the option (V46). | all |
 | `throwExceptionOnFailure` | `true` | `parse_bool_param` [V] | all |
 | `maxBodySize` | 2 MiB | > 0 | all |
 
@@ -1580,21 +2023,94 @@ removeLabels?, fields?}`. `transitionToStatus`: optional `{fields}`.
 `input`, `output = None` (san-mateo-camel convention [V]), plus the out
 headers.
 
+Body rules (V48):
+- `createIssue`: `description` is a string (`Adf::text`) or an ADF object.
+  The `fields` keys are `FieldId`s.
+- `editIssue`: the body needs at least one change.
+- `transitionToStatus`: the body is empty or `{fields}` only.
+- `addComment`: `{text}`, a JSON string, or plain text that is not JSON.
+- An unknown body key fails and lists the known keys, not the unknown key.
+- `maxBodySize` applies to each body kind before any call and gives
+  `StreamLimitExceeded`.
+
+Reply bodies (V48):
+
+| Operation | Reply body |
+|---|---|
+| `createIssue` | `{id, key, outcome: created \| found}` |
+| `getIssue` | the serialized `autumn_jira::Issue` (Rust field names, for example `fields.issue_type`) |
+| `editIssue` | `{issue}` |
+| `transitionToStatus` | `{issue, outcome: moved \| already_there, status: StatusSummary}` |
+| `addComment` | `{issue, id, outcome: created \| found}` |
+| `search` | `{issues: [Issue], nextPageToken: string \| null}` |
+
+Out headers (V48):
+- `JiraIssueKey` and `JiraIssueId`: the key for a key ref, the id for an id
+  ref. `createIssue` and `getIssue` set both.
+- `JiraOutcome`: `createIssue`, `addComment` and `transitionToStatus` only.
+- `JiraNextPageToken`: `search` only, when more pages exist.
+- Each step removes the four out headers before it sets its own, so a
+  stale `JiraIssueId` or token does not stay on the exchange.
+
+Header rules (V46, V47):
+- An override header without `allowHeaderOverrides` fails only when it
+  differs from the option. A header equal to the option passes: it is often
+  the `JiraIssueKey` out header of an earlier `jira:` step on the same
+  issue. A header that does not parse also fails. The error text names the
+  header and `allowHeaderOverrides`, and never holds the header value.
+- Each operation reads only its own headers. For example, `createIssue`
+  does not read `JiraIssueKey`, so a stale out header passes there.
+- A `JiraJql` header next to the `project` option always fails, also with
+  the flag: raw JQL drops the project filter. This is the reason of the
+  URI conflict rule.
+- A route that chains `jira:` steps on different issues sets
+  `allowHeaderOverrides=true`, or removes `JiraIssueKey` between the steps.
+
+`maxPages` (V48) is the page limit of one exchange, not an error. At the
+limit, the reply has `nextPageToken` and the out header. A repeated token
+gives `PaginationStalled` (`policy::token_page_step`). An incoming
+`JiraNextPageToken` is not read.
+
+`throwExceptionOnFailure=false` (V48) applies only to an error of the Jira
+call. The exchange then gets `{"error": {code, retryable, message}}` and no
+out headers. Body errors, header errors and the `outcome_unknown` of a
+negative lookup always fail the exchange.
+
 Idempotency (D7): with `HarvestIdempotencyKey`, create and comment use the
 idempotent client calls with that key. `HarvestActivityAttempt > 1` [V]
 gives `Previous::Unknown`, so `host_may_send` allows a send only with
 `resendAfterNegativeLookup=true`. Else lookup only: found gives the reply
 with outcome `found`; none gives `ValidationError("jira outcome_unknown:
-...")`. `OutcomeUnknown` with a key maps to `Io` (retryable, so harvest
-waits and retries); without a key to `ValidationError`. Without the key
-header and `requireIdempotencyKey=false`, the call is at most once.
+an earlier attempt of <op> can have run, and the marker lookup found
+nothing; set resendAfterNegativeLookup=true to send it again (ADR 0003)")`.
+`OutcomeUnknown` with a key maps to `Io` (retryable, so harvest waits and
+retries) with the class code `outcome_pending`; without a key to
+`ValidationError`. Without the key header and `requireIdempotencyKey=false`,
+the call is at most once.
+
+Harvest headers (V48):
+- `HarvestIdempotencyKey`: a non-empty string. It goes through
+  `IdempotencyKey::parse`, or `IdempotencyKey::derive` when it does not
+  parse, the same as the harvest activities. A blank key or a key that is
+  not a string fails.
+- `HarvestActivityAttempt`: a number or a digit string >= 1. No header
+  counts as attempt 1.
+- Header names match exactly first, then with no regard to case. A null
+  value counts as no header. The names are crate-private constants in
+  `src/headers.rs`.
 
 Error map: `to_camel_error` uses `err.class().camel`: `Validation` to
 `ValidationError("jira <code>: <display>")`, `Config` to `Config`,
 `Unauthenticated` to `Unauthenticated`, `Http(s)` to `HttpOperationFailed {
 method, url: "jira:<op>", status_code: s, status_text, response_body: None }`,
 `Io` to `Io`. So `harvest_camel::is_retryable(&mapped) == err.is_retryable()`
-for every `JiraError` [V rule `route.rs:248-270`]. The main workspace cannot
+for every `JiraError` [V rule `route.rs:248-270`]. V49: for an `Http(s)`
+class whose harvest HTTP rule disagrees with `class.retryable` (for
+example `Upstream { status: 404 }`), the map gives `Io` (retryable) or
+`ValidationError` (not retryable), so the rule holds for each value.
+`HttpOperationFailed.method` is the HTTP method of the failed Jira `Op`
+(`POST` when the error has no op). `status_text` is `"<reason phrase>
+(jira <code>)"`. Each other kind gives the text `"jira <code>: <Display>"`. The main workspace cannot
 depend on `harvest-camel` (D14). `tests/retry_rule.rs` holds a pinned copy of
 `is_retryable`. The ecosystem test `is_retryable_copy_matches_harvest_camel`
 compares the copy with the real function on every mapped error. The Jira
@@ -1736,13 +2252,14 @@ Workflow `incident_flow(input: AlertInput) -> IncidentOutput` lives in
 | Example | Crate | Shows | Needs | Failure test |
 |---|---|---|---|---|
 | `embedded` | `autumn-jira` | API token client on `FakeJira`: projects, issue types, create, get, edit, search pages, transition with resolution, comment, idempotent create after 503 after commit, delete. | nothing | 400 on a bad field gives `Validation` |
-| `autumn_app` | `autumn-plugin-jira` | `run()` app, route `GET /issues/{key}` with `JiraService` and `.http()?`, a log sink. The fake transport unless `JIRA_SITE`, `JIRA_EMAIL`, `JIRA_API_TOKEN` are set (the real path uses `ReqwestTransport`). `scripts/smoke-autumn-example.sh` boots dev and prod, POSTs a signed webhook (openssl HMAC), checks `/actuator/health`, sends SIGTERM. | nothing | a missing secret env exits non-zero and names the variable |
-| `harvest_workflow` | `autumn-jira-harvest` | Real Postgres worker. The recipe workflow `jira_ticket_lifecycle` (create with route, transition, `await_issue_status`, comment; all texts are input fields, R16). 503 after commit gives one issue and `found`. A delivery from `FakeJira` goes into `HarvestSignalBridge::deliver`. A second run shows `jira_watch_issue` on an issue that a person made, done by poll only. | Postgres | 400 on create gives one POST and a workflow error |
-| `camel_route` | `autumn-jira-camel` | `direct:in` to `jira:createIssue` (with `HarvestIdempotencyKey`) then `jira:transitionToStatus?status=category:indeterminate`; out headers. | nothing | an unknown option fails at route add |
+| `autumn_app` | `autumn-plugin-jira` (`required-features = ["testing"]`) | `run()` app, route `GET /issues/{key}` with `JiraService` and `.http()?`, a log sink. The fake transport unless `JIRA_SITE` is set (V34). With `JIRA_SITE` the real path uses `ReqwestTransport` and `JiraConfig::from_toml_str(include_str!("autumn.toml"))` with that site, and the plugin reads `JIRA_EMAIL` and `JIRA_API_TOKEN`. `scripts/smoke-autumn-example.sh` boots dev and prod, POSTs a signed webhook (openssl HMAC: 200, the copy 409, a bad signature 401), checks `/actuator/health`, sends SIGTERM. | nothing | the real path with no `JIRA_API_TOKEN` exits non-zero and names the variable |
+| `harvest_workflow` | `autumn-jira-harvest` | Real Postgres worker. The recipe workflow `jira_ticket_lifecycle` (create with route, transition, `await_issue_status`, comment; all texts are input fields, R16). 503 after commit gives one issue and `found`. A delivery from `FakeJira` goes into `HarvestSignalBridge::deliver`. A second workflow, `jira_watch_lifecycle`, shows `jira_watch_issue` on an issue that a person made, done by poll only. Both workflows live in the example, not in `src`. The harvest retry `fixed(n, interval)` comes from input fields (`retry_attempts`, `retry_interval_ms`); the client uses `base_backoff_ms = 50`. | Postgres | 400 on create gives one POST and a workflow error |
+| `camel_route` | `autumn-jira-camel` | `direct:in` to `jira:createIssue` (with `HarvestIdempotencyKey`), `.set_body(Body::Empty)`, then `jira:transitionToStatus?status=category:indeterminate&allowHeaderOverrides=true` (it takes the issue from the `JiraIssueKey` out header); out headers. Attempt 1, then attempt 2 with the same key: 1 create POST, 1 transition, outcome `moved` then `already_there`. It registers a durable client (`ClientSettings::for_durable_host()`). | nothing | an unknown option fails at route add |
 
 Each example: `[[example]] test = true`, `const RUN_TIMEOUT`, `fn check(`
 with the `check failed:` prefix, `expect_err(`, a CI step, a README row. The
 `examples_wired` guard checks all of this by text (san-mateo pattern [V]).
+`docs/examples-plan.md` gives the design of each example.
 
 ---
 
@@ -1754,12 +2271,15 @@ Levels:
 2. `MemoryTransport` for raw protocol cases: 302, empty 204, HTML 404, bad
    JSON, 413, `Retry-After` and `Beta-Retry-After`, Seraph header.
 3. `FakeJira` for behaviour. The client conformance suite
-   (`crates/autumn-jira/tests/common/suite.rs`, shared by `conformance.rs` and
-   `live.rs` through `mod common;`,
+   (`crates/autumn-jira/tests/common/suite.rs`, used by `conformance.rs`
+   through `mod common;`,
    `pub async fn run_client_suite<F, Fut>(make: F) where F: Fn(FakeJira) -> Fut,
    Fut: Future<Output = JiraClient>`, W11) runs the same cases on three
-   setups: API token, san-mateo `jira-basic`, san-mateo `atlassian` (with a
-   401 refresh case).
+   setups: API token, san-mateo `jira-basic`, san-mateo `atlassian`. The
+   OAuth setup expires the first token, so each case does one refresh and
+   one cloud id discovery. Two cases need a reply that the fake cannot give
+   (a moved issue, a short page that is not the last). They are in
+   `core/t/client.rs` over `MemoryTransport` (V52).
 4. Retry and backoff tests: `#[tokio::test(start_paused = true)]` (F37).
    No wall-clock sleep in tests. `index_lag` uses tokio time.
 5. Chaos proptest (G15): random fault schedules on `create_issue_idempotent`
@@ -1772,8 +2292,13 @@ Levels:
    test with `run()` (SMP `boot.rs` pattern [V]).
 8. Live: `crates/autumn-jira/tests/live.rs`, `#[ignore = "needs a real Jira
    site"]`, env `JIRA_LIVE_SITE`, `JIRA_LIVE_EMAIL`, `JIRA_LIVE_TOKEN`,
-   `JIRA_LIVE_PROJECT`. Runs the non-fault suite cases and one case per `[U]`
-   assumption, then deletes what it made. Never in CI. Never logs values.
+   `JIRA_LIVE_PROJECT`. It has five own cases (V51): the non-fault paths
+   (`live_account_project_and_issue_types`,
+   `live_create_get_edit_search_delete`) and the `[U]` items A2, A3 and A7
+   (`marker_label_is_searchable`, `comment_lookup_sees_a_new_comment`,
+   `create_body_property_is_readable`). It does not run the suite, because
+   the suite needs a `FakeJira`. It deletes what it made. It is the only test
+   file that makes a `ReqwestTransport`. Never in CI. Never logs values.
 
 Rules:
 - Postgres tests: one pool per test; migrations once under
@@ -1792,15 +2317,14 @@ Rules:
 
 | Job | Steps |
 |---|---|
-| `lint` | `cargo fmt --all --check`; `cargo fmt --manifest-path examples/ecosystem/Cargo.toml --check`; `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked`. |
-| `test` | Postgres 16 service (`jira/jira/jira_test`); env `JIRA_TEST_DATABASE_URL`; `cargo test --workspace --all-features --locked`; `cargo test --workspace --doc --all-features --locked`. |
-| `coverage` | Postgres 16; `JIRA_EXAMPLE_TIME_FACTOR=3`; `cargo llvm-cov --workspace --all-features --locked --json --summary-only --output-path cov.json --ignore-filename-regex '(/tests/\|/examples/)'`; `python3 scripts/coverage-gate.py cov.json 85` (each of the five crates, `src/` lines, B20). |
+| `lint` | `cargo fmt --all --check`; `cargo fmt --manifest-path examples/ecosystem/Cargo.toml --check`; `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked`; `shellcheck scripts/*.sh`. |
+| `test` (V53: test and coverage in one job) | Postgres 16 service (`jira/jira/jira_test`); env `JIRA_TEST_DATABASE_URL`, `DATABASE_URL`, `JIRA_EXAMPLE_TIME_FACTOR=3`; `cargo llvm-cov --workspace --all-targets --all-features --json --summary-only --output-path cov.json --ignore-filename-regex '(/tests/\|/examples/)'`; `python3 scripts/coverage-gate.py cov.json 85` (each of the five crates, `src/` lines, B20); `cargo test --workspace --doc --all-features`; weekly and manual runs: `cargo update` first, and the spec shape step (re-extract `schemas.json`, `git diff --exit-code`). |
 | `examples` | Postgres 16; `cargo run --locked -p autumn-jira --example embedded`; `bash scripts/smoke-autumn-example.sh`; `cargo run --locked -p autumn-jira-harvest --example harvest_workflow` (once, then two at once); `cargo run --locked -p autumn-jira-camel --example camel_route`. |
 | `msrv` | toolchain 1.89.0; `cargo +1.89.0 check --workspace --all-targets --all-features --locked`. |
 | `verus` | The san-mateo job, copied: pinned `VERUS_REV`, build from source, cache `target-verus`, `VERUS_Z3_PATH`; `verus verus/policy.rs`. |
 | `deps` | `cargo tree --locked -e normal -d` one-version check for `autumn-web`, `san-mateo`, `autumn-harvest`, `camel-api`, `camel-core`, `camel-component-api`; root lock without `harvest-camel`, `autumn-harvest-plugin`, `pq-src`, `libsqlite3-sys`. |
 | `example-ecosystem` | Postgres 16; toolchains 1.89.0 and 1.99.0; lock check (`cargo metadata --locked`, with the hint `cargo update --manifest-path examples/ecosystem/Cargo.toml -p autumn-jira -p autumn-plugin-jira -p autumn-jira-harvest -p autumn-jira-camel -p autumn-jira-fake`); fmt; clippy `-D warnings`; `cargo test --locked --manifest-path examples/ecosystem/Cargo.toml`; `cargo run --locked --manifest-path examples/ecosystem/Cargo.toml`; one-version check; `cargo +1.89.0 check --locked --all-targets`. `timeout-minutes: 45`. |
-| `weekly` (schedule and manual) | `cargo update` in both workspaces, then `test` and `example-ecosystem`; re-extract `schemas.json` from the current Jira spec and fail on a diff. |
+| weekly (schedule and manual) | No own job (V53). On a `schedule` or `workflow_dispatch` run, `test` and `example-ecosystem` run `cargo update` first, and `test` re-extracts `schemas.json` from the current Jira spec and fails on a diff. |
 
 No `continue-on-error`. No `||` after a checked command (guard). Branch
 protection requires each job.
@@ -1848,8 +2372,8 @@ implementer writes first (RED).
 | AC3 API token auth | WP3 | Pre-emptive Basic header. `Debug` of `BasicAuth`, `DirectBackend` and `JiraClient` has no token. 401 is not retried. Seraph header gives `CaptchaRequired`. Transport errors map per 4.4. | `core/t/client.rs::{basic_header_is_sent, unauthorized_is_not_retried, captcha_is_typed}`; u: `backend::direct::{transport_error_map, debug_hides_the_token}` |
 | AC4 san-mateo backend | WP3 | `jira-basic` gives no prefix. `atlassian` gives `/ex/jira/{cloudId}`. Cloud id from config, then metadata, then discovery; discovery merges `cloudId` into metadata. `resolve_cloud_id` fails on zero or many Jira matches and skips Confluence-only entries. One send per attempt (`retries = 0`). Every `san_mateo::Error` maps per 4.4. | u: `backend::san_mateo::{error_map_covers_every_variant, prefix_by_provider}`; u: `backend::{resolve_cloud_id_picks_jira, resolve_cloud_id_needs_a_site_when_many}`; `core/t/san_mateo.rs::{discovery_stores_the_cloud_id, metadata_cloud_id_skips_discovery, one_send_for_a_503_and_for_a_429, a_401_refreshes_once}` |
 | AC5 One suite, three setups | WP3 | `run_client_suite` passes on API token, san-mateo `jira-basic` and san-mateo `atlassian`. | `core/t/conformance.rs::{suite_on_api_token, suite_on_san_mateo_basic, suite_on_san_mateo_oauth}` |
-| AC6 Issue CRUD | WP3 | Create (ADF description, labels, custom fields as given, property), get (default and explicit fields; a moved issue keeps the returned key), edit (204 or 200; `notifyUsers` sent only when set), delete (`deleteSubtasks` as a string; `GoneAfterRetry` only after a maybe-sent attempt), get and set property. A 204 is not parsed. Each op checks `Op::expected`. | `core/t/common/suite.rs` cases `{create_get_edit_delete, moved_issue_key_is_kept, notify_users_only_when_set, delete_gone_after_retry, properties_round_trip}`; u: `error::op_expected_table` |
-| AC7 Lists | WP3 | Search: `POST /search/jql` only, explicit `fields`, the token pager ends on `isLast` or no token, `PaginationStalled` after a repeated token, `PageLimit` at `max_pages`. Comments: offset pager stops on `total` or an empty page. Projects (PageBean) and issue types (createmeta) list all pages. Approximate count. | suite cases `{search_pages_to_the_end, search_stalls_on_a_repeated_token, search_page_limit, comments_offset_pages, short_non_last_comment_page, projects_list_all_pages, issue_types_of_a_project, approximate_count}`; `core/t/guards.rs::no_legacy_search_path` |
+| AC6 Issue CRUD | WP3 | Create (ADF description, labels, custom fields as given, property), get (default and explicit fields; a moved issue keeps the returned key), edit (204 or 200; `notifyUsers` sent only when set), delete (`deleteSubtasks` as a string; `GoneAfterRetry` only after a maybe-sent attempt), get and set property. A 204 is not parsed. Each op checks `Op::expected`. | `core/t/common/suite.rs` cases `{create_get_edit_delete, notify_users_only_when_set, delete_gone_after_retry, properties_round_trip}`; `core/t/client.rs::{moved_issue_key_is_kept, empty_204_is_not_parsed_and_statuses_are_checked}`; u: `error::op_expected_table` |
+| AC7 Lists | WP3 | Search: `POST /search/jql` only, explicit `fields`, the token pager ends on `isLast` or no token, `PaginationStalled` after a repeated token, `PageLimit` at `max_pages`. Comments: offset pager stops on `total` or an empty page. Projects (PageBean) and issue types (createmeta) list all pages. Approximate count. | suite cases `{search_pages_to_the_end, search_stalls_on_a_repeated_token, search_page_limit, comments_offset_pages, projects_list_all_pages, issue_types_of_a_project, approximate_count}`; `core/t/client.rs::{short_non_last_comment_page, one_search_page_at_a_token}`; `core/t/guards.rs::no_legacy_search_path` |
 | AC8 Transitions | WP3 | List; do by id with fields; `transition_to_status` by name, id or category; `AlreadyThere` with no POST; `TransitionNotAvailable` lists names for an empty or unmatched list; Done with `resolution`. | suite cases `{transition_by_category, already_there_sends_no_post, no_transition_lists_names, done_needs_resolution_fields}` |
 | AC9 Comments | WP3 | Add with ADF; list; `all_comments` bounded by `max_pages`. | suite cases `{add_and_list_comments, all_comments_is_bounded}` |
 | AC10 JQL builder | WP1 | Values quoted by `jql_quote`; field names validated; control chars give `InvalidInput`; `Jql::raw` is the only raw path. The string `x" OR project = SECRET` stays one literal. | u: `jql::{builds_clauses, injection_stays_one_literal, control_chars_rejected, field_names_validated}`; u: `policy::spec_as_test_jql_quote_round_trip` |
@@ -1912,7 +2436,7 @@ a sub-branch. The lead merges GREEN states only. All worktrees share one
 | WP0 Scaffold (lead) | lead | root `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `clippy.toml`, `.github/**`, `README.md`, `CLAUDE.md`, `docs/**`, `scripts/coverage-gate.py`, `scripts/extract-jira-schemas.py`, `crates/*/Cargo.toml` (dependencies), each `crates/*/src/lib.rs` first version (module lines and crate docs only), `crates/autumn-jira/tests/guards.rs`, `crates/autumn-jira/tests/examples_wired.rs`, `verus/policy.rs` first version (spec skeleton) | all | none |
 | WP1 Core pure | agent A | `crates/autumn-jira/src/{lib.rs, ids.rs, site.rs, time.rs, model.rs, model/wire.rs, request.rs, error.rs, adf.rs, jql.rs, policy.rs, webhook.rs, sink.rs, writes.rs}`, `verus/policy.rs` (after WP0), `crates/autumn-jira/tests/{pure.rs, webhook.rs}` | san-mateo `policy.rs` and `verus/policy.rs`, the spec | WP0 |
 | WP2 Fake | agent F | `crates/autumn-jira-fake/**` (except `Cargo.toml` deps), `scripts/extract-jira-schemas.py` output file | the spec, `docs/plan.md` 5 | WP0 |
-| WP3 Client | agent B | `crates/autumn-jira/src/{backend.rs, backend/direct.rs, backend/san_mateo.rs, client.rs, client/settings.rs, client/pager.rs, client/idempotent.rs}`, `crates/autumn-jira/tests/{client.rs, conformance.rs, common/mod.rs, common/suite.rs, retry.rs, idempotency.rs, errors.rs, san_mateo.rs, logs.rs, live.rs}`, `crates/autumn-jira/examples/embedded.rs` | WP1, WP2 | WP1 at C1, WP2 at C1 |
+| WP3 Client | agent B | `crates/autumn-jira/src/{backend.rs, backend/direct.rs, backend/san_mateo.rs, client.rs, client/call.rs, client/settings.rs, client/pager.rs, client/idempotent.rs}`, `crates/autumn-jira/tests/{client.rs, conformance.rs, common/mod.rs, common/suite.rs, retry.rs, idempotency.rs, errors.rs, san_mateo.rs, logs.rs, live.rs}`, `crates/autumn-jira/examples/embedded.rs` | WP1, WP2 | WP1 at C1, WP2 at C1 |
 | WP4 Plugin | agent P | `crates/autumn-plugin-jira/**` (except `Cargo.toml` deps), `scripts/smoke-autumn-example.sh` | WP1, WP3, WP2 | P0 (config, boot check, full-path mount, spike S1): WP0. P1, P2: WP3 at C2 |
 | WP5 Harvest | agent H | `crates/autumn-jira-harvest/**` (except `Cargo.toml` deps) | WP1, WP3, WP2 | H0 (wait helper on a mock activity, `failure_for`, route tags, `previous_attempt`): WP1 at C1. H1: WP3 at C2 |
 | WP6 Camel | agent K | `crates/autumn-jira-camel/**` (except `Cargo.toml` deps) | WP1, WP3, WP2 | WP3 at C2 |
@@ -2031,7 +2555,9 @@ Order inside each WP:
 4. WP4: S1 spike test -> config and mode -> boot check -> route pipeline
    with a test sink -> dispatch semantics -> service and lifecycle -> health
    -> `testing` feature -> boot child test -> `autumn_app` example and smoke
-   script.
+   script. As built (V33): service and lifecycle -> health -> route pipeline
+   and dispatch. The route needs the started runtime cell, and the webhook
+   tests read the counters from the health details.
 5. WP5: S2 spike test -> `failure_for` and `previous_attempt` -> route tags
    -> `await_issue_status` (mock activity) -> activities (work methods first)
    -> `jira_watch_issue` -> bridge pure parts -> bridge Postgres tests ->

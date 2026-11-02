@@ -1,6 +1,7 @@
 # ADR 0003: Retries and safe writes
 
-- Status: Accepted
+- Status: Accepted. Amended for design v3 (as built): the activity
+  budgets, the lookup-failure rule and the delete rule across attempts.
 - Date: 2026-11-02
 
 ## Context
@@ -50,6 +51,35 @@ layers multiply the sends and break the activity timeout.
 - An app can opt in with a clear name: `resend_after_negative_lookup`
   (harvest) or `resendAfterNegativeLookup=true` (camel). Then a negative
   lookup after the settle delay leads to one more create.
+- Lookup failure across attempts (design v3): after a "maybe sent" or
+  unknown previous attempt, the activity does a lookup only. When that
+  lookup fails with a retryable error, the failure stays
+  `jira.outcome_pending` with `details.sent = true` and the settle delay.
+  So the next attempt also looks up only. Without this rule, a lookup that
+  gets a 429 gives `jira.rate_limited` with `sent = false`, and the attempt
+  after it sends the write again. A non-retryable lookup error keeps its
+  own failure.
+- One "sent" rule: `JiraError::may_have_run` gives `details.sent`. It is
+  `false` only when the request cannot have run in Jira.
+  `error::NOT_SENT_NETWORK_CODES` lists the `Network` codes that did not
+  leave the process, and the san-mateo map test pins them.
+- Delete across attempts (design v3): a 404 on `jira_delete_issue` after a
+  "maybe sent" or unknown previous attempt gives `gone_after_retry`, not a
+  failure. This is the client delete rule, applied across harvest
+  attempts.
+- Activity budgets (design v3): each `start_to_close` is larger than the
+  durable worst case of its client calls at 60 s for each request. A
+  durable read or idempotent write takes up to 130 s, a marked write up to
+  390 s (pre-lookup, write, one lookup), and a checked write up to 650 s
+  (each of two attempts reads the status and the transitions, then sends).
+  So `jira_get_issue` and `jira_search_page` get 3m, `jira_edit_issue` and
+  `jira_delete_issue` get 5m, and `jira_create_issue`, `jira_add_comment`,
+  `jira_transition_to_status` and `jira_watch_issue` (four idempotent
+  calls, 520 s) get 12m. Design v2 gave 5m to each write, which is too
+  short for a marked or a checked write. A `start_to_close` timeout gives
+  `Unknown` on the next attempt, so a short budget makes more lookups
+  only, not a duplicate. The test `start_to_close_covers_the_client_budget`
+  adds up the calls with the real constants.
 - The client never forwards an `Idempotency-Key` header to Jira.
 
 ## Consequences
@@ -66,6 +96,8 @@ layers multiply the sends and break the activity timeout.
   idempotent create. The error says how to fix it. No silent fallback.
 - Bad: the Jira `Retry-After` hint is lost when the error goes through
   camel, because harvest-camel maps camel errors without it.
+- Bad: a 12m `start_to_close` lets a stuck write hold a worker slot longer
+  than design v2 did.
 - Considered and deferred: a key-window probe with `bulkfetch` above a
   high-water mark gives a strong negative without the search index. It
   depends on three facts that no source confirms: keys only go up, keys are
