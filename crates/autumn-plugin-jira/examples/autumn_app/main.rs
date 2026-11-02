@@ -114,8 +114,16 @@ async fn plugin() -> Result<(JiraPlugin, &'static str), String> {
         .ok()
         .filter(|v| !v.trim().is_empty());
     if let Some(site) = site {
-        let mut config =
-            JiraConfig::from_toml_str(include_str!("autumn.toml")).map_err(|e| e.to_string())?;
+        // The same sources as `JiraPlugin::new()`: autumn.toml, the profile
+        // file, `.env` and the `AUTUMN_JIRA__*` env vars. `autumn_web::main`
+        // starts a release build in the prod profile and a debug build in
+        // the dev profile, and `AUTUMN_ENV` selects another profile.
+        let profile = if cfg!(debug_assertions) {
+            "dev"
+        } else {
+            "prod"
+        };
+        let mut config = JiraConfig::load(Some(profile)).map_err(|e| e.to_string())?;
         if let Some(api) = config.api_token.as_mut() {
             api.site = Some(site);
         }
@@ -147,8 +155,9 @@ async fn main() {
         }
     };
     eprintln!("autumn_app: jira = {jira}; routes: GET /, GET /issues/{{key}}, POST /jira/webhook");
-    // `run` reads `[jira]` from autumn.toml. A missing secret env var stops
-    // the boot with a non-zero exit, and the error names the variable.
+    // The plugin reads `[jira]` from autumn.toml, the profile file, `.env`
+    // and the `AUTUMN_JIRA__*` env vars. A missing secret env var stops the
+    // boot with a non-zero exit, and the error names the variable.
     // `run` stops on SIGTERM or Ctrl-C.
     Box::pin(
         autumn_web::app()
