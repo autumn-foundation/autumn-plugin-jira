@@ -5,7 +5,8 @@
 //! constants. It drops each `proof { ... }` block of a body here. The test
 //! `policy::every_const_fn_is_proved_or_listed` makes sure that each
 //! function of `src/policy.rs` is in exactly one list: body matched, proved
-//! with a proptest, or proptest only.
+//! with a proptest, or proptest only. So each function of `src/policy.rs`
+//! is in this file or in `PROPTEST_ONLY`.
 //! Run: `verus verus/policy.rs`.
 //!
 //! The proofs use no `assume`, no `admit` and no verifier attribute that

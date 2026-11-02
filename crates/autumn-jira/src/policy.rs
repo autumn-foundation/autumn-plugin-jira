@@ -382,8 +382,11 @@ mod tests {
     use proptest::prelude::*;
     use std::collections::BTreeMap;
 
-    /// The functions that are not in `verus/policy.rs`. Proptests check
-    /// them.
+    /// The functions that are not in `verus/policy.rs`: `signature_shape_ok`
+    /// and `jql_quote`. Proptests check them.
+    ///
+    /// Three functions are not body matched: these two, and `backoff_ms` in
+    /// [`PROOF_PROPTESTED`]. Each other function is in [`BODY_MATCHED`].
     const PROPTEST_ONLY: [&str; 2] = ["signature_shape_ok", "jql_quote"];
 
     /// The functions that Verus proves, but with a body that differs from
@@ -459,9 +462,11 @@ mod tests {
             .collect()
     }
 
-    /// Returns each coverage problem: a function of `exec` that is not in
-    /// exactly one list, a list entry that is not a function, or a proved
-    /// function with no `pub fn` line in `spec`.
+    /// Returns each coverage problem:
+    ///
+    /// - a function of `exec` that is not in exactly one list;
+    /// - a list entry that is not a function;
+    /// - a proved function with no `pub fn` line in `spec`.
     fn coverage_violations(exec: &str, spec: &str) -> Vec<String> {
         let fns = all_fns(exec);
         let in_spec = spec_fns(spec);

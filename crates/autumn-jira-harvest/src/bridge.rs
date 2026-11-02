@@ -1,14 +1,14 @@
 //! The webhook-to-signal bridge (plan 9.4).
 //!
 //! [`HarvestSignalBridge`] is an [`EventSink`]. For a delivery that needs
-//! routing, it reads the route property of the issue, checks the tag and
-//! the allowlist of each route, reads the status of the issue, and sends the
-//! signal [`SIGNAL`] to the run with `send_signal_idempotent`. The delivery
+//! routing, the bridge reads the route property of the issue. It checks the
+//! tag and the allowlist of each route. Then it reads the status of the
+//! issue and sends [`SIGNAL`] to the run with `send_signal_idempotent`. The delivery
 //! id is the idempotency key, so a repeated delivery gives one signal.
 //! Webhooks are at least once.
 //!
 //! A delivery does not name its Jira site, and two sites can have the same
-//! issue id. So the bridge does not trust the payload for the issue: it
+//! issue id. So the bridge does not trust the payload for the issue. It
 //! reads the status and the key from the site of its own client
 //! (R2-webhook-security-1). One bridge serves one site. Give each site its
 //! own webhook endpoint, its own webhook secret and its own bridge.
@@ -114,7 +114,7 @@ impl Counters {
 /// a fan-out lookup. The workflow checks the issue id of each signal, so a
 /// route on another issue cannot move a workflow. The bridge serves the
 /// site of its client only. The status in a signal comes from a read on
-/// that site, not from the payload, so a delivery of another site with the
+/// that site, not from the payload. So a delivery of another site with the
 /// same issue id cannot give a false status.
 #[derive(Clone)]
 pub struct HarvestSignalBridge {
@@ -375,9 +375,10 @@ pub fn wants(event: &JiraEvent) -> bool {
 /// - [`RouteOutcome::Signalled`]: both checks pass. The bridge then sends the
 ///   signal and sets the final outcome of the route.
 ///
-/// An entry with no `wf`, `id` or `tag` string, or with a name or an id that
-/// breaks the [`SignalRoute::new`] rule, is not a route and is left out. A
-/// value with no `routes` array gives no routes.
+/// Some entries are not routes, and the result does not hold them. Such an
+/// entry has no `wf`, `id` or `tag` string. Or its name or id breaks the
+/// [`SignalRoute::new`] rule. A value with no `routes` array gives no
+/// routes.
 #[must_use]
 pub fn routes_from_property(
     value: &Value,

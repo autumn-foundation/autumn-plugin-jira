@@ -318,8 +318,8 @@ impl JiraBackend for NoConnection {
 /// Converts a Jira error to an [`AutumnError`].
 ///
 /// The status comes from `err.class().http_status`. A `Decode` or a
-/// `Config` error gives a general text: the details stay in the log, as
-/// they tell the caller about the server, not about the request.
+/// `Config` error gives a general text. The details stay in the log. They
+/// tell the caller about the server, not about the request.
 #[must_use]
 pub fn autumn_error(err: &JiraError) -> AutumnError {
     let class = err.class();

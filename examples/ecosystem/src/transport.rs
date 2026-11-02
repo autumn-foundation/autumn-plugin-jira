@@ -48,8 +48,9 @@ const OLD_ACCESS_TOKEN: &str = "acme-at-old";
 /// The refresh token that san-mateo holds at the start.
 const REFRESH_TOKEN: &str = "acme-rt-0";
 
-/// Our own chat API, in the Nango `providers.yaml` format. We wrote it: it
-/// is not a copy of a Nango provider. The API key goes in `x-api-key`.
+/// The team chat API of the example, in the Nango `providers.yaml` format.
+/// The example has its own text for it. It is not a copy of a Nango
+/// provider. The API key goes in `x-api-key`.
 pub const CHAT_YAML: &str = r"
 team-chat:
     display_name: Team chat

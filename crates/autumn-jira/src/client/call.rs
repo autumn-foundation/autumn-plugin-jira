@@ -1,9 +1,9 @@
 //! One client call: attempts, waits and typed errors.
 //!
 //! The loop sends one attempt, classifies it, and asks
-//! `policy::decide` for the next step. This file is the non-verified glue
-//! of plan section 6: the map from an HTTP status or a `BackendError` to an
-//! `Outcome`, and from a `Decision` to a client action.
+//! `policy::decide` for the next step. This file holds the glue code of
+//! plan section 6. Verus does not prove it. It maps an HTTP status or a
+//! `BackendError` to an `Outcome`. It maps a `Decision` to a client action.
 
 use std::time::Duration;
 

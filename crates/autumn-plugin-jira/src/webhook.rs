@@ -10,9 +10,9 @@
 //! 1. autumn checks the HMAC in constant time over the raw body, and the
 //!    delivery id in its replay store. It answers 400, 401 or 409 itself.
 //! 2. The route reads the retry and flow headers and parses the body.
-//! 3. It ignores a delivery with no timestamp, a stale or a future one, one
-//!    from an ignored actor, and an event that it does not dispatch. Each
-//!    gets 200 and a counter. A delivery from an ignored actor goes to the
+//! 3. It ignores a delivery with no timestamp, and a stale or a future one.
+//!    It also ignores one from an ignored actor, and an event that it does
+//!    not dispatch. Each gets 200 and a counter. A delivery from an ignored actor goes to the
 //!    sinks for all actors only, when such sinks exist.
 //! 4. It runs each handler in order, each in its own task, under
 //!    `handler_timeout_ms`. A transient error or a timeout gives 503, and

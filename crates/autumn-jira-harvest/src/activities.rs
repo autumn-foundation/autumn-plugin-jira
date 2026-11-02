@@ -6,8 +6,8 @@
 //! function is one line: it resolves the client with [`client_for`] and
 //! calls the work method.
 //!
-//! The marked writes (`jira_create_issue`, `jira_add_comment`) follow the
-//! durable-host rule of plan 7.2: after an attempt that can have sent the
+//! The marked writes `jira_create_issue` and `jira_add_comment` follow the
+//! durable-host rule of plan 7.2. After an attempt that can have sent the
 //! write, the next attempt only looks for the write by its marker. Only the
 //! opt-in `resend_after_negative_lookup` sends it again.
 
@@ -72,11 +72,11 @@ pub const WRITE_START_TO_CLOSE: Duration = Duration::from_secs(540);
 /// The `start_to_close` of a marked write, a checked write and the watch:
 /// 42 minutes.
 ///
-/// Through san-mateo, at four transport calls of 60 s for each
-/// send, one durable marked write can take 1 470 s, one checked write
-/// 2 450 s and the watch 1 960 s (plan 7.2, B2). A direct client needs
-/// less. Harvest retries an attempt that stops in the middle of a write
-/// as an attempt with an unknown result, so the budget must cover the
+/// The budget is for san-mateo, at four transport calls of 60 s for each
+/// send (plan 7.2, B2). Then one durable marked write can take 1 470 s. One
+/// checked write can take 2 450 s, and the watch 1 960 s. A direct client
+/// needs less. Harvest retries an attempt that stops in the middle of a
+/// write as an attempt with an unknown result. So the budget must cover the
 /// slow path.
 pub const LONG_WRITE_START_TO_CLOSE: Duration = Duration::from_secs(2_520);
 

@@ -1,9 +1,9 @@
 //! Signed webhook deliveries in the shape of the Jira webhook page.
 //!
 //! Jira sends webhook payloads in the REST v2 shape, not in the REST v3
-//! shape of the API replies: a comment `body` and a `description` are
-//! text, and each `self` link is a `/rest/api/2/` link (the example
-//! payload of the Jira webhook page). [`to_v2`] makes that shape.
+//! shape of the API replies. A comment `body` and a `description` are
+//! text. Each `self` link is a `/rest/api/2/` link. The example payload of
+//! the Jira webhook page shows this. [`to_v2`] makes that shape.
 
 use std::sync::Arc;
 
@@ -130,8 +130,8 @@ fn queue(state: &mut State, secret: &Arc<[u8]>, body: &Value) {
     state.deliveries.push(build(secret, &id, bytes));
 }
 
-/// Turns a REST v3 value into the REST v2 shape of a webhook payload: each
-/// ADF document becomes its text, and each `self` link to `/rest/api/3/`
+/// Turns a REST v3 value into the REST v2 shape of a webhook payload. Each
+/// ADF document becomes its text. Each `self` link to `/rest/api/3/`
 /// becomes a `/rest/api/2/` link. Other text does not change.
 pub(crate) fn to_v2(value: Value) -> Value {
     match value {

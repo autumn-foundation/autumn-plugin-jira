@@ -1,8 +1,8 @@
 //! `autumn_jira`: a typed, safe Jira Cloud REST v3 client.
 //!
-//! The crate has strict ids, models, Atlassian Document Format (ADF), a JQL
-//! builder, typed errors with one class table, the webhook types with the
-//! signature check, and the verified retry core in [`policy`].
+//! The crate has strict ids, models, Atlassian Document Format (ADF) and a
+//! JQL builder. It has typed errors with one class table. It has the webhook
+//! types and the signature check. [`policy`] holds the verified retry core.
 //!
 //! The safe path is the default. A value always goes into JQL as one
 //! literal, and an id that goes into a URL path matches a strict rule.

@@ -2,8 +2,8 @@
 //!
 //! `parse` is strict, and `Deserialize` calls `parse`. So an autumn handler
 //! that takes `Path<IssueKey>` rejects bad input with a 400. Response models
-//! read Jira ids through `model::wire` with `from_response`, which keeps the
-//! value as Jira gives it (a moved or renamed key can have another shape).
+//! read Jira ids through `model::wire` with `from_response`. It keeps the
+//! value as Jira gives it: a moved or renamed key can have another shape.
 
 use std::borrow::Cow;
 use std::fmt;

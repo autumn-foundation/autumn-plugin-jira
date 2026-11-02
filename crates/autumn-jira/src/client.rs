@@ -664,8 +664,8 @@ impl JiraClient {
 
     /// Reads all pages of an offset pager, at most `max_pages` pages.
     ///
-    /// It uses the rule of the token pager (`policy::token_page_step`): it
-    /// always reads the first page, and it gives `PageLimit` only when more
+    /// It uses the rule of the token pager (`policy::token_page_step`). It
+    /// always reads the first page. It gives `PageLimit` only when more
     /// pages come after `max_pages` pages.
     async fn offset_pages<T>(
         &self,

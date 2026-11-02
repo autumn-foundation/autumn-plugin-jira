@@ -91,9 +91,10 @@ enum Source {
 /// A stored cloud id can be stale: san-mateo keeps the metadata when a
 /// tenant connects the same connection to another site. So after the
 /// first 401 or 404 reply under a stored cloud id, the backend reads
-/// `accessible-resources` one time. When the token does not cover the
-/// stored id, the backend discovers the site again, stores the new id,
-/// and uses it from the next attempt on. It never sends the attempt again.
+/// `accessible-resources` one time. Then the token can fail to cover the
+/// stored id. In that case the backend discovers the site again and stores
+/// the new id. The next attempt uses the new id. The backend never sends
+/// the attempt again.
 pub struct SanMateoBackend {
     san: SanMateo,
     target: SanMateoTarget,

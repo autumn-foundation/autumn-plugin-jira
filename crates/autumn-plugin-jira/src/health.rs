@@ -51,10 +51,10 @@ struct Probe {
 ///   then makes no call. It gives `UNKNOWN` with a `reason`, so
 ///   `/actuator/health` does not fail.
 ///
-/// The details hold the mode, the site, the last HTTP status, the time of
-/// the last call, the webhook counters, `self_filter`, the
-/// `max_body_bytes` of the endpoint and `handler_tasks`, the handler tasks
-/// that run now. They never hold an email, an account
+/// The details hold the mode, the site, the last HTTP status and the time of
+/// the last call. They also hold the webhook counters, `self_filter` and the
+/// `max_body_bytes` of the endpoint. `handler_tasks` is the number of
+/// handler tasks that run now. The details never hold an email, an account
 /// id or a token.
 pub struct JiraHealth {
     cell: Cell,

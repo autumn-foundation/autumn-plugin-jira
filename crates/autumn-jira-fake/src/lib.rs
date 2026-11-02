@@ -112,9 +112,10 @@ impl fmt::Debug for FakeJira {
     reason = "each call holds the lock for the whole call, so each call is atomic"
 )]
 impl FakeJira {
-    /// Site "acme", cloud id `11111111-2222-4333-8444-555555555555`, project
-    /// OPS (issue types Task 10001, Incident 10002, Bug 10003), users ann
-    /// (a person) and bot (the API account), and the default workflow.
+    /// Site "acme", cloud id `11111111-2222-4333-8444-555555555555`, and the
+    /// default workflow. Project OPS has the issue types Task 10001,
+    /// Incident 10002 and Bug 10003. The users are ann (a person) and bot
+    /// (the API account).
     ///
     /// Basic auth takes [`DEFAULT_EMAIL`] and [`DEFAULT_API_TOKEN`]. OAuth
     /// and webhooks are off.

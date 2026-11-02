@@ -2,9 +2,9 @@
 //! transition with a state check.
 //!
 //! The marked writes are `MarkedWrite`. After a 5xx or a "maybe sent"
-//! attempt the policy gives `Confirm`: the client looks up the marker and
-//! never sends the write again in the same call (D5). A lookup that fails
-//! never counts as "not found" (B3).
+//! attempt, the policy gives `Confirm`. Then the client looks up the marker.
+//! It never sends the write again in the same call (D5). A lookup that
+//! fails never counts as "not found" (B3).
 
 use std::time::Duration;
 
@@ -346,9 +346,10 @@ impl JiraClient {
     ///
     /// After a 5xx or a "maybe sent" attempt, the status alone cannot show
     /// that the first attempt did not run. So the client sends again only
-    /// when the issue is still at the status of the first attempt, and the
-    /// transition is not global and not looped. Such a transition is not
-    /// valid after a commit, so Jira rejects a second send. Else the call
+    /// on two conditions. The issue is still at the status of the first
+    /// attempt. The transition is not global and not looped. Such a
+    /// transition is not valid after a commit, so Jira rejects a second
+    /// send. Else the call
     /// stops with `OutcomeUnknown`: an automation can have moved the issue
     /// on, or a global transition can run two times. A 400 or a 409 after
     /// a "maybe sent" attempt makes the client read the status once more:

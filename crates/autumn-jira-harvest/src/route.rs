@@ -8,9 +8,9 @@
 //! issue at another run. The check of a tag runs in constant time.
 //!
 //! Limit (R2-webhook-security-6): the tag binds the run, not the issue. A
-//! create puts the route into the create body, and Jira gives the issue id
-//! only after that call, so the tag cannot hold the issue id without a
-//! second write. A person who can edit issue properties can therefore copy
+//! create puts the route into the create body. Jira gives the issue id only
+//! after that call. So the tag cannot hold the issue id without a second
+//! write. A person who can edit issue properties can therefore copy
 //! a valid entry to another issue. The copy cannot move a wait: the wait
 //! checks the issue id of each signal, and the bridge reads the status from
 //! its own site. But each status change of that issue adds one signal to

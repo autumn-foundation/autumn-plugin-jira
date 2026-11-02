@@ -117,9 +117,9 @@ pub struct SanMateoTarget {
     /// The cloud id of the `connection_id` connection. Optional,
     /// `atlassian` only. It needs `connection_id`.
     ///
-    /// The clients of `for_connection(id)` for other ids do not use it:
-    /// each tenant gets its site from the `cloudId` in its own connection
-    /// metadata, else from a discovery with its own token.
+    /// The clients of `for_connection(id)` for other ids do not use it.
+    /// Each tenant gets its site from the `cloudId` in its own connection
+    /// metadata. Without it, a discovery with its own token gives the site.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cloud_id: Option<String>,
     /// The site URL of the `connection_id` connection. Optional. It

@@ -17,8 +17,8 @@ use crate::{DEFAULT_MAX_BODY_SIZE, SCHEME};
 pub(crate) const MAX_PAGES: u32 = 1000;
 
 /// The default `settleMs`: 10 s. The harvest activity waits 30 s
-/// (`SETTLE_SECS`), but a `direct:` call stops after 30 s by default, and
-/// the wait and two lookups must fit in it.
+/// (`SETTLE_SECS`). But a `direct:` call stops after 30 s by default. The
+/// wait and two lookups must fit in that time.
 pub(crate) const DEFAULT_SETTLE_MS: u64 = 10_000;
 
 /// The largest `settleMs` value: 2 minutes.
@@ -112,7 +112,7 @@ pub struct EndpointOptions {
     /// Fail the exchange when it has no `HarvestIdempotencyKey` header.
     pub require_idempotency_key: bool,
     /// Send a marked write again after a negative lookup. This is an
-    /// explicit unsafe opt-in: a lookup can miss a write that Jira did not
+    /// explicit unsafe opt-in. A lookup can miss a write that Jira did not
     /// index yet, so Jira can get the write two times.
     pub resend_after_negative_lookup: bool,
     /// The wait of `createIssue` before a second marker lookup, in ms. It

@@ -42,9 +42,10 @@ pub const MAX_POLL_ROUNDS: u64 = 3_000;
 /// run: 46 minutes.
 ///
 /// The last read needs it: five attempts of `READ_START_TO_CLOSE` and the
-/// backoff between them. A run with an `execution_timeout` that ends before
-/// the wait ends gets `TimedOut` at the start of this margin, so the
-/// workflow can still act on the timeout (R4-harvest-determinism-5).
+/// backoff between them. The `execution_timeout` of a run can end before
+/// the wait ends. Then the wait gives `TimedOut` at the start of this
+/// margin, so the workflow can still act on the timeout
+/// (R4-harvest-determinism-5).
 pub const LAST_READ_MARGIN: Duration = Duration::from_secs(46 * 60);
 
 /// The most signal rounds of one wait that do not end it.
@@ -165,7 +166,7 @@ pub enum StatusWait {
 ///    harvest 0.8 fails on a history that ends with signals that no code
 ///    read, so this drain keeps every history replayable.
 ///
-/// The drain has one cost: a workflow that reads [`SIGNAL`] itself after
+/// The drain has one cost. A workflow that reads [`SIGNAL`] itself after
 /// the wait does not get the signals that came before the end of the
 /// wait. A later wait reads the issue first, and its read time makes an
 /// older signal stale, so it does not need them.
@@ -350,8 +351,8 @@ impl OpenWait {
     /// with `await_condition`, and it opens the wait when that one ends.
     ///
     /// It never fails because of the other wait. A failure can come only in
-    /// the first poll or after the other wait has ended, and a parked
-    /// future and a replay give these at other points. Waiting gives the
+    /// the first poll or after the other wait has ended. A parked future and
+    /// a replay give these at other points. Waiting gives the
     /// same commands in both: the second wait starts in the poll in which the
     /// first wait ends.
     async fn enter(ctx: &WorkflowContext) -> Result<Self, WorkflowFailure> {
@@ -409,9 +410,9 @@ async fn poll(
     }
 }
 
-/// Returns `true` when a failed read is a missed poll: a `jira.*` failure
-/// with `details.retryable = true`, a timeout of the activity, or an
-/// activity failure with no `jira.` type. A `jira.*` failure with no
+/// Returns `true` when a failed read is a missed poll. Three failures are
+/// missed polls: a `jira.*` failure with `details.retryable = true`, a
+/// timeout of the activity, and an activity failure with no `jira.` type. A `jira.*` failure with no
 /// `retryable` detail, and each error that is not about the activity, end
 /// the wait.
 fn is_missed_poll(error: &HarvestError) -> bool {

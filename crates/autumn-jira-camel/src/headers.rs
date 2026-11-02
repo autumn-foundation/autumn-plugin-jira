@@ -57,8 +57,8 @@ fn bad_header(name: &str, rule: &str) -> CamelError {
 /// Reads the harvest-camel headers of a marked write.
 ///
 /// `HarvestIdempotencyKey` is the only source of the key (W12). An attempt
-/// above 1 gives `Previous::Unknown`: the camel route cannot see the
-/// failure of the previous attempt, so it must assume that the write can
+/// above 1 gives `Previous::Unknown`. The camel route cannot see the
+/// failure of the previous attempt. So it must assume that the write can
 /// have run. A camel redelivery also gives `Previous::Unknown`, whatever
 /// the attempt header says: the earlier try of this step can have sent the
 /// write. Then the producer does a lookup only.
@@ -279,8 +279,8 @@ fn not_allowed(header: &str, option: &str) -> CamelError {
 /// With `allowHeaderOverrides`, the header wins over the option. Without
 /// it, a header that differs from the option fails the exchange, and does
 /// not stay silent (R18). A header equal to the option changes nothing, so
-/// it passes: it is often the out header of an earlier `jira:` step on the
-/// same issue.
+/// it passes. Such a header is often the out header of an earlier `jira:`
+/// step on the same issue.
 fn overridden<T: Clone + PartialEq>(
     message: &Message,
     options: &EndpointOptions,
