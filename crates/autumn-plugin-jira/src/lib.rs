@@ -35,6 +35,8 @@ mod plugin;
 mod runtime;
 mod secrets;
 mod service;
+#[cfg(feature = "testing")]
+pub mod testing;
 mod webhook;
 pub mod webhook_config;
 
