@@ -14,8 +14,8 @@ mod common;
 use std::sync::Arc;
 
 use autumn_jira_camel::{
-    HEADER_ISSUE_ID, HEADER_ISSUE_KEY, HEADER_NEXT_TOKEN, HEADER_OUTCOME, JiraComponent, SCHEME,
-    uri_options,
+    HEADER_ISSUE_ID, HEADER_ISSUE_KEY, HEADER_JQL, HEADER_NEXT_TOKEN, HEADER_OUTCOME,
+    HEADER_STATUS, JiraComponent, SCHEME, uri_options,
 };
 use autumn_jira_fake::{FakeJira, FakeOp, Fault};
 use camel_api::{Body, CamelError, Message};
@@ -763,5 +763,248 @@ async fn opt_in_resends() {
     .unwrap();
     assert_eq!(reply(&ex)["outcome"], json!("created"));
     assert_eq!(fake.count(FakeOp::AddComment), 1);
+    stop(camel).await;
+}
+
+/// Makes OPS-1 and OPS-2 (label `alert`) on the fake.
+async fn two_issues(fake: &FakeJira) {
+    let camel = start_one(
+        component(fake),
+        "jira:createIssue?project=OPS&issueType=Task",
+    )
+    .await
+    .unwrap();
+    for summary in ["First", "Second"] {
+        send(
+            &camel,
+            "direct:in",
+            json(json!({"summary": summary, "labels": ["alert"]})),
+        )
+        .await
+        .unwrap();
+    }
+    stop(camel).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn override_header_without_flag_fails() {
+    let fake = FakeJira::new();
+    two_issues(&fake).await;
+    let before = fake.requests().len();
+    let camel = start(
+        component(&fake),
+        &[
+            ("direct:get", "jira:getIssue?issueKey=OPS-1"),
+            ("direct:edit", "jira:editIssue?issueKey=OPS-1"),
+            ("direct:comment", "jira:addComment?issueKey=OPS-1"),
+            (
+                "direct:move",
+                "jira:transitionToStatus?issueKey=OPS-1&status=category:indeterminate",
+            ),
+            ("direct:search", "jira:search?project=OPS"),
+            (
+                "direct:create",
+                "jira:createIssue?project=OPS&issueType=Task",
+            ),
+        ],
+    )
+    .await
+    .unwrap();
+    let cases = [
+        ("direct:get", HEADER_ISSUE_KEY, json!("OPS-2"), json!(null)),
+        (
+            "direct:edit",
+            HEADER_ISSUE_KEY,
+            json!("OPS-2"),
+            json!({"setSummary": "x"}),
+        ),
+        ("direct:comment", HEADER_ISSUE_KEY, json!(10001), json!("x")),
+        ("direct:move", HEADER_ISSUE_KEY, json!("OPS-2"), json!(null)),
+        ("direct:move", HEADER_STATUS, json!("Done"), json!(null)),
+        (
+            "direct:search",
+            HEADER_JQL,
+            json!("project = SECRET"),
+            json!(null),
+        ),
+    ];
+    for (from, name, value, body) in cases {
+        let message = json_with(body, &[(name, value.clone())]);
+        let err = send(&camel, from, message).await.unwrap_err();
+        let m = validation(&err);
+        assert!(
+            m.contains(name) && m.contains("allowHeaderOverrides"),
+            "{from} {name}: {m}"
+        );
+        assert!(!m.contains("SECRET"), "the text holds no header value: {m}");
+    }
+    assert_eq!(fake.requests().len(), before, "no call");
+
+    // A header that equals the option changes nothing, so it passes. This
+    // is the out header of an earlier step on the same issue.
+    let ex = send(
+        &camel,
+        "direct:get",
+        json_with(json!(null), &[(HEADER_ISSUE_KEY, json!("OPS-1"))]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(reply(&ex)["key"], json!("OPS-1"));
+    // createIssue does not read JiraIssueKey: a stale out header passes,
+    // and the reply replaces it.
+    let ex = send(
+        &camel,
+        "direct:create",
+        json_with(
+            json!({"summary": "Third"}),
+            &[(HEADER_ISSUE_KEY, json!("OPS-1"))],
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(header(&ex, HEADER_ISSUE_KEY), Some(json!("OPS-3")));
+    stop(camel).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn override_header_with_flag_works() {
+    let fake = FakeJira::new();
+    two_issues(&fake).await;
+    let id_of_2 = fake.issue("OPS-2").unwrap()["id"].clone();
+    let camel = start(
+        component(&fake),
+        &[
+            ("direct:get", "jira:getIssue?allowHeaderOverrides=true"),
+            (
+                "direct:get-default",
+                "jira:getIssue?issueKey=OPS-1&allowHeaderOverrides=true",
+            ),
+            (
+                "direct:move",
+                "jira:transitionToStatus?allowHeaderOverrides=true",
+            ),
+            (
+                "direct:move-default",
+                "jira:transitionToStatus?issueKey=OPS-2&status=category:indeterminate\
+                 &allowHeaderOverrides=true",
+            ),
+            ("direct:search", "jira:search?allowHeaderOverrides=true"),
+            (
+                "direct:search-project",
+                "jira:search?project=OPS&allowHeaderOverrides=true",
+            ),
+            (
+                "direct:comment",
+                "jira:addComment?allowHeaderOverrides=true",
+            ),
+        ],
+    )
+    .await
+    .unwrap();
+
+    // JiraIssueKey replaces issueKey: a key, a numeric id as a string or a
+    // number.
+    for value in [
+        json!("OPS-2"),
+        id_of_2.clone(),
+        json!(id_of_2.as_str().unwrap().parse::<u64>().unwrap()),
+    ] {
+        let message = json_with(json!(null), &[(HEADER_ISSUE_KEY, value.clone())]);
+        let ex = send(&camel, "direct:get-default", message).await.unwrap();
+        assert_eq!(reply(&ex)["key"], json!("OPS-2"), "{value}");
+    }
+    // No header: the option applies.
+    let ex = send(&camel, "direct:get-default", Message::default())
+        .await
+        .unwrap();
+    assert_eq!(reply(&ex)["key"], json!("OPS-1"));
+    // No header and no option: the exchange fails and names the header.
+    let err = send(&camel, "direct:get", Message::default())
+        .await
+        .unwrap_err();
+    assert!(validation(&err).contains(HEADER_ISSUE_KEY), "{err}");
+    for bad in [json!("../x"), json!(true), json!(""), json!(0)] {
+        let message = json_with(json!(null), &[(HEADER_ISSUE_KEY, bad.clone())]);
+        let err = send(&camel, "direct:get", message).await.unwrap_err();
+        assert!(validation(&err).contains(HEADER_ISSUE_KEY), "{bad}: {err}");
+    }
+
+    // JiraStatus and JiraIssueKey give the transition target. The Done
+    // transition needs a resolution in the body.
+    let message = json_with(
+        json!(null),
+        &[
+            (HEADER_ISSUE_KEY, json!("OPS-1")),
+            (HEADER_STATUS, json!("category:indeterminate")),
+        ],
+    );
+    let ex = send(&camel, "direct:move", message).await.unwrap();
+    assert_eq!(reply(&ex)["outcome"], json!("moved"));
+    let message = json_with(
+        json!({"fields": {"resolution": {"name": "Done"}}}),
+        &[
+            (HEADER_ISSUE_KEY, json!("OPS-1")),
+            (HEADER_STATUS, json!("Done")),
+        ],
+    );
+    let ex = send(&camel, "direct:move", message).await.unwrap();
+    assert_eq!(reply(&ex)["status"]["name"], json!("Done"));
+    assert_eq!(
+        fake.issue("OPS-1").unwrap()["fields"]["resolution"]["name"],
+        json!("Done")
+    );
+    let ex = send(&camel, "direct:move-default", Message::default())
+        .await
+        .unwrap();
+    assert_eq!(reply(&ex)["issue"], json!("OPS-2"));
+    let err = send(
+        &camel,
+        "direct:move",
+        json_with(json!(null), &[(HEADER_ISSUE_KEY, json!("OPS-1"))]),
+    )
+    .await
+    .unwrap_err();
+    assert!(validation(&err).contains(HEADER_STATUS), "{err}");
+    for bad in [json!("id:x"), json!(""), json!(3)] {
+        let message = json_with(
+            json!(null),
+            &[
+                (HEADER_ISSUE_KEY, json!("OPS-1")),
+                (HEADER_STATUS, bad.clone()),
+            ],
+        );
+        let err = send(&camel, "direct:move", message).await.unwrap_err();
+        assert!(validation(&err).contains(HEADER_STATUS), "{bad}: {err}");
+    }
+
+    // JiraJql gives the query.
+    let message = json_with(json!(null), &[(HEADER_JQL, json!("labels = alert"))]);
+    let ex = send(&camel, "direct:search", message).await.unwrap();
+    assert_eq!(reply(&ex)["issues"].as_array().unwrap().len(), 2);
+    let err = send(&camel, "direct:search", Message::default())
+        .await
+        .unwrap_err();
+    assert!(validation(&err).contains(HEADER_JQL), "{err}");
+    for bad in [json!(" "), json!(1)] {
+        let message = json_with(json!(null), &[(HEADER_JQL, bad.clone())]);
+        let err = send(&camel, "direct:search", message).await.unwrap_err();
+        assert!(validation(&err).contains(HEADER_JQL), "{bad}: {err}");
+    }
+    // With the project option, a JiraJql header is a conflict: the raw JQL
+    // would drop the project filter.
+    let message = json_with(json!(null), &[(HEADER_JQL, json!("labels = alert"))]);
+    let err = send(&camel, "direct:search-project", message)
+        .await
+        .unwrap_err();
+    let m = validation(&err);
+    assert!(m.contains(HEADER_JQL) && m.contains("project"), "{m}");
+
+    // addComment takes the key from the header too.
+    let message = json_with(
+        json!("From the header"),
+        &[(HEADER_ISSUE_KEY, json!("OPS-2"))],
+    );
+    let ex = send(&camel, "direct:comment", message).await.unwrap();
+    assert_eq!(reply(&ex)["issue"], json!("OPS-2"));
     stop(camel).await;
 }
