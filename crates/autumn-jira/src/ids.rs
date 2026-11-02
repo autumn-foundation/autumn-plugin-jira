@@ -586,7 +586,12 @@ const fn is_non_empty(text: &str) -> bool {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::too_many_lines,
+    reason = "tests with tables"
+)]
 mod tests {
     use super::*;
     use proptest::prelude::*;

@@ -514,7 +514,12 @@ impl JiraError {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::too_many_lines,
+    reason = "tests with tables"
+)]
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
@@ -861,8 +866,8 @@ mod tests {
                     assert_eq!(status, Some(429));
                     assert_eq!(e.retry_after(), Some(Duration::from_secs(7)));
                 }
-                JiraError::Upstream { .. } => assert_eq!(status, Some(503)),
-                JiraError::OutcomeUnknown {
+                JiraError::Upstream { .. }
+                | JiraError::OutcomeUnknown {
                     cause: UnknownCause::ServerError(_),
                     ..
                 } => assert_eq!(status, Some(503)),
@@ -871,7 +876,7 @@ mod tests {
                 _ => assert_eq!(status, None, "{e:?}"),
             }
             if !matches!(e, JiraError::Validation { .. }) {
-                assert!(e.messages().is_empty());
+                assert_eq!(e.messages(), &[] as &[String]);
             }
             if !matches!(e, JiraError::RateLimited { .. }) {
                 assert_eq!(e.retry_after(), None);
