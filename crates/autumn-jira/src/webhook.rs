@@ -53,7 +53,8 @@ pub struct Delivery {
     pub event: JiraEvent,
     /// The `timestamp` of the payload.
     pub timestamp: Option<JiraTimestamp>,
-    /// The account id of `user`: the actor.
+    /// The account id of `user`: the actor. A comment event with no
+    /// `user` gives the comment author.
     pub actor: Option<AccountId>,
 }
 
@@ -647,7 +648,11 @@ mod tests {
         for name in ["comment_created", "comment_updated", "comment_deleted"] {
             let parsed = parse(&comment_payload(name, "hello"));
             assert_eq!(parsed.event.name(), name);
-            assert_eq!(parsed.actor, None);
+            // No top-level `user`: the actor is the comment author.
+            assert_eq!(
+                parsed.actor.as_ref().map(AccountId::as_str),
+                Some("712020:bot")
+            );
             let (JiraEvent::CommentCreated(e)
             | JiraEvent::CommentUpdated(e)
             | JiraEvent::CommentDeleted(e)) = &parsed.event

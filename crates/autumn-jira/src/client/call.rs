@@ -255,3 +255,107 @@ impl JiraClient {
         decode(request.op, &reply.body)
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
+mod tests {
+    use super::*;
+
+    fn reply(status: u16, headers: &[(&str, &str)]) -> Sent {
+        Ok(ApiResponse {
+            status,
+            headers: headers
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect(),
+            body: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn classify_table() {
+        let cases: [(Sent, Outcome, UnknownCause); 9] = [
+            (
+                reply(200, &[]),
+                Outcome::Success,
+                UnknownCause::ServerError(200),
+            ),
+            (
+                reply(429, &[]),
+                Outcome::RateLimited,
+                UnknownCause::ServerError(429),
+            ),
+            (
+                reply(503, &[]),
+                Outcome::ServerError,
+                UnknownCause::ServerError(503),
+            ),
+            (
+                reply(302, &[]),
+                Outcome::Redirect,
+                UnknownCause::ServerError(302),
+            ),
+            (
+                reply(404, &[]),
+                Outcome::ClientError,
+                UnknownCause::ServerError(404),
+            ),
+            (
+                Err(BackendError::NotSent {
+                    transient: true,
+                    code: "c",
+                }),
+                Outcome::NotSent,
+                UnknownCause::Network,
+            ),
+            (
+                Err(BackendError::NotSent {
+                    transient: false,
+                    code: "c",
+                }),
+                Outcome::ClientError,
+                UnknownCause::Network,
+            ),
+            (
+                Err(BackendError::Auth { code: "c" }),
+                Outcome::ClientError,
+                UnknownCause::Network,
+            ),
+            (
+                Err(BackendError::MaybeSent { code: "timeout" }),
+                Outcome::MaybeSent,
+                UnknownCause::Timeout,
+            ),
+        ];
+        for (sent, outcome, cause) in cases {
+            assert_eq!(classify(&sent), outcome, "{sent:?}");
+            assert_eq!(unknown_cause(&sent), cause, "{sent:?}");
+        }
+        let connect: Sent = Err(BackendError::MaybeSent { code: "connect" });
+        assert_eq!(unknown_cause(&connect), UnknownCause::Network);
+        assert_eq!(
+            stop_error(Op::Search, &connect),
+            JiraError::Network {
+                op: Op::Search,
+                code: "connect"
+            }
+        );
+    }
+
+    #[test]
+    fn retry_after_reads_integer_seconds_only() {
+        let read = |v: &str| retry_after(&reply(429, &[("retry-after", v)]).unwrap());
+        assert_eq!(read("7"), Some(Duration::from_secs(7)));
+        assert_eq!(read(" 7 "), Some(Duration::from_secs(7)));
+        assert_eq!(read("-1"), None);
+        assert_eq!(read("1.5"), None);
+        assert_eq!(read("Wed, 21 Oct 2026 07:28:00 GMT"), None);
+        let beta = reply(429, &[("Beta-Retry-After", "9")]).unwrap();
+        assert_eq!(retry_after(&beta), None);
+        let seraph = reply(403, &[("x-seraph-loginreason", "AUTHENTICATION_DENIED")]).unwrap();
+        assert_eq!(
+            status_error(Op::Myself, &seraph),
+            JiraError::CaptchaRequired { op: Op::Myself }
+        );
+    }
+}

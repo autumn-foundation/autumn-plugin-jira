@@ -101,3 +101,69 @@ impl ClientSettings {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn durable_caps_and_keeps() {
+        let d = ClientSettings::for_durable_host();
+        assert_eq!(
+            (
+                d.max_attempts,
+                d.base_backoff_ms,
+                d.max_backoff_ms,
+                d.lookup_attempts,
+                d.lookup_delay_ms,
+                d.max_pages
+            ),
+            (2, 500, 10_000, 1, 0, 1_000)
+        );
+        assert!(d.jitter);
+        assert_eq!(d.marker_label_prefix, "autumn-idem-");
+        let mut s = ClientSettings::default();
+        s.jitter = false;
+        s.marker_label_prefix = "app-".to_owned();
+        s.max_attempts = 1;
+        s.base_backoff_ms = 10;
+        s.max_pages = 5_000;
+        let c = s.durable();
+        assert_eq!(
+            (c.max_attempts, c.base_backoff_ms, c.max_pages),
+            (1, 10, 1_000)
+        );
+        assert!(!c.jitter);
+        assert_eq!(c.marker_label_prefix, "app-");
+    }
+
+    #[test]
+    fn worst_case_bounds() {
+        let per = Duration::from_secs(60);
+        let d = ClientSettings::for_durable_host();
+        // Two sends and one 10 s wait.
+        assert_eq!(d.worst_case(OpClass::Read, per), Duration::from_secs(130));
+        assert_eq!(
+            d.worst_case(OpClass::UnsafeWrite, per),
+            Duration::from_secs(130)
+        );
+        // The pre-lookup, the write and one lookup.
+        assert_eq!(
+            d.worst_case(OpClass::MarkedWrite, per),
+            Duration::from_secs(390)
+        );
+        // Two attempts, each with two reads and one send, and one wait.
+        assert_eq!(
+            d.worst_case(OpClass::CheckedWrite, per),
+            Duration::from_secs(650)
+        );
+        let full = ClientSettings::default();
+        assert_eq!(
+            full.worst_case(OpClass::Read, per),
+            Duration::from_secs(420)
+        );
+        let mut zero = ClientSettings::default();
+        zero.max_attempts = 0;
+        assert_eq!(zero.worst_case(OpClass::Read, per), per);
+    }
+}
