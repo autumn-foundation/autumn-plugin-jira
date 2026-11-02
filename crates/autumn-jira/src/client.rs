@@ -631,8 +631,12 @@ impl JiraClient {
         request: &SearchRequest,
         token: Option<&PageToken>,
     ) -> Result<IssuePage> {
-        let _ = (request, token);
-        Err(JiraError::invalid("search", "not yet"))
+        let page = self.search_page(request, token).await?;
+        let next_token = page.next_page_token.filter(|_| !page.is_last);
+        Ok(IssuePage {
+            issues: page.issues,
+            next_token,
+        })
     }
 
     /// Reads one page of a search.

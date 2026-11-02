@@ -513,14 +513,43 @@ impl JiraError {
 
     /// Returns `false` only when the request cannot have run in Jira.
     ///
-    /// A durable host reads it after a failed attempt (plan 7.2).
+    /// A durable host reads it after a failed attempt (plan 7.2). Nothing
+    /// is sent for an input, a config, an auth or a cloud id error. A 4xx
+    /// reply and a 429 reply say that Jira did not do the write. A
+    /// `Network` error with a code of [`NOT_SENT_NETWORK_CODES`] did not
+    /// leave this process. Every other error, also a future variant, gives
+    /// `true`: that is the safe side for a write.
     #[must_use]
     pub fn may_have_run(&self) -> bool {
-        true
+        match self {
+            Self::InvalidInput { .. }
+            | Self::Config { .. }
+            | Self::Auth { .. }
+            | Self::CloudId(_)
+            | Self::NotFoundOrForbidden { .. }
+            | Self::Unauthorized { .. }
+            | Self::CaptchaRequired { .. }
+            | Self::Validation { .. }
+            | Self::Conflict { .. }
+            | Self::Gone { .. }
+            | Self::PayloadTooLarge { .. }
+            | Self::RateLimited { .. }
+            | Self::TransitionNotAvailable { .. }
+            | Self::LabelsNotOnScreen { .. } => false,
+            Self::Network { code, .. } => !NOT_SENT_NETWORK_CODES.contains(code),
+            _ => true,
+        }
     }
 }
 
 /// The codes of a `JiraError::Network` that did not leave this process.
+///
+/// The client gives `Network` after the last attempt of a
+/// `BackendError::NotSent { transient: true }` or a `MaybeSent`. Only these
+/// codes come from a transient `NotSent`: the san-mateo `Store`,
+/// `RefreshCooldown` and `Provider` errors (plan 4.4). A test of the
+/// san-mateo error map pins the list. Any other code counts as "maybe
+/// sent".
 pub const NOT_SENT_NETWORK_CODES: [&str; 3] =
     ["store_error", "connection_refresh_backoff", "provider"];
 
