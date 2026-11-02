@@ -1,7 +1,12 @@
 //! Activity glue over the public API (AC32). The activity tests that need
 //! the client come with WP5 part H1.
 
-#![allow(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::too_many_lines,
+    reason = "tests with tables"
+)]
 
 use std::time::Duration;
 
