@@ -107,6 +107,36 @@ async fn seeded_fake() -> Result<FakeJira, String> {
     Ok(fake)
 }
 
+/// The profile that autumn starts in. The order is the same as in
+/// autumn-web: `AUTUMN_ENV`, `AUTUMN_PROFILE`, `--profile`, then the build
+/// mode. `autumn_web::main` starts a release build in the prod profile and
+/// a debug build in the dev profile. `selector` is the first value that is
+/// set.
+fn app_profile(selector: Option<&str>, debug: bool) -> String {
+    let _ = selector;
+    if debug { "dev" } else { "prod" }.to_owned()
+}
+
+/// The first profile selector that is set: `AUTUMN_ENV`, `AUTUMN_PROFILE`,
+/// or `--profile <name>` and `--profile=<name>` in the args.
+fn profile_selector() -> Option<String> {
+    let set = |v: String| Some(v.trim().to_owned()).filter(|v| !v.is_empty());
+    let env = ["AUTUMN_ENV", "AUTUMN_PROFILE"]
+        .iter()
+        .find_map(|k| std::env::var(k).ok().and_then(set));
+    env.or_else(|| {
+        let args: Vec<String> = std::env::args().collect();
+        args.iter().enumerate().find_map(|(i, a)| {
+            let value = a.strip_prefix("--profile=").map(str::to_owned).or_else(|| {
+                (a == "--profile")
+                    .then(|| args.get(i + 1).cloned())
+                    .flatten()
+            });
+            value.and_then(set)
+        })
+    })
+}
+
 /// The plugin: on the real site when `JIRA_SITE` is set, else on the
 /// seeded fake. It also returns the mode name for the summary.
 async fn plugin() -> Result<(JiraPlugin, &'static str), String> {
@@ -115,15 +145,9 @@ async fn plugin() -> Result<(JiraPlugin, &'static str), String> {
         .filter(|v| !v.trim().is_empty());
     if let Some(site) = site {
         // The same sources as `JiraPlugin::new()`: autumn.toml, the profile
-        // file, `.env` and the `AUTUMN_JIRA__*` env vars. `autumn_web::main`
-        // starts a release build in the prod profile and a debug build in
-        // the dev profile, and `AUTUMN_ENV` selects another profile.
-        let profile = if cfg!(debug_assertions) {
-            "dev"
-        } else {
-            "prod"
-        };
-        let mut config = JiraConfig::load(Some(profile)).map_err(|e| e.to_string())?;
+        // file, `.env` and the `AUTUMN_JIRA__*` env vars.
+        let profile = app_profile(profile_selector().as_deref(), cfg!(debug_assertions));
+        let mut config = JiraConfig::load(Some(&profile)).map_err(|e| e.to_string())?;
         if let Some(api) = config.api_token.as_mut() {
             api.site = Some(site);
         }
@@ -179,6 +203,31 @@ mod tests {
     use super::*;
 
     type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+    /// R2D-integration-3: a set selector selects the profile file of the
+    /// real path, as it selects the profile of autumn. With no selector,
+    /// the build mode selects dev or prod.
+    #[test]
+    fn the_selector_selects_the_profile_of_the_real_path() {
+        assert_eq!(app_profile(Some("staging"), true), "staging");
+        assert_eq!(app_profile(Some("production"), true), "prod");
+        assert_eq!(app_profile(Some("DEV"), false), "dev");
+        assert_eq!(app_profile(None, true), "dev");
+        assert_eq!(app_profile(None, false), "prod");
+        let dir = std::env::temp_dir().join(format!("autumn-app-profile-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("autumn.toml"), include_str!("autumn.toml")).unwrap();
+        std::fs::write(
+            dir.join("autumn-staging.toml"),
+            "[jira.api_token]\ntoken_env = \"STAGING_TOKEN\"\n",
+        )
+        .unwrap();
+        let profile = app_profile(Some("staging"), true);
+        let names = autumn_web::config::profile_override_file_lookup_names(&profile, "staging");
+        let config = JiraConfig::load_from_dir(&dir, &names, Vec::new()).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(config.api_token.unwrap().token_env, "STAGING_TOKEN");
+    }
 
     /// The longest time for the test scenario.
     const RUN_TIMEOUT: Duration = Duration::from_secs(60);
