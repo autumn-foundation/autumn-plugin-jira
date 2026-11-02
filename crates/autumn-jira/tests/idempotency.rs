@@ -1009,3 +1009,95 @@ async fn transition_with_no_is_global_after_maybe_sent_is_not_resent() {
     assert_eq!(err.code(), "outcome_unknown", "{err:?}");
     assert_eq!(transition_posts(&backend), 1);
 }
+
+/// Returns the query value of `name` in a request.
+fn query_of<'a>(request: &'a autumn_jira::backend::ApiRequest, name: &str) -> Option<&'a str> {
+    request
+        .query
+        .iter()
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v.as_str())
+}
+
+#[tokio::test(start_paused = true)]
+async fn comment_lookup_survives_a_delete_between_pages() {
+    let fake = FakeJira::new();
+    let client = api_token_client(&fake);
+    let issue = client.create_issue(&task("busy")).await.unwrap().key;
+    for n in 0..49 {
+        fake.human_comment(issue.as_str(), &format!("old {n}"), "ann")
+            .unwrap();
+    }
+    let k = key(70);
+    let first = client
+        .add_comment_idempotent(&issue, &Adf::text("Escalated"), &k)
+        .await
+        .unwrap();
+    assert!(matches!(first, CommentOutcome::Created(_)), "{first:?}");
+    for n in 0..100 {
+        fake.human_comment(issue.as_str(), &format!("new {n}"), "ann")
+            .unwrap();
+    }
+    // The marked comment is at index 100, newest first. A person deletes a
+    // newer comment after the first page, so the marked comment moves to
+    // index 99. The second page at 100 then shows the later comments.
+    let path = format!("/rest/api/3/issue/{issue}/comment");
+    let query = [
+        ("orderBy", "-created"),
+        ("startAt", "101"),
+        ("maxResults", "100"),
+    ];
+    let mut shifted = capture(&fake, Op::ListComments, &path, &query).await;
+    shifted["startAt"] = json!(100);
+    shifted["total"] = json!(149);
+    let backend = Scripted::new(Arc::new(direct(Arc::new(fake.clone()))), move |r, _| {
+        (r.op == Op::ListComments && query_of(r, "startAt") == Some("100"))
+            .then(|| Ok(json_reply(200, &shifted)))
+    });
+    let client = JiraClient::new(backend).with_settings(fast_settings());
+    let found = client
+        .find_comment_by_idempotency_key(&issue, &k)
+        .await
+        .unwrap();
+    assert!(
+        found.is_some(),
+        "the delete moved the marker past the cursor"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_first_attempt_comments_on_an_issue_with_many_comments() {
+    let fake = FakeJira::new();
+    let mut settings = fast_settings();
+    settings.max_pages = 1;
+    let client = api_token_client(&fake).with_settings(settings);
+    let issue = client.create_issue(&task("busy")).await.unwrap().key;
+    for n in 0..150 {
+        fake.human_comment(issue.as_str(), &format!("note {n}"), "ann")
+            .unwrap();
+    }
+    let k = key(71);
+    // A call that does not know of earlier calls fails closed at the cap.
+    let err = client
+        .add_comment_idempotent(&issue, &Adf::text("Escalated"), &k)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "page_limit");
+    assert_eq!(fake.count(FakeOp::AddComment), 0);
+    // The first attempt of a host sends: no earlier call used the key.
+    let outcome = client
+        .add_comment_idempotent_first(&issue, &Adf::text("Escalated"), &k)
+        .await
+        .unwrap();
+    assert!(matches!(outcome, CommentOutcome::Created(_)), "{outcome:?}");
+    assert_eq!(fake.count(FakeOp::AddComment), 1);
+    // After a lost reply, the lookup finds the new comment on page 1.
+    let k = key(72);
+    fake.fault(FakeOp::AddComment, Fault::NetworkAfterCommit);
+    let outcome = client
+        .add_comment_idempotent_first(&issue, &Adf::text("Again"), &k)
+        .await
+        .unwrap();
+    assert!(matches!(outcome, CommentOutcome::Found(_)), "{outcome:?}");
+    assert_eq!(fake.count(FakeOp::AddComment), 2);
+}

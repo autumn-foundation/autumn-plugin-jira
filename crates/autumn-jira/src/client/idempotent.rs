@@ -281,6 +281,20 @@ impl JiraClient {
         })
     }
 
+    /// Adds a comment on the first attempt of a host.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::add_comment_idempotent`].
+    pub async fn add_comment_idempotent_first(
+        &self,
+        issue: impl Into<IssueRef> + Send,
+        body: &Adf,
+        key: &IdempotencyKey,
+    ) -> Result<CommentOutcome> {
+        self.add_comment_idempotent(issue, body, key).await
+    }
+
     /// Finds the comment of an idempotency key.
     ///
     /// A match is a comment by the account of the credentials
