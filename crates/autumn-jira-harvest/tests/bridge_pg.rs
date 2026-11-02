@@ -574,3 +574,40 @@ async fn a_copied_route_does_not_signal() {
         );
     }
 }
+
+/// R2C-harvest-4: an issue can pass a status in a few seconds, for example
+/// when an automation moves it on. The bridge can get the delivery of that
+/// status after the next move. A delivery of the own site of the bridge
+/// then gives the status that it reports, not the status of a later read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_late_delivery_of_this_site_keeps_its_reported_status() {
+    let Some(url) = database_url() else { return };
+    migrated(&url).await;
+    let pool = pool(&url);
+    let workflow_id = format!("incident:{}", nonce());
+    let started = start_run(&pool, &url, &workflow_id).await;
+    let fake = fake();
+    let route = SignalRoute::new(WORKFLOW, &workflow_id).unwrap();
+    let key = tracked_issue(
+        &fake,
+        vec![route.property_entry(&route_key(), &test_binding())],
+    )
+    .await;
+    let first = status_change(&fake, &key);
+    // The issue moves on to Done before the bridge gets the first delivery.
+    fake.human_transition(key.as_str(), "Done", ANN).unwrap();
+    let _ = fake.take_deliveries();
+    let bridge = make_bridge(pool.clone(), &fake);
+    assert_eq!(
+        bridge.route(&first).await.unwrap(),
+        vec![RouteOutcome::Signalled]
+    );
+    let mut conn = pool.get().await.unwrap();
+    let signals = autumn_harvest::signal::load_pending_signals(&mut conn, started.handle.exec_id())
+        .await
+        .unwrap();
+    assert_eq!(signals.len(), 1);
+    let payload: IssueSignal = serde_json::from_value(signals[0].payload.clone()).unwrap();
+    assert_eq!(payload.status.unwrap().name, "In Progress");
+    assert_eq!(payload.issue_key.as_ref(), Some(&key));
+}
