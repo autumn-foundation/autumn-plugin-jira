@@ -849,6 +849,29 @@ mod tests {
         assert_eq!(backoff_ms(3, u32::MAX, u64::MAX), u64::MAX);
     }
 
+    /// A large `attempt` costs no time: the loop stops at the cap or at
+    /// zero. The value is the same with no early stop, so only the time
+    /// shows the stop. With no stop, `u32::MAX` rounds take many seconds.
+    /// The cargo-mutants run on policy.rs found this gap (`||` to `&&`).
+    #[test]
+    fn backoff_stops_at_the_cap_or_at_zero() {
+        let start = std::time::Instant::now();
+        assert_eq!(backoff_ms(100, u32::MAX, 1_000), 1_000);
+        assert_eq!(backoff_ms(0, u32::MAX, 1_000), 0);
+        let took = start.elapsed();
+        assert!(took < std::time::Duration::from_secs(1), "{took:?}");
+    }
+
+    /// A `Retry-After` equal to the cap is in range: the wait is the cap.
+    /// Only a `Retry-After` above the cap gives `None`. The cargo-mutants
+    /// run on policy.rs found this gap (`>` to `>=`).
+    #[test]
+    fn retry_after_at_the_cap_is_kept() {
+        assert_eq!(retry_wait_ms(1, 2_000, 30_000, Some(30_000)), Some(30_000));
+        assert_eq!(retry_wait_ms(9, 2_000, 30_000, Some(30_000)), Some(30_000));
+        assert_eq!(retry_wait_ms(1, 2_000, 30_000, Some(30_001)), None);
+    }
+
     #[test]
     fn wait_and_jitter_examples() {
         assert_eq!(retry_wait_ms(1, 2_000, 30_000, None), Some(2_000));
