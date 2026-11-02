@@ -448,3 +448,159 @@ async fn every_case_replays() {
     assert!(outcome.result.is_err());
     assert_replays(&outcome).await;
 }
+
+// ------------------------------------------------------------ AC35
+
+mod human {
+    //! A workflow waits on an issue that a person made. The activities are
+    //! the real handlers over `FakeJira`. No webhook comes: a poll ends the
+    //! wait.
+
+    use std::any::{Any, TypeId};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+    use autumn_harvest::context::ActivityContext;
+    use autumn_harvest::info::ActivityInfo;
+    use autumn_jira::ids::SiteName;
+    use autumn_jira::request::IssueTypeRef;
+    use autumn_jira::san_mateo::Secret;
+    use autumn_jira::{BasicAuth, IssueKey, IssueRef, JiraClient, JiraSite, NewIssue, ProjectKey};
+    use autumn_jira_fake::{ANN, DEFAULT_API_TOKEN, DEFAULT_EMAIL, FakeJira, FakeOp};
+    use autumn_jira_harvest::{
+        JiraClients, RouteKey, SignalRoute, WatchIssueInput, WatchOutput, activities,
+        jira_watch_issue_info,
+    };
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct WatchInput {
+        issue: IssueKey,
+        options: WaitOptions,
+    }
+
+    /// Watches a person's issue, then waits until it is done.
+    #[workflow]
+    async fn watch_and_wait(
+        ctx: &WorkflowContext,
+        input: WatchInput,
+    ) -> Result<StatusWait, WorkflowFailure> {
+        let route = SignalRoute::new("watch_and_wait", ctx.workflow_id())
+            .map_err(|e| WorkflowFailure::new("test.route", e.to_string()))?;
+        let watch = WatchIssueInput::new(IssueRef::Key(input.issue.clone()), route);
+        let watched: WatchOutput = ctx
+            .execute_activity_with_opts(
+                &jira_watch_issue_info(),
+                watch,
+                Some(ctx.queue_name()),
+                None,
+                None,
+            )
+            .await
+            .map_err(|e| WorkflowFailure::new("test.watch", e.to_string()))?;
+        await_issue_status(
+            ctx,
+            &watched.issue.id,
+            &StatusTarget::done(),
+            &input.options,
+        )
+        .await
+    }
+
+    fn client(fake: &FakeJira) -> JiraClient {
+        JiraClient::api_token(
+            JiraSite::Subdomain(SiteName::parse("acme").unwrap()),
+            BasicAuth::new(DEFAULT_EMAIL, Secret::new(DEFAULT_API_TOKEN)).unwrap(),
+            Arc::new(fake.clone()),
+        )
+    }
+
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(future))
+    }
+
+    fn info(name: &str) -> ActivityInfo {
+        activities().into_iter().find(|i| i.name == name).unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn wait_on_a_human_issue() {
+        let fake = FakeJira::new();
+        let made = client(&fake)
+            .create_issue(&NewIssue::new(
+                ProjectKey::parse("OPS").unwrap(),
+                IssueTypeRef::Name("Task".into()),
+                "The printer is on fire",
+            ))
+            .await
+            .unwrap();
+        let mut state: HashMap<TypeId, Box<dyn Any + Send + Sync>> = HashMap::new();
+        state.insert(
+            TypeId::of::<JiraClients>(),
+            Box::new(JiraClients::new(client(&fake))),
+        );
+        state.insert(
+            TypeId::of::<RouteKey>(),
+            Box::new(RouteKey::new(Secret::new("k".repeat(32))).unwrap()),
+        );
+        let state = Arc::new(state);
+        let reads = Arc::new(AtomicUsize::new(0));
+        let watch = {
+            let state = Arc::clone(&state);
+            move |input: Value| {
+                let ctx = ActivityContext::new_test_with_state(Arc::clone(&state));
+                block_on((info("jira_watch_issue").handler)(&ctx, input))
+            }
+        };
+        let read = {
+            let (state, reads, fake) = (Arc::clone(&state), Arc::clone(&reads), fake.clone());
+            let key = made.key.clone();
+            move |input: Value| {
+                let ctx = ActivityContext::new_test_with_state(Arc::clone(&state));
+                let out = block_on((info(GET_ISSUE).handler)(&ctx, input));
+                // After the first read, a person resolves the issue.
+                if reads.fetch_add(1, Ordering::SeqCst) == 0 {
+                    fake.human_transition(key.as_str(), "In Progress", ANN)
+                        .unwrap();
+                    fake.human_transition(key.as_str(), "Done", ANN).unwrap();
+                }
+                out
+            }
+        };
+        let mut options = WaitOptions::new(Duration::from_secs(3600));
+        options.poll_every = Some(Duration::from_secs(60));
+        let input = serde_json::to_value(WatchInput {
+            issue: made.key.clone(),
+            options,
+        })
+        .unwrap();
+        let env = WorkflowTestEnv::new()
+            .mock_activity("jira_watch_issue", watch)
+            .mock_activity(GET_ISSUE, read);
+        let handler = watch_and_wait_info().handler;
+        let outcome = env.run(handler, input).await;
+        let StatusWait::Reached { status, source } = result(&outcome) else {
+            panic!("the wait times out: {:?}", outcome.result);
+        };
+        assert_eq!(status.name, "Done");
+        assert_eq!(source, WaitSource::Poll);
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            2,
+            "the first read and one poll"
+        );
+        assert_eq!(timers(outcome.events()), vec![60]);
+        // The watch added the route and the label. No webhook came.
+        let issue = fake.issue(made.key.as_str()).unwrap();
+        assert!(issue["properties"]["autumn-jira-routes"]["routes"].is_array());
+        assert_eq!(fake.count(FakeOp::SetProperty), 1);
+        let report = outcome.replay_check(handler).await;
+        assert!(
+            matches!(report.status, ReplayStatus::ReplaySucceeded),
+            "{report}"
+        );
+        assert_replays_with_the_clock_off_as("watch_and_wait", handler, outcome.events().to_vec())
+            .await;
+    }
+}

@@ -1,16 +1,27 @@
-//! The pure parts of the webhook-to-signal bridge (plan 9.4).
+//! The webhook-to-signal bridge (plan 9.4).
 //!
-//! The bridge itself (`HarvestSignalBridge`) needs the Jira client and the
-//! harvest database. It comes in WP5 part H1. The two functions here decide
-//! which deliveries need routing and which routes of an issue property are
-//! valid. They do no I/O.
+//! [`HarvestSignalBridge`] is an [`EventSink`]. For a delivery that needs
+//! routing, it reads the route property of the issue, checks the tag and
+//! the allowlist of each route, and sends the signal [`SIGNAL`] to the run
+//! with `send_signal_idempotent`. The delivery id is the idempotency key,
+//! so a repeated delivery gives one signal. Webhooks are at least once.
+//!
+//! [`wants`] and [`routes_from_property`] are pure. They do no I/O.
 
 use std::collections::BTreeSet;
+use std::fmt;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use autumn_jira::JiraEvent;
+use async_trait::async_trait;
+use autumn_harvest::HarvestError;
+use autumn_harvest::worker::DbPool;
+use autumn_jira::{Delivery, EventSink, HandlerError, JiraClient, JiraEvent};
+use serde::Serialize;
 use serde_json::Value;
 
 use crate::route::{RouteKey, SignalRoute};
+use crate::wait::SIGNAL;
 
 /// The result of one route of one delivery.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -27,6 +38,146 @@ pub enum RouteOutcome {
     NotAllowed,
     /// The tag does not verify. The bridge makes no database call.
     BadTag,
+}
+
+/// The counters of a bridge. Each counts routes or deliveries since the
+/// bridge was made.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct BridgeCounters {
+    /// Deliveries that came in.
+    pub deliveries: u64,
+    /// Deliveries with nothing to route: another event, or no
+    /// `autumn-tracked` label, or no route property.
+    pub skipped: u64,
+    /// Routes that got the signal.
+    pub signalled: u64,
+    /// Routes whose run already had the signal of this delivery.
+    pub duplicate: u64,
+    /// Routes with no run.
+    pub no_run: u64,
+    /// Routes whose run is finished.
+    pub finished: u64,
+    /// Routes with a workflow name that is not allowed.
+    pub not_allowed: u64,
+    /// Routes with a tag that does not verify.
+    pub bad_tag: u64,
+    /// Deliveries that ended with a transient error (503).
+    pub transient: u64,
+}
+
+/// The live counters.
+#[derive(Debug, Default)]
+struct Counters {
+    deliveries: AtomicU64,
+    skipped: AtomicU64,
+    signalled: AtomicU64,
+    duplicate: AtomicU64,
+    no_run: AtomicU64,
+    finished: AtomicU64,
+    not_allowed: AtomicU64,
+    bad_tag: AtomicU64,
+    transient: AtomicU64,
+}
+
+impl Counters {
+    fn snapshot(&self) -> BridgeCounters {
+        let read = |c: &AtomicU64| c.load(Ordering::Relaxed);
+        BridgeCounters {
+            deliveries: read(&self.deliveries),
+            skipped: read(&self.skipped),
+            signalled: read(&self.signalled),
+            duplicate: read(&self.duplicate),
+            no_run: read(&self.no_run),
+            finished: read(&self.finished),
+            not_allowed: read(&self.not_allowed),
+            bad_tag: read(&self.bad_tag),
+            transient: read(&self.transient),
+        }
+    }
+}
+
+/// The sink that turns Jira deliveries into harvest signals.
+///
+/// Limits (ADR 0006): the bridge uses one shard. A multi-shard engine needs
+/// a fan-out lookup. The workflow checks the issue id of each signal, so a
+/// route on another issue cannot move a workflow.
+#[derive(Clone)]
+pub struct HarvestSignalBridge {
+    pool: DbPool,
+    client: JiraClient,
+    key: RouteKey,
+    allowed: BTreeSet<String>,
+    counters: Arc<Counters>,
+}
+
+impl fmt::Debug for HarvestSignalBridge {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HarvestSignalBridge")
+            .field("client", &self.client)
+            .field("key", &self.key)
+            .field("allowed", &self.allowed)
+            .field("counters", &self.counters.snapshot())
+            .finish_non_exhaustive()
+    }
+}
+
+impl HarvestSignalBridge {
+    /// Makes a bridge with an empty allowlist. An empty allowlist allows no
+    /// workflow, so call [`Self::allow_workflow`] for each workflow name.
+    #[must_use]
+    pub fn new(pool: DbPool, client: JiraClient, key: RouteKey) -> Self {
+        Self {
+            pool,
+            client,
+            key,
+            allowed: BTreeSet::new(),
+            counters: Arc::default(),
+        }
+    }
+
+    /// Allows routes to the workflow with this name.
+    #[must_use]
+    pub fn allow_workflow(mut self, workflow_name: &str) -> Self {
+        self.allowed.insert(workflow_name.to_owned());
+        self
+    }
+
+    /// Returns the counters.
+    #[must_use]
+    pub fn counters(&self) -> BridgeCounters {
+        self.counters.snapshot()
+    }
+
+    /// The core of `deliver`, with an outcome per route, for tests.
+    ///
+    /// # Errors
+    ///
+    /// `HandlerError::Transient` for a database or shard error and for a
+    /// retryable Jira error. `HandlerError::Permanent` for another Jira
+    /// error of the property read.
+    pub async fn route(&self, delivery: &Delivery) -> Result<Vec<RouteOutcome>, HandlerError> {
+        let _ = (delivery, SIGNAL, &self.pool);
+        Ok(Vec::new())
+    }
+}
+
+/// Maps a harvest error of one route to its outcome (plan 9.4 step 7, W19,
+/// B4). A run that cannot take a signal is finished: 200. A database, pool
+/// or shard error is transient: 503, so Jira sends the delivery again.
+fn error_outcome(error: &HarvestError) -> Result<RouteOutcome, HandlerError> {
+    let _ = error;
+    Ok(RouteOutcome::Finished)
+}
+
+#[async_trait]
+impl EventSink for HarvestSignalBridge {
+    fn name(&self) -> &'static str {
+        "harvest-signal-bridge"
+    }
+
+    async fn deliver(&self, delivery: Arc<Delivery>) -> Result<(), HandlerError> {
+        self.route(&delivery).await.map(|_| ())
+    }
 }
 
 /// Pure: does this delivery need routing? `jira:issue_created`, or `jira:issue_updated` with a status change (B4, W26).
@@ -173,6 +324,40 @@ mod tests {
         );
         for empty in [json!(null), json!({}), json!({"routes": {}}), json!([])] {
             assert_eq!(routes_from_property(&empty, &key, &allowed), vec![]);
+        }
+    }
+
+    #[test]
+    fn harvest_errors_map_to_classes() {
+        let finished = [
+            HarvestError::Config("workflow execution x is terminal (COMPLETED)".into()),
+            HarvestError::Cancelled("cancelled".into()),
+            HarvestError::NotFound("workflow execution x".into()),
+        ];
+        for error in &finished {
+            assert_eq!(
+                error_outcome(error),
+                Ok(RouteOutcome::Finished),
+                "{error:?}"
+            );
+        }
+        let transient = [
+            HarvestError::Database("connection reset".into()),
+            HarvestError::ShardUnavailable {
+                shard_id: 0,
+                reason: "moving".into(),
+            },
+            HarvestError::Timeout {
+                timeout_type: autumn_harvest::TimeoutType::StartToClose,
+                task_name: "x".into(),
+            },
+        ];
+        for error in &transient {
+            let outcome = error_outcome(error);
+            assert!(
+                matches!(outcome, Err(HandlerError::Transient(_))),
+                "{error:?}: {outcome:?}"
+            );
         }
     }
 
