@@ -315,17 +315,16 @@ impl JiraPlugin {
                     return Err(PluginError::Conflict("transport(..)", "[jira.san_mateo]"));
                 }
                 let tenants = self.tenants(state, &config, settings, san_mateo_before)?;
-                let client = match config
+                let default = config
                     .san_mateo
                     .as_ref()
                     .and_then(|t| t.connection_id.as_deref())
-                    .filter(|id| !id.trim().is_empty())
-                {
+                    .filter(|id| !id.trim().is_empty());
+                // No default connection: the health check has nothing to probe.
+                probe = default.is_some();
+                let client = match default {
                     Some(id) => tenants.client(id)?,
-                    None => {
-                        probe = false;
-                        tenants.no_connection()
-                    }
+                    None => tenants.no_connection(),
                 };
                 (client, Some(Arc::new(tenants)), JiraMode::SanMateo.as_str())
             }
