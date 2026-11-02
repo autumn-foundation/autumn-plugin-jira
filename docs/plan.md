@@ -218,6 +218,7 @@ text.
 | V97 | After a maybe-sent transition attempt, every stop off the target is a non-retryable `OutcomeUnknown`. New `JiraClient::resume_transition_to_status(issue, target, cause)`: one status read, no send. | A host retry after a stop with a retryable error started a new call and sent the transition again (R2A-write-safety-1, R2A-write-safety-2). | 4.5, 7.1 |
 | V98 | `Transition::is_global` and `Transition::looped` are `Option<bool>`. The resend rule counts a missing flag as `true`. | A reply with no flag made a global transition look safe to send again (R2A-write-safety-6). | 4.5, 7.1 |
 | V99 | New `JiraClient::add_comment_idempotent_first(issue, body, key)`: no lookup before the POST. The comment lookup starts a page back by the drop of the total. | A first attempt could not comment on an issue with more comments than the page cap (R2F-fixcheck-a-1). A delete between two pages hid the marker (R2A-write-safety-5). | 4.5, 7.1 |
+| V100 | `HandlerError::from` maps `OutcomeUnknown` with a marker (`outcome_pending`) to `Permanent`. | A sink that used `?` on an idempotent write answered 503, and the redelivery could send the write again (R2F-fixcheck-a-5). | 4.8 |
 
 ---
 
@@ -1033,7 +1034,7 @@ pub enum HandlerError {
     #[error("permanent: {0}")] Permanent(String),
 }
 impl HandlerError { pub fn transient(e: impl Display) -> Self; pub fn permanent(e: impl Display) -> Self; }
-impl From<JiraError> for HandlerError   // is_retryable() picks the variant (R3)
+impl From<JiraError> for HandlerError   // is_retryable() picks the variant (R3); outcome_pending gives Permanent (V100)
 
 #[async_trait]
 pub trait EventSink: Send + Sync + 'static {
