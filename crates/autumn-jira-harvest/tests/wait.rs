@@ -932,3 +932,68 @@ fn input_for(issue: &str) -> Value {
     })
     .unwrap()
 }
+
+/// Waits, then waits for the signal `go`: work after the wait. With
+/// `drain` set, the workflow takes the late Jira signals before it returns.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkAfter {
+    wait: WaitInput,
+    drain: bool,
+}
+
+#[workflow]
+async fn work_after_the_wait(
+    ctx: &WorkflowContext,
+    input: WorkAfter,
+) -> Result<StatusWait, WorkflowFailure> {
+    let wait = &input.wait;
+    let outcome = await_issue_status(ctx, &wait.issue_id, &wait.target, &wait.options).await?;
+    ctx.wait_for_signal("go")
+        .await
+        .map_err(|e| WorkflowFailure::new("test.go", e.to_string()))?;
+    if input.drain {
+        let late = autumn_jira_harvest::drain_jira_signals(ctx)?;
+        assert_eq!(late, 1, "one late signal");
+    }
+    Ok(outcome)
+}
+
+/// R4-harvest-determinism-2: a Jira signal can come after the wait, while
+/// the workflow does other work. No code reads it, and a strict replay
+/// fails on it. `drain_jira_signals` before the return takes it.
+#[tokio::test]
+async fn a_signal_after_the_wait_needs_the_drain() {
+    let handler = work_after_the_wait_info().handler;
+    for drain in [false, true] {
+        let input = serde_json::to_value(WorkAfter {
+            wait: serde_json::from_value(input(3_600, None)).unwrap(),
+            drain,
+        })
+        .unwrap();
+        let env = WorkflowTestEnv::new().mock_activity(GET_ISSUE, |_| Ok(issue_at(&done())));
+        let mut run = env.start(handler, input);
+        run.run_until_blocked().await;
+        // A late webhook of the issue, then the end of the other work.
+        run.signal(SIGNAL, signal(ISSUE, Some(done()), Some(9_000), 1))
+            .unwrap();
+        run.signal("go", Value::Null).unwrap();
+        let outcome = run.finish().await;
+        assert!(
+            matches!(
+                result(&outcome),
+                StatusWait::Reached {
+                    source: WaitSource::Initial,
+                    ..
+                }
+            ),
+            "{:?}",
+            outcome.result
+        );
+        let report = outcome.replay_check(handler).await;
+        assert_eq!(
+            matches!(report.status, ReplayStatus::ReplaySucceeded),
+            drain,
+            "drain {drain}: {report}"
+        );
+    }
+}
