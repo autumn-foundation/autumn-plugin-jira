@@ -1133,9 +1133,13 @@ async fn a_failed_pre_lookup_is_not_sent() {
         };
         fake.fault(lookup, Fault::Status(503));
         fake.fault(lookup, Fault::Status(503));
+        // Attempt 1 of a comment has no pre-lookup (R2A-write-safety-3).
+        // The opt-in resend after a crash has one.
         let failure = if comment {
-            AddCommentInput::new(key_ref(&key), "Fixed it")
-                .run(&client, &first)
+            let mut resend = AddCommentInput::new(key_ref(&key), "Fixed it");
+            resend.resend_after_negative_lookup = true;
+            resend
+                .run(&client, &retry_of(&first, 2, None))
                 .await
                 .unwrap_err()
         } else {
@@ -1147,7 +1151,7 @@ async fn a_failed_pre_lookup_is_not_sent() {
             Some(&json!(false)),
             "{failure:?}"
         );
-        let second = retry_of(&first, 2, Some(failure.into_error_payload()));
+        let second = retry_of(&first, 3, Some(failure.into_error_payload()));
         assert_eq!(
             autumn_jira_harvest::previous_attempt(&second),
             autumn_jira::policy::Previous::NotSent
@@ -1202,7 +1206,7 @@ async fn a_delete_404_after_any_failed_attempt_is_gone() {
 /// R1-write-safety-9 and the B2 budget: the marker lookup of
 /// `jira_add_comment` reads at most `COMMENT_LOOKUP_PAGES` pages. At the cap
 /// it fails closed: the lookup gives no "not found", so no attempt sends the
-/// comment.
+/// comment. Only an attempt after a possible send looks up first.
 #[tokio::test(start_paused = true)]
 async fn the_comment_lookup_reads_at_most_its_page_cap() {
     let fake = FakeJira::new();
@@ -1219,16 +1223,18 @@ async fn the_comment_lookup_reads_at_most_its_page_cap() {
     }
     let posts = fake.count(FakeOp::AddComment);
     let first = first_ctx();
-    let comment = AddCommentInput::new(key_ref(&key), "Fixed it");
-    // The send path: the lookup before the send stops at the cap.
-    let failure = comment.run(&durable, &first).await.unwrap_err();
-    assert_ne!(failure.error_type, OUTCOME_UNKNOWN_ERROR, "{failure:?}");
+    let mut comment = AddCommentInput::new(key_ref(&key), "Fixed it");
     let cap = usize::try_from(COMMENT_LOOKUP_PAGES).unwrap();
-    assert_eq!(fake.count(FakeOp::GetComments), cap);
-    // The lookup-only path stops at the cap too.
+    // The lookup-only path after a crash stops at the cap.
     let ctx = retry_of(&first, 2, None);
     let failure = comment.run(&durable, &ctx).await.unwrap_err();
     assert!(failure.error_type.starts_with(ERROR_PREFIX), "{failure:?}");
+    assert_ne!(failure.error_type, OUTCOME_UNKNOWN_ERROR, "{failure:?}");
+    assert_eq!(fake.count(FakeOp::GetComments), cap);
+    // The opt-in resend: the lookup before the send stops at the cap too.
+    comment.resend_after_negative_lookup = true;
+    let failure = comment.run(&durable, &ctx).await.unwrap_err();
+    assert_ne!(failure.error_type, OUTCOME_UNKNOWN_ERROR, "{failure:?}");
     assert_eq!(fake.count(FakeOp::GetComments), 2 * cap);
     assert_eq!(fake.count(FakeOp::AddComment), posts, "no comment is sent");
 }
@@ -1306,7 +1312,9 @@ async fn a_transition_after_a_maybe_sent_attempt_sends_nothing() {
     assert_eq!(fake.count(FakeOp::DoTransition), 0);
 
     // After a failure that tells "not sent", the attempt moves the issue.
-    let back = TransitionInput::new(key_ref(&key), StatusTarget::todo());
+    let mut back = TransitionInput::new(key_ref(&key), StatusTarget::done());
+    back.fields
+        .insert("resolution".into(), json!({"name": "Done"}));
     let not_sent = failure_for(&JiraError::Network {
         op: Op::GetTransitions,
         code: "store_error",

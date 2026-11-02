@@ -20,7 +20,7 @@ use autumn_harvest::info::ActivityInfo;
 use autumn_harvest::policy::RetryPolicy;
 use autumn_harvest::prelude::activity;
 use autumn_jira::client::{CommentOutcome, CreateOutcome, DeleteOutcome, TransitionOutcome};
-use autumn_jira::error::Op;
+use autumn_jira::error::{Op, UnknownCause};
 use autumn_jira::ids::{CommentId, FieldId, PageToken, TransitionId};
 use autumn_jira::model::{IssueRefs, IssueSummary, StatusSummary};
 use autumn_jira::policy::{Previous, host_may_send};
@@ -87,6 +87,10 @@ pub const LONG_WRITE_START_TO_CLOSE: Duration = Duration::from_secs(2_520);
 /// comments between two attempts than the cap holds. Then the lookup stops
 /// with `PageLimit` and does not report "not found", so no attempt sends the
 /// comment again. The activity fails, and it never writes a duplicate.
+///
+/// The cap applies only to a lookup after a possible send. Attempt 1 sends
+/// with no lookup before the POST, so an issue with many comments still
+/// gets the comment (R2A-write-safety-3).
 pub const COMMENT_LOOKUP_PAGES: u32 = 3;
 
 /// The `start_to_close` of `jira_add_comment`: 70 minutes.
@@ -614,25 +618,53 @@ impl TransitionInput {
         }
     }
 
-    /// Moves the issue. The client reads the status before each attempt,
-    /// so a retry after a lost reply is safe.
+    /// Moves the issue.
+    ///
+    /// Attempt 1, and an attempt after a failure that tells "not sent", call
+    /// `transition_to_status_with`. The other attempts come after an attempt
+    /// that can have sent the transition. A second send can run the
+    /// transition two times, so such an attempt only reads the status
+    /// (`resume_transition_to_status`). At the target, it gives
+    /// `AlreadyThere`. Else it fails with `jira.outcome_unknown`, which is
+    /// not retryable (R2A-write-safety-1).
     ///
     /// # Errors
     ///
     /// The failure of [`crate::failure_for`], for example
-    /// `jira.transition_not_available`.
+    /// `jira.transition_not_available` or `jira.outcome_unknown`.
     pub async fn run(
         &self,
         client: &JiraClient,
         ctx: &ActivityContext,
     ) -> Result<TransitionOutput, ActivityFailure> {
-        let _ = ctx;
-        let mut fields = TransitionFields::default();
-        fields.fields.clone_from(&self.fields);
-        let outcome = client
-            .transition_to_status_with(self.issue.clone(), &self.target, &fields)
-            .await
-            .map_err(|e| failure_for(&e))?;
+        let outcome = match previous_attempt(ctx) {
+            Previous::First | Previous::NotSent => {
+                let mut fields = TransitionFields::default();
+                fields.fields.clone_from(&self.fields);
+                client
+                    .transition_to_status_with(self.issue.clone(), &self.target, &fields)
+                    .await
+            }
+            Previous::MaybeSent => {
+                client
+                    .resume_transition_to_status(
+                        self.issue.clone(),
+                        &self.target,
+                        UnknownCause::Network,
+                    )
+                    .await
+            }
+            Previous::Unknown => {
+                client
+                    .resume_transition_to_status(
+                        self.issue.clone(),
+                        &self.target,
+                        UnknownCause::Timeout,
+                    )
+                    .await
+            }
+        }
+        .map_err(|e| failure_for(&e))?;
         Ok(match outcome {
             TransitionOutcome::AlreadyThere(status) => TransitionOutput {
                 outcome: TransitionKind::AlreadyThere,
@@ -716,10 +748,24 @@ impl AddCommentInput {
                 Err(e) => Err(lookup_failure(&e, settle)),
             };
         }
-        match client
-            .add_comment_idempotent(self.issue.clone(), &Adf::text(&self.text), &key)
-            .await
-        {
+        let body = Adf::text(&self.text);
+        // On attempt 1, and after an attempt that tells "not sent", no
+        // earlier attempt sent the comment. So the pre-lookup can find
+        // nothing, and its page cap must not stop the send (R2A-write-safety-3).
+        // The opt-in resend after a possible send keeps the pre-lookup.
+        let sent = match previous_attempt(ctx) {
+            Previous::First | Previous::NotSent => {
+                client
+                    .add_comment_idempotent_first(self.issue.clone(), &body, &key)
+                    .await
+            }
+            Previous::MaybeSent | Previous::Unknown => {
+                client
+                    .add_comment_idempotent(self.issue.clone(), &body, &key)
+                    .await
+            }
+        };
+        match sent {
             Ok(CommentOutcome::Created(comment)) => Ok(CommentOutput {
                 id: comment.id,
                 outcome: CreateKind::Created,
