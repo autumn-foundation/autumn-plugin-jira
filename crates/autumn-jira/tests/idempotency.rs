@@ -484,3 +484,51 @@ async fn a_marker_from_another_author_is_not_found() {
     assert!(matches!(outcome, CommentOutcome::Created(_)), "{outcome:?}");
     assert_eq!(fake.count(FakeOp::AddComment), 1);
 }
+
+#[tokio::test(start_paused = true)]
+async fn marked_write_with_an_unexpected_2xx_looks_up_the_marker() {
+    let fake = FakeJira::new();
+    let client = api_token_client(&fake);
+    // The create runs, and a proxy gives 200 in place of 201.
+    fake.fault(FakeOp::CreateIssue, Fault::StatusAfterCommit(200));
+    let k = key(50);
+    let outcome = client
+        .create_issue_idempotent(&task("200"), &k)
+        .await
+        .unwrap();
+    assert!(matches!(outcome, CreateOutcome::Found(_)), "{outcome:?}");
+    assert_eq!(fake.count(FakeOp::CreateIssue), 1);
+    // The same for a comment.
+    let issue = client.create_issue(&task("c")).await.unwrap().key;
+    fake.fault(FakeOp::AddComment, Fault::StatusAfterCommit(202));
+    let outcome = client
+        .add_comment_idempotent(&issue, &Adf::text("hi"), &key(51))
+        .await
+        .unwrap();
+    assert!(matches!(outcome, CommentOutcome::Found(_)), "{outcome:?}");
+    assert_eq!(fake.count(FakeOp::AddComment), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_bad_label_value_is_a_validation_error() {
+    let fake = FakeJira::new();
+    let client = api_token_client(&fake);
+    let err = client
+        .create_issue_idempotent(&task("x").labels(["disk full"]), &key(52))
+        .await
+        .unwrap_err();
+    let JiraError::Validation {
+        status: 400,
+        fields,
+        messages,
+        ..
+    } = &err
+    else {
+        panic!("{err:?}");
+    };
+    assert_eq!(fields, &["labels".to_owned()]);
+    assert!(
+        messages.iter().any(|m| m.contains("contains spaces")),
+        "{messages:?}"
+    );
+}
