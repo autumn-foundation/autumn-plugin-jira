@@ -411,3 +411,19 @@ fn max_future_skew_has_the_policy_bound() {
         "{e}"
     );
 }
+
+/// R3-secrets-ssrf-4: the fix TOML never prints a `secret_env` value that
+/// is not an env var name. Such a value can be the secret itself.
+#[test]
+fn the_fix_never_prints_a_secret_env_value_that_is_not_a_name() {
+    let mut e = good();
+    e.secret_env = Some("s3cr3t value+/=".to_owned());
+    e.signature_header = None;
+    let err = check(e).unwrap_err();
+    let text = err.to_string();
+    assert!(!text.contains("s3cr3t"), "{text}");
+    assert!(
+        text.contains(&format!("secret_env = \"{DEFAULT_SECRET_ENV}\"")),
+        "{text}"
+    );
+}

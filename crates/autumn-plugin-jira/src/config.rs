@@ -784,6 +784,37 @@ mod tests {
         assert!(debug.contains("JIRA_API_TOKEN"), "{debug}");
     }
 
+    /// R3-secrets-ssrf-4: a value in an `*_env` key that is not an env var
+    /// name can be the secret itself. The error names the key, never the
+    /// value.
+    #[test]
+    fn env_keys_hold_env_var_names() {
+        for (key, value) in [
+            ("token_env", "ATATT3x-secret+/="),
+            ("email_env", "bot@acme.example"),
+            ("token_env", "1JIRA"),
+            ("token_env", "JIRA TOKEN"),
+        ] {
+            let text = format!("[jira.api_token]\nsite = \"a\"\n{key} = \"{value}\"\n");
+            let e = JiraConfig::from_toml_str(&text).unwrap_err().to_string();
+            assert!(e.contains(&format!("[jira.api_token] {key}")), "{e}");
+            assert!(!e.contains(value), "{e}");
+        }
+        // The env override is checked the same way.
+        let e = JiraConfig::from_layers(
+            Some("[jira.api_token]\nsite = \"a\"\n"),
+            None,
+            env(&[("AUTUMN_JIRA__API_TOKEN__TOKEN_ENV", "ATATT3x-secret")]),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("token_env") && !e.contains("ATATT3x"), "{e}");
+        for good in ["JIRA_API_TOKEN", "_X", "jira_token_2"] {
+            let text = format!("[jira.api_token]\nsite = \"a\"\ntoken_env = \"{good}\"\n");
+            JiraConfig::from_toml_str(&text).unwrap();
+        }
+    }
+
     #[test]
     fn validation_rules() {
         let bad = [
