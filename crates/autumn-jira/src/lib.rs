@@ -29,6 +29,8 @@
 //! See the crate README and `docs/plan.md`.
 
 pub mod adf;
+pub mod backend;
+pub mod client;
 pub mod error;
 pub mod ids;
 pub mod jql;
@@ -42,6 +44,7 @@ pub mod webhook;
 pub mod writes;
 
 pub use adf::Adf;
+pub use client::{ClientSettings, JiraClient};
 pub use error::{JiraError, Result};
 pub use ids::{AccountId, IdempotencyKey, IssueId, IssueKey, IssueRef, ProjectKey};
 pub use jql::Jql;
