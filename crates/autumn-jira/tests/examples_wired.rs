@@ -657,6 +657,12 @@ mod self_tests {
                     #[cfg(test)]\n\
                     mod tests {\n    fn t() { super::check().expect_err(\"x\"); }\n}\n";
         assert_eq!(wired::source_violations("x", good, false), NONE);
+        // EX8: an example that runs the full migration SQL fails the check.
+        let full = format!("{good}fn migrate() {{ migrate::full_migrations_sql(); }}\n");
+        assert_eq!(
+            wired::source_violations("x", &full, false),
+            ["x: use `migrate::apply`"]
+        );
     }
 
     #[test]
@@ -871,7 +877,11 @@ fn no_example_turns_on_the_dev_only_proxy_flags() {
         let text = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
             .to_ascii_lowercase();
-        for flag in ["allow_private_hosts", "allow_plain_http"] {
+        for flag in [
+            "full_migrations_sql",
+            "allow_private_hosts",
+            "allow_plain_http",
+        ] {
             assert!(!text.contains(flag), "{} has {flag}", path.display());
         }
     }

@@ -268,7 +268,11 @@ Rules for each example (EX8 checks them by text):
   Comments and test items of the example do not count.
   `docs_give_the_ci_commands_of_the_separate_workspace` checks that
   `CLAUDE.md` and the README give the ecosystem commands of CI. `no_example_turns_on_the_dev_only_proxy_flags` checks for
-  `full_migrations_sql`, `allow_private_hosts` and `allow_plain_http`.
+  `full_migrations_sql`, `allow_private_hosts` and `allow_plain_http`. It
+  reads the example sources, the copied files and the ecosystem files.
+  `each_example_is_wired` also refuses `full_migrations_sql` in an example
+  source. The self-test `a_comment_or_a_string_is_not_code` has a bad
+  sample for that rule.
   `each_example_file_is_in_the_list` finds an example file that is not in
   the list. `the_ecosystem_workspace_stays_apart` checks the separate
   workspace.
