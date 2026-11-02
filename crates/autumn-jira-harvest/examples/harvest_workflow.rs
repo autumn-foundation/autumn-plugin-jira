@@ -60,7 +60,7 @@ use autumn_jira_fake::{ANN, FakeJira, FakeOp, Fault};
 use autumn_jira_harvest::{
     AddCommentInput, CommentOutput, CreateIssueInput, CreateIssueOutput, HarvestSignalBridge,
     JiraClients, RouteKey, SignalRoute, StatusWait, TransitionInput, TransitionOutput, WaitOptions,
-    WatchIssueInput, WatchOutput, await_issue_status, jira_add_comment_info,
+    WatchIssueInput, WatchOutput, await_issue_status, drain_jira_signals, jira_add_comment_info,
     jira_create_issue_info, jira_transition_to_status_info, jira_watch_issue_info,
 };
 use serde::{Deserialize, Serialize};
@@ -164,6 +164,9 @@ async fn jira_ticket_lifecycle(
         )
         .await
         .map_err(|e| failed(&e))?;
+    // A webhook can come while the comment runs. Take it, so that no
+    // signal stays unread in the history.
+    drain_jira_signals(ctx)?;
     Ok(LifecycleOutput {
         created,
         moved,

@@ -167,7 +167,14 @@ pub enum StatusWait {
 ///
 /// The drain has one cost: a workflow that reads [`SIGNAL`] itself after
 /// the wait does not get the signals that came before the end of the
-/// wait. A later wait reads the issue first, so it does not need them.
+/// wait. A later wait reads the issue first, and its read time makes an
+/// older signal stale, so it does not need them.
+///
+/// A webhook can also come after the wait, while the workflow does other
+/// work, for example an activity. Then the history ends with a signal that
+/// no code read, and a strict replay fails. So a workflow that does work
+/// after the wait must call [`drain_jira_signals`] as its last step before
+/// it returns (R4-harvest-determinism-2).
 ///
 /// # Errors
 ///
@@ -219,6 +226,25 @@ pub async fn await_issue_status(
         (Err(failure), _) => Err(failure),
         (Ok(_), Err(error)) => Err(harvest_failure(&error)),
     }
+}
+
+/// Takes the [`SIGNAL`] signals that are in the history, and returns their
+/// number. It never waits.
+///
+/// Call it as the last step of a workflow that does work after
+/// [`await_issue_status`], before the workflow returns. A webhook that comes
+/// after the wait gives a signal that no code reads. A strict replay of
+/// harvest 0.8 fails on a completed history with such a signal. The drain
+/// reads it, so the history stays replayable. The signals are about a wait
+/// that is over, so the workflow can ignore them.
+///
+/// # Errors
+///
+/// A `jira.workflow` failure when harvest cannot read the signals.
+pub fn drain_jira_signals(ctx: &WorkflowContext) -> Result<usize, WorkflowFailure> {
+    ctx.drain_signals_raw(SIGNAL)
+        .map(|signals| signals.len())
+        .map_err(|e| harvest_failure(&e))
 }
 
 /// The steps 2 to 5 of [`await_issue_status`].

@@ -933,8 +933,9 @@ fn input_for(issue: &str) -> Value {
     .unwrap()
 }
 
-/// Waits, then waits for the signal `go`: work after the wait. With
-/// `drain` set, the workflow takes the late Jira signals before it returns.
+/// Waits, then runs an activity and waits for the signal `go`: work after
+/// the wait. With `drain` set, the workflow takes the late Jira signals
+/// before it returns.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WorkAfter {
     wait: WaitInput,
@@ -948,6 +949,18 @@ async fn work_after_the_wait(
 ) -> Result<StatusWait, WorkflowFailure> {
     let wait = &input.wait;
     let outcome = await_issue_status(ctx, &wait.issue_id, &wait.target, &wait.options).await?;
+    // Other work: one activity. A replay of the wait cannot take a signal
+    // that comes after this command.
+    let _: Value = ctx
+        .execute_activity_with_opts(
+            &autumn_jira_harvest::jira_get_issue_info(),
+            GetIssueInput::new(wait.issue_id.clone()),
+            Some(ctx.queue_name()),
+            None,
+            None,
+        )
+        .await
+        .map_err(|e| WorkflowFailure::new("test.work", e.to_string()))?;
     ctx.wait_for_signal("go")
         .await
         .map_err(|e| WorkflowFailure::new("test.go", e.to_string()))?;
@@ -988,6 +1001,15 @@ async fn a_signal_after_the_wait_needs_the_drain() {
             ),
             "{:?}",
             outcome.result
+        );
+        let report = WorkflowReplayer::new()
+            .register_fn("work_after_the_wait", handler)
+            .replay_from_events(outcome.events().to_vec())
+            .await;
+        assert_eq!(
+            matches!(report.status, ReplayStatus::ReplaySucceeded),
+            drain,
+            "drain {drain}: {report}"
         );
         let report = outcome.replay_check(handler).await;
         assert_eq!(
