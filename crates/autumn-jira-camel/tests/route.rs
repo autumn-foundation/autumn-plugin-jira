@@ -1371,8 +1371,13 @@ async fn retry_attempt_lookup_waits_for_index_lag() {
     .await
     .unwrap_err();
     assert!(matches!(err, CamelError::Io(_)), "{err:?}");
-    // Attempt 2 at once: the first lookup misses, and the lookup after the
-    // settle wait finds the issue.
+    // A slow runner can stall between the attempts. The first lookup of
+    // attempt 2 must still miss, else the test passes with no settle wait
+    // (R2E-tests-guards-3).
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    let searches = fake.count(FakeOp::Search);
+    // Attempt 2: the first lookup misses, and the lookup after the settle
+    // wait finds the issue.
     let ex = send(
         &camel,
         "direct:create",
@@ -1380,6 +1385,11 @@ async fn retry_attempt_lookup_waits_for_index_lag() {
     )
     .await
     .unwrap();
+    assert_eq!(
+        fake.count(FakeOp::Search) - searches,
+        2,
+        "a miss, the settle wait, then a hit"
+    );
     assert_eq!(reply(&ex)["outcome"], json!("found"));
     assert_eq!(reply(&ex)["key"], json!("OPS-1"));
     assert_eq!(fake.count(FakeOp::CreateIssue), 1);
