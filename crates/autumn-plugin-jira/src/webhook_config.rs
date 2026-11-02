@@ -38,6 +38,10 @@ pub const JIRA_RETRY_HORIZON_SECS: u64 = 5400;
 ///
 /// autumn reads `secret_env` when it loads its config. When you add this
 /// entry to a config in code, also set `secret`.
+///
+/// autumn reads up to `max_body_bytes` of each request before it checks
+/// the signature. See [`RECOMMENDED_MAX_BODY_BYTES`] for that memory cost
+/// and the proxy limits that control it.
 #[must_use]
 pub fn webhook_endpoint(path: &str, secret_env: &str) -> WebhookEndpointConfig {
     let mut endpoint = WebhookEndpointConfig::generic(ENDPOINT_NAME, path, "");

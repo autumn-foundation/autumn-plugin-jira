@@ -98,6 +98,14 @@ pub const ENDPOINT_NAME: &str = "jira";
 ///
 /// Jira drops a payload over 25 MB. So this cap never refuses a payload
 /// that Jira sends.
+///
+/// The cap is also the memory cost of one request that has no valid
+/// signature. autumn reads the full body, up to the cap, before it checks
+/// the HMAC. So a caller with no secret can make the app hold this much
+/// memory for each request until the 401. The route is public. Limit the
+/// body size, the request rate and the concurrent requests of the webhook
+/// path at the reverse proxy, or set a smaller `max_body_bytes`. A smaller
+/// cap refuses a large Jira payload with 400.
 pub const RECOMMENDED_MAX_BODY_BYTES: usize = 27_262_976;
 /// Below this body cap (8 MiB), the start logs a warning.
 ///
