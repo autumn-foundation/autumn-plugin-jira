@@ -471,3 +471,59 @@ async fn a_fake_delivery_reaches_the_sink() {
     }
     assert_eq!(entries(&log).len(), 1, "{:?}", entries(&log));
 }
+
+/// The default `[jira.webhook] max_handler_tasks`.
+const DEFAULT_MAX_HANDLER_TASKS: usize = 64;
+
+/// Takes one from the count when the handler future drops.
+struct Live(Arc<AtomicUsize>);
+
+impl Drop for Live {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// An `on_event` closure that never ends. It counts the started futures
+/// and the live futures.
+fn hung(started: &Arc<AtomicUsize>, live: &Arc<AtomicUsize>) -> JiraPlugin {
+    let (started, live) = (Arc::clone(started), Arc::clone(live));
+    plugin_with(&FakeJira::new(), |c| c.webhook.handler_timeout_ms = 10).on_event(
+        move |_delivery: Arc<Delivery>, _state: AppState| {
+            let (started, live) = (Arc::clone(&started), Arc::clone(&live));
+            async move {
+                started.fetch_add(1, Ordering::SeqCst);
+                live.fetch_add(1, Ordering::SeqCst);
+                let _live = Live(live);
+                std::future::pending::<()>().await;
+                Ok(())
+            }
+        },
+    )
+}
+
+/// R10-plugin-ecosystem-3: a handler that hangs cannot make tasks without
+/// a limit. When each slot holds a task, the route answers 503 at once and
+/// starts no task.
+#[tokio::test(flavor = "multi_thread")]
+async fn hung_handlers_have_a_bound() {
+    let (started, live) = (Arc::default(), Arc::default());
+    let client = app(hung(&started, &live));
+    let extra = 6;
+    for n in 0..(DEFAULT_MAX_HANDLER_TASKS + extra) {
+        deliver(&client, &format!("h-{n}"), &fresh())
+            .await
+            .assert_status(503);
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        started.load(Ordering::SeqCst) <= DEFAULT_MAX_HANDLER_TASKS,
+        "started {}",
+        started.load(Ordering::SeqCst)
+    );
+    assert!(live.load(Ordering::SeqCst) <= DEFAULT_MAX_HANDLER_TASKS);
+    assert_eq!(
+        counters(&client).await["timed_out"].as_u64(),
+        Some(u64::try_from(DEFAULT_MAX_HANDLER_TASKS + extra).unwrap())
+    );
+}
