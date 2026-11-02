@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Extract the response shapes that FakeJira must match.
 
-Usage: extract-jira-schemas.py [<swagger-v3.json>] [<output>]
+Usage: extract-jira-schemas.py <swagger-v3.json> [<output>]
 
 The script reads the Jira Cloud REST v3 OpenAPI spec. It keeps the property
 names and the JSON types of the response schemas in SCHEMAS. It keeps no
@@ -19,10 +19,6 @@ import json
 import os
 import sys
 
-DEFAULT_SPEC = (
-    "/tmp/claude-0/-home-user/b78fbef9-69a3-5113-aca9-ecb12c135e92/"
-    "scratchpad/dl/swagger-v3.json"
-)
 DEFAULT_OUT = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "..",
@@ -122,10 +118,12 @@ def extract(spec):
 
 
 def main():
-    if len(sys.argv) > 3 or (len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help")):
+    # The spec path has no default: a local download path works on one
+    # machine only.
+    if not 2 <= len(sys.argv) <= 3 or sys.argv[1] in ("-h", "--help"):
         print(__doc__, file=sys.stderr)
         return 2
-    spec_path = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_SPEC
+    spec_path = sys.argv[1]
     out_path = sys.argv[2] if len(sys.argv) > 2 else DEFAULT_OUT
     with open(spec_path, encoding="utf-8") as handle:
         spec = json.load(handle)
