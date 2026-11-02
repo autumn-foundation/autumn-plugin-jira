@@ -424,3 +424,63 @@ proptest! {
         })?;
     }
 }
+
+#[tokio::test(start_paused = true)]
+async fn comment_lookup_finds_marker_beyond_100() {
+    let fake = FakeJira::new();
+    let client = api_token_client(&fake);
+    let issue = client.create_issue(&task("busy")).await.unwrap().key;
+    let k = key(40);
+    let first = client
+        .add_comment_idempotent(&issue, &Adf::text("Escalated"), &k)
+        .await
+        .unwrap();
+    assert!(matches!(first, CommentOutcome::Created(_)), "{first:?}");
+    // A bot writes 120 newer comments.
+    for n in 0..120 {
+        fake.human_comment(issue.as_str(), &format!("ci note {n}"), "ann")
+            .unwrap();
+    }
+    let found = client
+        .find_comment_by_idempotency_key(&issue, &k)
+        .await
+        .unwrap();
+    assert!(found.is_some(), "the marker is older than the 100 newest");
+    let again = client
+        .add_comment_idempotent(&issue, &Adf::text("Escalated"), &k)
+        .await
+        .unwrap();
+    assert!(matches!(again, CommentOutcome::Found(_)), "{again:?}");
+    assert_eq!(fake.count(FakeOp::AddComment), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_marker_from_another_author_is_not_found() {
+    let fake = FakeJira::new();
+    let client = api_token_client(&fake);
+    let issue = client.create_issue(&task("forged")).await.unwrap().key;
+    let k = key(41);
+    // A person posts the marker of the key before the workflow runs.
+    fake.human_comment(issue.as_str(), &k.comment_marker(), "ann")
+        .unwrap();
+    // A person quotes the marker inside a line.
+    fake.human_comment(
+        issue.as_str(),
+        &format!("> {} was here", k.comment_marker()),
+        "ann",
+    )
+    .unwrap();
+    assert_eq!(
+        client
+            .find_comment_by_idempotency_key(&issue, &k)
+            .await
+            .unwrap(),
+        None
+    );
+    let outcome = client
+        .add_comment_idempotent(&issue, &Adf::text("Escalated"), &k)
+        .await
+        .unwrap();
+    assert!(matches!(outcome, CommentOutcome::Created(_)), "{outcome:?}");
+    assert_eq!(fake.count(FakeOp::AddComment), 1);
+}
