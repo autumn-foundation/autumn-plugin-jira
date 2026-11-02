@@ -623,3 +623,35 @@ async fn a_sink_for_all_actors_gets_the_ignored_actor() {
         "{c}"
     );
 }
+
+/// Panics on the first delivery, then works.
+struct PanicsOnce(AtomicBool);
+
+#[async_trait]
+impl EventSink for PanicsOnce {
+    async fn deliver(&self, _delivery: Arc<Delivery>) -> Result<(), HandlerError> {
+        assert!(self.0.swap(true, Ordering::SeqCst), "boom");
+        Ok(())
+    }
+}
+
+/// R9-test-quality-5: a sink that panics gives 503, so Jira sends the
+/// delivery again. The later sinks do not run.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_panicking_sink_is_503() {
+    let log = log();
+    let client = app(plugin(&FakeJira::new())
+        .sink(PanicsOnce(AtomicBool::new(false)))
+        .sink(Scripted::new("b", &log)));
+    let body = fresh();
+    deliver(&client, "p-1", &body).await.assert_status(503);
+    assert_eq!(entries(&log), Vec::<String>::new());
+    deliver(&client, "p-1", &body).await.assert_status(200);
+    assert_eq!(entries(&log), ["b:p-1"]);
+    let c = counters(&client).await;
+    assert_eq!(
+        (c["handler_failed"].as_u64(), c["accepted"].as_u64()),
+        (Some(1), Some(1)),
+        "{c}"
+    );
+}

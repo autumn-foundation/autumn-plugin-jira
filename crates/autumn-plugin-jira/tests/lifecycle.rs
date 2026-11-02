@@ -387,8 +387,8 @@ async fn two_oauth_tenants() -> (FakeJira, FakeJira, autumn_plugin_jira::JiraRun
     let globex = with_oauth(FakeJira::new().with_site("globex", GLOBEX_CLOUD_ID));
     let acme = with_oauth(FakeJira::new()).with_fallback(Arc::new(globex.clone()));
     let san = san_mateo(Arc::new(acme.clone()));
-    oauth_connection(&san, "acme", autumn_jira_fake::DEFAULT_CLOUD_ID).await;
-    oauth_connection(&san, "globex", GLOBEX_CLOUD_ID).await;
+    oauth_connection(&san, "acme", Some(autumn_jira_fake::DEFAULT_CLOUD_ID)).await;
+    oauth_connection(&san, "globex", Some(GLOBEX_CLOUD_ID)).await;
     let state = AppState::for_test();
     state.insert_extension(SanMateoService::new(san));
     let config = autumn_plugin_jira::JiraConfig::from_toml_str(&format!(
@@ -444,4 +444,34 @@ async fn a_prebuilt_client_with_a_jira_http_table_conflicts() {
     plugin(&FakeJira::new())
         .start(&AppState::for_test())
         .unwrap();
+}
+
+/// R9-test-quality-12 (AC26): the `san_mateo` start makes no network call,
+/// also for an OAuth connection with no cloud id. The first call discovers
+/// the site.
+#[tokio::test(flavor = "multi_thread")]
+async fn san_mateo_startup_makes_no_network_call() {
+    let fake = with_oauth(FakeJira::new());
+    let counting = Counting::new(Arc::new(fake.clone()));
+    let san = san_mateo(Arc::new(counting.clone()));
+    oauth_connection(&san, CONNECTION, None).await;
+    let before = counting.count();
+    let config = autumn_plugin_jira::JiraConfig::from_toml_str(&format!(
+        "[jira.san_mateo]\nenvironment = \"{ENV}\"\nintegration = \"{OAUTH_INTEGRATION}\"\nconnection_id = \"{CONNECTION}\"\n"
+    ))
+    .unwrap();
+    let client = TestApp::new()
+        .config(autumn_config())
+        .plugin(
+            SanMateoPlugin::with_config(SanMateoConfig::default())
+                .service(san)
+                .background(false),
+        )
+        .plugin(JiraPlugin::with_config(config).webhook_route())
+        .build();
+    assert_eq!(counting.count(), before, "the start makes no call");
+    let jira = JiraService::require(client.state()).unwrap();
+    jira.myself().await.unwrap();
+    assert_eq!(fake.count(FakeOp::AccessibleResources), 1, "discovery");
+    assert_eq!(fake.count(FakeOp::Myself), 1);
 }

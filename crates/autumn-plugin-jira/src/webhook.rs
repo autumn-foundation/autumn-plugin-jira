@@ -284,3 +284,42 @@ impl Runtime {
         Verdict::Accepted
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
+mod tests {
+    use autumn_web::config::AutumnConfig;
+    use autumn_web::test::TestApp;
+    use autumn_web::webhook::hmac_sha256_hex;
+
+    use super::*;
+    use crate::webhook_endpoint;
+
+    /// R9-test-quality-5: a signed delivery before the start gives 503, so
+    /// Jira sends it again.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_delivery_before_the_start_is_503() {
+        const PATH: &str = "/jira/webhook";
+        const SECRET: &str = "unit-webhook-secret-0123456789abcdef";
+        let mut cfg = AutumnConfig::default();
+        let mut endpoint = webhook_endpoint(PATH, "JIRA_WEBHOOK_SECRET");
+        endpoint.secret = Some(SECRET.to_owned());
+        cfg.security.webhooks.endpoints.push(endpoint);
+        // The cell is never set: the plugin has not started.
+        let client = TestApp::new()
+            .config(cfg)
+            .merge(router(PATH, Cell::default()))
+            .build();
+        let body = br#"{"timestamp":1,"webhookEvent":"jira:issue_updated"}"#;
+        let signature = format!("sha256={}", hmac_sha256_hex(SECRET.as_bytes(), body));
+        client
+            .post(PATH)
+            .header("X-Hub-Signature", &signature)
+            .header("X-Atlassian-Webhook-Identifier", "early-1")
+            .header("content-type", "application/json")
+            .body(body.to_vec())
+            .send()
+            .await
+            .assert_status(503);
+    }
+}

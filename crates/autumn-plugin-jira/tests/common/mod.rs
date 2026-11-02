@@ -250,12 +250,12 @@ pub fn with_oauth(fake: FakeJira) -> FakeJira {
     fake.with_oauth(CLIENT_ID, CLIENT_SECRET, ACCESS_TOKEN, REFRESH_TOKEN)
 }
 
-/// Adds the `atlassian` integration (one time) and an OAuth connection
-/// whose metadata holds `cloud_id`.
+/// Adds the `atlassian` integration (one time) and an OAuth connection.
+/// Its metadata holds `cloud_id`, when it is set.
 pub async fn oauth_connection(
     san: &SanMateo,
     connection_id: &str,
-    cloud_id: &str,
+    cloud_id: Option<&str>,
 ) -> ConnectionKey {
     let _ = san
         .create_integration(
@@ -281,7 +281,9 @@ pub async fn oauth_connection(
                 raw: json!({}),
             }),
             connection_config: Map::new(),
-            metadata: Map::from_iter([("cloudId".to_owned(), json!(cloud_id))]),
+            metadata: cloud_id
+                .map(|id| Map::from_iter([("cloudId".to_owned(), json!(id))]))
+                .unwrap_or_default(),
             tags: autumn_jira::san_mateo::Tags::new(),
             end_user: None,
             webhook_url_override: None,
