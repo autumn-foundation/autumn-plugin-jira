@@ -27,7 +27,7 @@ a column with "test" in its header is a `fn` in the named file or module.
 | ACs done | 40 of 40 done. |
 | Examples | EX1 to EX8 done. |
 | Tests | After review round 2: 517 pass, 0 fail, 18 ignored in the main workspace (`cargo test --workspace --all-features --locked --no-fail-fast`, with Postgres, 41 test binaries and doc-test runs). The ignored ones are the five live cases in `core/t/live.rs`, which never run in CI, the boot child `boot_child_server`, which runs only as a child process, and 12 doc snippets marked `ignore`. The ecosystem workspace: 19 pass, 0 fail, 1 ignored (`cargo test --locked --manifest-path examples/ecosystem/Cargo.toml`, with Postgres). |
-| Line coverage (`src/`) | `autumn-jira` 97.63%, `autumn-jira-fake` 98.96%, `autumn-plugin-jira` 94.97%, `autumn-jira-harvest` 96.36%, `autumn-jira-camel` 97.02% (the wave reports; `cargo llvm-cov`, tests and examples left out). The CI gate is 85% for each crate. |
+| Line coverage (`src/`) | After review round 2: `autumn-jira` 98.04%, `autumn-jira-fake` 98.98%, `autumn-plugin-jira` 95.77%, `autumn-jira-harvest` 96.56%, `autumn-jira-camel` 97.27% (`cargo llvm-cov --workspace --all-features --locked`, with Postgres, then `scripts/coverage-gate.py cov.json 85`; tests and examples left out). The CI gate is 85% for each crate. |
 | Verus | `verus/policy.rs`: 31 verified, 0 errors (CI run 41422883903, job `verus` 125202423323, head `8c278e7`). |
 | MSRV | 1.89: `cargo +1.89.0 check --workspace --all-targets --all-features --locked` passed in CI (run 41422883903, job `msrv` 125202423505, head `8c278e7`). Verified in CI only (plan R4). |
 | CI | Run 41422883903 on head `8c278e7`: all 7 jobs pass. The jobs are `lint`, `test` (with coverage), `examples`, `msrv`, `verus`, `deps` and `example-ecosystem` (job 125202423939). This record has no CI run of a later head. After review round 2, the local `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` and both test commands pass. |
@@ -380,7 +380,7 @@ The status comes from the fixer reports: 36 fixed, 1 partially fixed.
 | R2F-fixcheck-a-5 | low | outcome_pending made a sink answer 503, so a redelivery called the write again. | fixed | u: `sink::handler_error_from_jira_error` | c8407c2 (RED), 28b9066 (GREEN) |
 | R2F-fixcheck-a-6 | low | The escape scan matched raw text, so a spaced escape passed. | fixed | u: `policy::the_spec_has_no_proof_escape` | cb1a7c3 (RED), 253c139 (GREEN) |
 | R2G-fixcheck-b-1 | low | A tenant that moved to another site kept the stale site in the default client. | partially fixed | `core/t/san_mateo.rs::{a_reconnect_after_discovery_is_seen, a_reconnect_after_confirmation_is_seen}` | e63753e (RED), 3f6d3d5 (GREEN), 48b3df6 (DOCS, README and ADR 0002) |
-| R2G-fixcheck-b-2 | low | examples-plan and this file gave EX5 to EX8 a stale status, while the work was done. | fixed | `core/t/guards.rs::{ex_status_agrees, ex_status_agrees_sees_a_gap}` | 42c4592 (RED), GREEN_COMMIT (GREEN) |
+| R2G-fixcheck-b-2 | low | examples-plan and this file gave EX5 to EX8 a stale status, while the work was done. | fixed | `core/t/guards.rs::{ex_status_agrees, ex_status_agrees_sees_a_gap}` | 42c4592 (RED), 8d43054 (GREEN) |
 
 Notes on the open items of round 2:
 
