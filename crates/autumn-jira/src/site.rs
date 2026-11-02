@@ -65,7 +65,6 @@ impl BasicAuth {
     }
 
     /// Returns the `Authorization` header value: `Basic base64(email:token)`.
-    #[allow(dead_code, reason = "the DirectBackend of WP3 uses it")]
     pub(crate) fn authorization(&self) -> Secret {
         let pair = format!("{}:{}", self.email, self.token.expose());
         Secret::new(format!(

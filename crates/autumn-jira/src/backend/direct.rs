@@ -54,18 +54,43 @@ impl fmt::Debug for DirectBackend {
 
 /// Maps a transport error to a backend error (plan 4.4).
 pub(crate) const fn map_transport_error(error: &TransportError) -> BackendError {
-    let _ = error;
-    BackendError::NotSent {
-        transient: false,
-        code: "not_written_yet",
+    match error {
+        // `ReqwestTransport` maps a reset during the reply read to `Connect`
+        // (G5). The request can have reached Jira.
+        TransportError::Connect(_) => BackendError::MaybeSent { code: "connect" },
+        TransportError::Timeout => BackendError::MaybeSent { code: "timeout" },
+        // Jira replied, so a write ran.
+        TransportError::BodyTooLarge => BackendError::MaybeSent {
+            code: "body_too_large",
+        },
+        TransportError::Invalid(_) => BackendError::NotSent {
+            transient: false,
+            code: "invalid_request",
+        },
     }
 }
 
 #[async_trait]
 impl JiraBackend for DirectBackend {
     async fn send(&self, request: ApiRequest) -> Result<ApiResponse, BackendError> {
-        let _ = (&self.transport, request, USER_AGENT, HttpRequest::new("GET", ""));
-        Err(map_transport_error(&TransportError::Timeout))
+        let url = format!("{}{}", self.site.base_url(), request.path_and_query());
+        let mut http = HttpRequest::new(request.method.as_str(), url)
+            .header("authorization", self.auth.authorization().expose())
+            .header("accept", "application/json")
+            .header("user-agent", USER_AGENT);
+        if let Some(body) = request.body {
+            http = http.header("content-type", "application/json").body(body);
+        }
+        let reply = self
+            .transport
+            .send(http)
+            .await
+            .map_err(|e| map_transport_error(&e))?;
+        Ok(ApiResponse {
+            status: reply.status,
+            headers: reply.headers,
+            body: reply.body,
+        })
     }
 
     fn info(&self) -> BackendInfo {

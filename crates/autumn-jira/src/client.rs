@@ -6,6 +6,7 @@
 //! at most once after a 5xx or a "maybe sent" network error. The
 //! idempotent variants find a lost write by a marker or by a state check.
 
+mod call;
 mod idempotent;
 mod pager;
 mod settings;
@@ -31,6 +32,7 @@ use crate::model::{
 use crate::request::{EditOptions, FieldSet, IssueEdit, NewIssue, SearchRequest, TransitionFields};
 use crate::site::{BasicAuth, JiraSite};
 
+pub(crate) use call::status_error;
 pub use crate::error::MarkerRef;
 pub use crate::ids::IdempotencyKey;
 pub use pager::SearchPager;

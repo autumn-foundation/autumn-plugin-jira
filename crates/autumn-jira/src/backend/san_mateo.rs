@@ -10,12 +10,18 @@
 use std::fmt;
 
 use async_trait::async_trait;
-use san_mateo::{ConnectionKey, SanMateo};
+use san_mateo::store::ConnectionFilter;
+use san_mateo::{ConnectionKey, ProxyRequest, SanMateo};
+use serde_json::{Map, Value, json};
 use tokio::sync::OnceCell;
 
-use super::{ApiRequest, ApiResponse, BackendError, BackendInfo, BackendMode, JiraBackend};
-use crate::error::Result;
+use super::{
+    ApiRequest, ApiResponse, BackendError, BackendInfo, BackendMode, JiraBackend, backend_error,
+    resolve_cloud_id,
+};
+use crate::error::{JiraError, Op, Result};
 use crate::ids::CloudId;
+use crate::model::AccessibleResource;
 
 /// The san-mateo provider of a Jira API token.
 pub(crate) const JIRA_BASIC: &str = "jira-basic";
@@ -23,6 +29,8 @@ pub(crate) const JIRA_BASIC: &str = "jira-basic";
 pub(crate) const ATLASSIAN: &str = "atlassian";
 /// The connection metadata key that holds the cloud id.
 pub(crate) const CLOUD_ID_KEY: &str = "cloudId";
+/// The discovery path on `https://api.atlassian.com`.
+const RESOURCES_PATH: &str = "/oauth/token/accessible-resources";
 
 /// The san-mateo connection that a [`SanMateoBackend`] uses.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,8 +89,52 @@ impl fmt::Debug for SanMateoBackend {
 
 /// Maps a san-mateo error to a backend error (plan 4.4).
 pub(crate) fn map_error(error: &san_mateo::Error) -> BackendError {
-    let _ = error;
-    BackendError::MaybeSent { code: "unknown" }
+    use san_mateo::Error as E;
+    match error {
+        E::Upstream(_) => BackendError::MaybeSent { code: "upstream" },
+        E::UpstreamTooLarge => BackendError::MaybeSent {
+            code: "upstream_too_large",
+        },
+        E::Store(_) | E::RefreshCooldown => BackendError::NotSent {
+            transient: true,
+            code: error.code(),
+        },
+        E::Provider { status, .. } => BackendError::NotSent {
+            transient: status.is_none_or(|s| s >= 500 || matches!(s, 408 | 425 | 429)),
+            code: "provider",
+        },
+        E::RefreshExhausted | E::Unauthorized(_) => BackendError::Auth { code: error.code() },
+        E::UnknownIntegration(_)
+        | E::UnknownConnection(_)
+        | E::UnknownProvider(_)
+        | E::Template(_)
+        | E::ForbiddenHost(_)
+        | E::Invalid(_)
+        | E::MissingField(_)
+        | E::UnsupportedAuthMode(_)
+        | E::IntegrationNotAllowed(_)
+        | E::Crypto
+        | E::Internal(_)
+        | E::InvalidConnectSession
+        | E::InvalidOAuthState
+        | E::Conflict(_)
+        | E::UnknownFunction(_)
+        | E::Function(_) => BackendError::NotSent {
+            transient: false,
+            code: error.code(),
+        },
+        // A future variant: the safe side for a write (B11).
+        _ => BackendError::MaybeSent { code: "unknown" },
+    }
+}
+
+/// Turns a client error of the discovery into a backend error. The Jira
+/// call did not leave this process.
+const fn not_sent(error: &JiraError) -> BackendError {
+    BackendError::NotSent {
+        transient: error.is_retryable(),
+        code: error.code(),
+    }
 }
 
 /// Returns the path prefix of a provider.
@@ -90,8 +142,14 @@ pub(crate) fn prefix_for(
     provider: &str,
     cloud_id: Option<&CloudId>,
 ) -> std::result::Result<Option<String>, BackendError> {
-    let _ = (provider, cloud_id);
-    Ok(None)
+    match provider {
+        JIRA_BASIC => Ok(Some(String::new())),
+        ATLASSIAN => Ok(cloud_id.map(|id| format!("/ex/jira/{id}"))),
+        _ => Err(BackendError::NotSent {
+            transient: false,
+            code: "not_a_jira_provider",
+        }),
+    }
 }
 
 impl SanMateoBackend {
@@ -119,16 +177,128 @@ impl SanMateoBackend {
     /// `JiraError::CloudId` when no site matches, or the provider is not
     /// `atlassian`. The errors of the call.
     pub async fn discover_cloud_id(&self) -> Result<CloudId> {
-        let _ = (&self.san, &self.prefix);
-        Err(crate::error::JiraError::CloudId("not written yet".to_owned()))
+        let provider = self
+            .provider()
+            .await
+            .map_err(|e| backend_error(Op::Discovery, &e))?;
+        if provider != ATLASSIAN {
+            return Err(JiraError::CloudId(
+                "only the atlassian provider has a cloud id to discover".to_owned(),
+            ));
+        }
+        self.discover().await
+    }
+
+    /// Returns the provider name of the integration.
+    async fn provider(&self) -> std::result::Result<String, BackendError> {
+        self.san
+            .get_integration(
+                &self.target.environment,
+                &self.target.connection.provider_config_key,
+            )
+            .await
+            .map(|i| i.provider)
+            .map_err(|e| map_error(&e))
+    }
+
+    /// Returns the path prefix: from the provider, the target, the
+    /// metadata, or a discovery, in this order.
+    async fn resolve_prefix(&self) -> std::result::Result<String, BackendError> {
+        let provider = self.provider().await?;
+        if let Some(prefix) = prefix_for(&provider, self.target.cloud_id.as_ref())? {
+            return Ok(prefix);
+        }
+        let id = match self.metadata_cloud_id().await? {
+            Some(id) => id,
+            None => self.discover().await.map_err(|e| not_sent(&e))?,
+        };
+        Ok(format!("/ex/jira/{id}"))
+    }
+
+    /// Reads the cloud id from the connection metadata. A bad value counts
+    /// as none.
+    async fn metadata_cloud_id(&self) -> std::result::Result<Option<CloudId>, BackendError> {
+        let filter = ConnectionFilter {
+            provider_config_key: Some(self.target.connection.provider_config_key.clone()),
+            connection_id: Some(self.target.connection.connection_id.clone()),
+            ..ConnectionFilter::default()
+        };
+        let list = self
+            .san
+            .list_connections(&self.target.environment, &filter)
+            .await
+            .map_err(|e| map_error(&e))?;
+        Ok(list.iter().find_map(|c| {
+            c.metadata
+                .get(CLOUD_ID_KEY)
+                .and_then(Value::as_str)
+                .and_then(|t| CloudId::parse(t).ok())
+        }))
+    }
+
+    /// Reads `accessible-resources`, picks the site, and stores the id.
+    async fn discover(&self) -> Result<CloudId> {
+        let env = &self.target.environment;
+        let key = &self.target.connection;
+        let mut request = ProxyRequest::get(RESOURCES_PATH);
+        request.headers = vec![("accept".to_owned(), "application/json".to_owned())];
+        request.retries = 0;
+        let reply = self
+            .san
+            .proxy(env, key, request)
+            .await
+            .map_err(|e| backend_error(Op::Discovery, &map_error(&e)))?;
+        let reply = ApiResponse {
+            status: reply.status,
+            headers: reply.headers,
+            body: reply.body,
+        };
+        if !(200..=299).contains(&reply.status) {
+            return Err(crate::client::status_error(Op::Discovery, &reply));
+        }
+        let resources: Vec<AccessibleResource> = crate::model::decode(Op::Discovery, &reply.body)?;
+        let id = resolve_cloud_id(&resources, self.target.site_url.as_deref())?;
+        let metadata = Map::from_iter([(CLOUD_ID_KEY.to_owned(), json!(id.as_str()))]);
+        self.san
+            .set_metadata(env, key, metadata, true)
+            .await
+            .map_err(|e| backend_error(Op::Discovery, &map_error(&e)))?;
+        tracing::info!(site = %self.info().site, "jira: stored the discovered cloud id");
+        Ok(id)
     }
 }
 
 #[async_trait]
 impl JiraBackend for SanMateoBackend {
     async fn send(&self, request: ApiRequest) -> std::result::Result<ApiResponse, BackendError> {
-        let _ = request;
-        Err(BackendError::MaybeSent { code: "unknown" })
+        let prefix = self
+            .prefix
+            .get_or_try_init(|| self.resolve_prefix())
+            .await?;
+        let mut proxy = ProxyRequest::new(
+            request.method.as_str(),
+            format!("{prefix}{}", request.path_and_query()),
+        );
+        proxy.headers = vec![("accept".to_owned(), "application/json".to_owned())];
+        if let Some(body) = request.body {
+            proxy
+                .headers
+                .push(("content-type".to_owned(), "application/json".to_owned()));
+            proxy.body = body;
+        }
+        // One send for each attempt. The client owns the retries.
+        proxy.retries = 0;
+        proxy.retry_on = Vec::new();
+        let reply = self
+            .san
+            .proxy(&self.target.environment, &self.target.connection, proxy)
+            .await
+            .map_err(|e| map_error(&e))?;
+        Ok(ApiResponse {
+            status: reply.status,
+            headers: reply.headers,
+            body: reply.body,
+        })
     }
 
     fn info(&self) -> BackendInfo {

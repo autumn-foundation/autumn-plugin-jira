@@ -211,8 +211,47 @@ pub fn resolve_cloud_id(
     resources: &[AccessibleResource],
     site_url: Option<&str>,
 ) -> Result<CloudId> {
-    let _ = (resources, site_url);
-    Err(JiraError::CloudId("not written yet".to_owned()))
+    let jira = resources.iter().filter(|r| {
+        r.scopes
+            .iter()
+            .any(|s| s.starts_with("read:jira-") || s.starts_with("write:jira-"))
+    });
+    let picked: Vec<&AccessibleResource> = match site_url {
+        Some(url) => jira.filter(|r| same_url(&r.url, url)).collect(),
+        None => jira.collect(),
+    };
+    match picked.as_slice() {
+        [one] => Ok(one.id.clone()),
+        [] if site_url.is_some() => Err(JiraError::CloudId(
+            "no Jira site in accessible-resources has the site_url".to_owned(),
+        )),
+        [] => Err(JiraError::CloudId(
+            "accessible-resources has no Jira site".to_owned(),
+        )),
+        _ => Err(JiraError::CloudId(
+            "accessible-resources has more than one Jira site; set site_url".to_owned(),
+        )),
+    }
+}
+
+/// Compares two site URLs. Case and a trailing `/` do not matter.
+fn same_url(a: &str, b: &str) -> bool {
+    a.trim_end_matches('/')
+        .eq_ignore_ascii_case(b.trim_end_matches('/'))
+}
+
+/// Maps a backend error to the error of a call that stops (plan 6, glue).
+pub(crate) const fn backend_error(op: Op, error: &BackendError) -> JiraError {
+    match *error {
+        BackendError::NotSent {
+            transient: false,
+            code,
+        } => JiraError::Config { code },
+        BackendError::NotSent { code, .. } | BackendError::MaybeSent { code } => {
+            JiraError::Network { op, code }
+        }
+        BackendError::Auth { code } => JiraError::Auth { code },
+    }
 }
 
 #[cfg(test)]
