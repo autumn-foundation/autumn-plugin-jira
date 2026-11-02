@@ -17,7 +17,7 @@ use tokio::sync::OnceCell;
 
 use super::{
     ApiRequest, ApiResponse, BackendError, BackendInfo, BackendMode, JiraBackend, backend_error,
-    resolve_cloud_id,
+    invalid_before_send, resolve_cloud_id,
 };
 use crate::error::{JiraError, Op, Result};
 use crate::ids::CloudId;
@@ -29,6 +29,8 @@ pub(crate) const JIRA_BASIC: &str = "jira-basic";
 pub(crate) const ATLASSIAN: &str = "atlassian";
 /// The connection metadata key that holds the cloud id.
 pub(crate) const CLOUD_ID_KEY: &str = "cloudId";
+/// The start of the san-mateo text of a transport `Invalid` error.
+const TRANSPORT_INVALID: &str = "the upstream request is not valid: ";
 /// The discovery path on `https://api.atlassian.com`.
 const RESOURCES_PATH: &str = "/oauth/token/accessible-resources";
 
@@ -104,6 +106,15 @@ pub(crate) fn map_error(error: &san_mateo::Error) -> BackendError {
             code: "provider",
         },
         E::RefreshExhausted | E::Unauthorized(_) => BackendError::Auth { code: error.code() },
+        // san-mateo wraps a transport `Invalid` in this text. A reqwest
+        // send error can come after Jira has the request.
+        E::Invalid(text)
+            if text
+                .strip_prefix(TRANSPORT_INVALID)
+                .is_some_and(|rest| !invalid_before_send(rest)) =>
+        {
+            BackendError::MaybeSent { code: "send_error" }
+        }
         E::UnknownIntegration(_)
         | E::UnknownConnection(_)
         | E::UnknownProvider(_)

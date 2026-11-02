@@ -26,6 +26,29 @@ const UNRESERVED: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'.')
     .remove(b'~');
 
+/// The `TransportError::Invalid` texts of `san_mateo::ReqwestTransport`
+/// for a check before the send.
+const INVALID_BEFORE_SEND: [&str; 4] = [
+    "bad HTTP method",
+    "bad URL",
+    "bad header name",
+    "bad header value",
+];
+/// The start of the reqwest text for a request that reqwest cannot build.
+const BUILDER_ERROR: &str = "builder error";
+
+/// Returns `true` when a `TransportError::Invalid` text says that the
+/// request did not leave this process.
+///
+/// `ReqwestTransport` also gives `Invalid` for a reqwest send error
+/// ("error sending request"), for example a reset after Jira has the whole
+/// request. Such a write can have run. So only the known texts of a check
+/// before the send give `true`. Every other text gives `false`: that is the
+/// safe side for a write (B11).
+pub(crate) fn invalid_before_send(text: &str) -> bool {
+    INVALID_BEFORE_SEND.contains(&text) || text.starts_with(BUILDER_ERROR)
+}
+
 /// Percent-encodes one path segment. A `/` in the text cannot start a new
 /// segment.
 pub(crate) fn encode_segment(text: &str) -> String {

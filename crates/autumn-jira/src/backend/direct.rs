@@ -6,7 +6,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use san_mateo::transport::{HttpRequest, HttpTransport, TransportError};
 
-use super::{ApiRequest, ApiResponse, BackendError, BackendInfo, BackendMode, JiraBackend};
+use super::{
+    ApiRequest, ApiResponse, BackendError, BackendInfo, BackendMode, JiraBackend,
+    invalid_before_send,
+};
 use crate::site::{BasicAuth, JiraSite};
 
 /// The `user-agent` header value.
@@ -53,7 +56,7 @@ impl fmt::Debug for DirectBackend {
 }
 
 /// Maps a transport error to a backend error (plan 4.4).
-pub(crate) const fn map_transport_error(error: &TransportError) -> BackendError {
+pub(crate) fn map_transport_error(error: &TransportError) -> BackendError {
     match error {
         // `ReqwestTransport` maps a reset during the reply read to `Connect`
         // (G5). The request can have reached Jira.
@@ -63,10 +66,12 @@ pub(crate) const fn map_transport_error(error: &TransportError) -> BackendError 
         TransportError::BodyTooLarge => BackendError::MaybeSent {
             code: "body_too_large",
         },
-        TransportError::Invalid(_) => BackendError::NotSent {
+        TransportError::Invalid(text) if invalid_before_send(text) => BackendError::NotSent {
             transient: false,
             code: "invalid_request",
         },
+        // A reqwest send error: the request can have reached Jira.
+        TransportError::Invalid(_) => BackendError::MaybeSent { code: "send_error" },
     }
 }
 
@@ -140,11 +145,16 @@ mod tests {
                 },
             ),
             (
-                TransportError::Invalid("bad".to_owned()),
+                TransportError::Invalid("bad URL".to_owned()),
                 BackendError::NotSent {
                     transient: false,
                     code: "invalid_request",
                 },
+            ),
+            // An unknown text is the safe side for a write.
+            (
+                TransportError::Invalid("bad".to_owned()),
+                BackendError::MaybeSent { code: "send_error" },
             ),
         ];
         for (error, expected) in cases {
