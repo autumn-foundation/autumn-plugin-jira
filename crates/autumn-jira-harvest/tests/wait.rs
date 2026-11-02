@@ -612,3 +612,302 @@ mod human {
         );
     }
 }
+
+// ------------------------------------------------------------ review fixes
+
+/// The failure payload of a read that used every attempt on a 503.
+fn transient_read_failure() -> String {
+    autumn_harvest::failure::IntoActivityErrorString::into_error_payload(
+        autumn_jira_harvest::failure_for(&autumn_jira::JiraError::Upstream {
+            op: autumn_jira::error::Op::GetIssue,
+            status: 503,
+        }),
+    )
+}
+
+/// The first read gives `first`. Each later read fails with a 503.
+fn env_with_failed_polls(first: &StatusSummary) -> WorkflowTestEnv {
+    let first = issue_at(first);
+    WorkflowTestEnv::new().mock_activity_seeded(GET_ISSUE, move |_, mock| {
+        if mock.call() == 1 {
+            Ok(first.clone())
+        } else {
+            Err(transient_read_failure())
+        }
+    })
+}
+
+/// R4-harvest-determinism-1: a failed poll is a missed poll. The next poll
+/// can still end the wait.
+#[tokio::test]
+async fn a_failed_poll_is_a_missed_poll() {
+    let outcome = WorkflowTestEnv::new()
+        .mock_activity_retries(GET_ISSUE, vec![Ok(issue_at(&in_progress()))])
+        .mock_activity_retries(GET_ISSUE, vec![Err(transient_read_failure())])
+        .mock_activity_retries(GET_ISSUE, vec![Ok(issue_at(&done()))])
+        .run(handler(), input(3_600, Some(60)))
+        .await;
+    assert_eq!(
+        result(&outcome),
+        StatusWait::Reached {
+            status: done(),
+            source: WaitSource::Poll
+        }
+    );
+    assert_eq!(reads(outcome.events()).len(), 3);
+    assert_replays(&outcome).await;
+}
+
+/// R4-harvest-determinism-1: a failed last read gives `TimedOut` with the
+/// last status that the wait saw. The simulation records a failed read
+/// with no type.
+#[tokio::test]
+async fn a_failed_last_read_times_out() {
+    let env = env_with_failed_polls(&in_progress());
+    let run = env.simulation().run(5, handler(), input(180, Some(60))).await;
+    let wait: StatusWait = serde_json::from_value(
+        run.result()
+            .clone()
+            .unwrap_or_else(|e| panic!("the wait fails: {e}")),
+    )
+    .unwrap();
+    assert_eq!(
+        wait,
+        StatusWait::TimedOut {
+            last: Some(in_progress())
+        }
+    );
+    assert_eq!(run.elapsed().num_seconds(), 180);
+    // The first read, two polls and the last read.
+    assert_eq!(reads(run.events()).len(), 4);
+    assert_replays_with_the_clock_off(run.events().to_vec()).await;
+}
+
+/// R4-harvest-determinism-1: after a failed poll, a signal still ends the
+/// wait. Some seeds land the signal after the first failed poll.
+#[tokio::test]
+async fn a_signal_after_a_failed_poll_ends_the_wait() {
+    let env = env_with_failed_polls(&in_progress());
+    let mut sim = env.simulation().seeds(SeedPlan {
+        first: 0,
+        count: 24,
+    });
+    for n in 0..6 {
+        sim = sim.signal(SIGNAL, signal(OTHER_ISSUE, Some(done()), None, n));
+    }
+    let sim = sim.signal(SIGNAL, signal(ISSUE, Some(done()), Some(5_000), 9));
+    let mut late = 0;
+    sim.sweep(handler(), input(3_600, Some(60)), |run| {
+        let wait: StatusWait = serde_json::from_value(
+            run.result()
+                .clone()
+                .unwrap_or_else(|e| panic!("seed {}: the wait fails: {e}", run.seed())),
+        )
+        .unwrap();
+        assert_eq!(
+            wait,
+            StatusWait::Reached {
+                status: done(),
+                source: WaitSource::Signal
+            },
+            "seed {}",
+            run.seed()
+        );
+        if reads(run.events()).len() > 1 {
+            late += 1;
+        }
+    })
+    .await
+    .unwrap_or_else(|failure| panic!("{failure}"));
+    assert!(late > 0, "no seed landed the signal after a failed poll");
+}
+
+/// A poll that fails with a non-retryable class still ends the wait with
+/// that error type.
+#[tokio::test]
+async fn a_non_retryable_poll_failure_ends_the_wait() {
+    let not_found = autumn_harvest::failure::IntoActivityErrorString::into_error_payload(
+        autumn_harvest::failure::ActivityFailure::non_retryable(
+            "jira.not_found_or_forbidden",
+            "jira get_issue: not found or no permission",
+        ),
+    );
+    let outcome = WorkflowTestEnv::new()
+        .mock_activity_retries(GET_ISSUE, vec![Ok(issue_at(&in_progress()))])
+        .mock_activity_retries(GET_ISSUE, vec![Err(not_found)])
+        .run(handler(), input(3_600, Some(60)))
+        .await;
+    let failed = outcome.events().iter().find_map(|e| match e {
+        WorkflowEvent::WorkflowFailed { error_type, .. } => Some(error_type.clone()),
+        _ => None,
+    });
+    assert_eq!(failed, Some(Some("jira.not_found_or_forbidden".to_owned())));
+    assert_replays(&outcome).await;
+}
+
+/// An issue at `status`, updated at `updated_ms`.
+fn issue_updated_at(status: &StatusSummary, updated_ms: i64) -> Value {
+    let mut issue = issue_at(status);
+    issue["updated"] = json!(updated_ms);
+    issue
+}
+
+fn reopened() -> StatusSummary {
+    status("10005", "Reopened", "indeterminate")
+}
+
+/// R4-harvest-determinism-3: a read moves the newest time too. A signal
+/// that is older than a read is about a past state, so the wait skips it.
+#[tokio::test]
+async fn a_signal_older_than_a_read_is_skipped() {
+    let env = WorkflowTestEnv::new()
+        .mock_activity(GET_ISSUE, |_| Ok(issue_updated_at(&reopened(), 2_000)))
+        .queue_signal(SIGNAL, signal(ISSUE, Some(done()), Some(1_000), 1));
+    let run = env.simulation().run(1, handler(), input(60, None)).await;
+    let wait: StatusWait = serde_json::from_value(run.result().clone().unwrap()).unwrap();
+    assert_eq!(
+        wait,
+        StatusWait::TimedOut {
+            last: Some(reopened())
+        }
+    );
+    assert_replays_with_the_clock_off(run.events().to_vec()).await;
+
+    // A signal at the time of the read, or later, is not older.
+    let env = WorkflowTestEnv::new()
+        .mock_activity(GET_ISSUE, |_| Ok(issue_updated_at(&reopened(), 2_000)))
+        .queue_signal(SIGNAL, signal(ISSUE, Some(done()), Some(2_000), 1));
+    let run = env.simulation().run(1, handler(), input(60, None)).await;
+    let wait: StatusWait = serde_json::from_value(run.result().clone().unwrap()).unwrap();
+    assert!(
+        matches!(
+            wait,
+            StatusWait::Reached {
+                source: WaitSource::Signal,
+                ..
+            }
+        ),
+        "{wait:?}"
+    );
+}
+
+/// R4-harvest-determinism-4: the poll rounds have a bound, so a valid input
+/// cannot fill the history. The bound is 3 000 rounds. The default poll
+/// over `MAX_WAIT` is 2 784 rounds, so it is in the bound.
+#[tokio::test]
+async fn too_many_poll_rounds_fail_at_once() {
+    let outcome = WorkflowTestEnv::new()
+        .mock_activity(GET_ISSUE, |_| Ok(issue_at(&done())))
+        .run(handler(), input(MAX_WAIT.as_secs(), Some(60)))
+        .await;
+    let failed = outcome.events().iter().find_map(|e| match e {
+        WorkflowEvent::WorkflowFailed { error_type, .. } => Some(error_type.clone()),
+        _ => None,
+    });
+    assert_eq!(failed, Some(Some(INVALID_INPUT_ERROR.to_owned())));
+    assert_eq!(reads(outcome.events()), Vec::<GetIssueInput>::new());
+    // 3 000 rounds are allowed. The default poll over MAX_WAIT is allowed.
+    for (timeout, poll) in [(3_000 * 60, 60), (MAX_WAIT.as_secs(), 15 * 60)] {
+        let outcome = WorkflowTestEnv::new()
+            .mock_activity(GET_ISSUE, |_| Ok(issue_at(&done())))
+            .run(handler(), input(timeout, Some(poll)))
+            .await;
+        assert!(
+            matches!(result(&outcome), StatusWait::Reached { .. }),
+            "{timeout} / {poll}"
+        );
+    }
+}
+
+/// R4-harvest-determinism-4: the events of the largest wait stay far under
+/// the hard cap of the history (50 000 events). 3 000 poll rounds and 1 000
+/// skipped signals use at most half of it.
+#[tokio::test]
+async fn the_round_bound_fits_the_history_cap() {
+    let env = WorkflowTestEnv::new().mock_activity(GET_ISSUE, |_| Ok(issue_at(&in_progress())));
+    let base = env.simulation().run(1, handler(), input(60, None)).await;
+    let polled = env.simulation().run(1, handler(), input(660, Some(60))).await;
+    let poll_round = (polled.events().len() - base.events().len()).div_ceil(10);
+    let skipped = (0..10).fold(WorkflowTestEnv::new(), |env, n| {
+        env.queue_signal(SIGNAL, signal(OTHER_ISSUE, Some(done()), None, n))
+    });
+    let skipped = skipped
+        .mock_activity(GET_ISSUE, |_| Ok(issue_at(&in_progress())))
+        .simulation()
+        .run(1, handler(), input(60, None))
+        .await;
+    let signal_round = (skipped.events().len() - base.events().len()).div_ceil(10);
+    let worst = poll_round * 3_000 + signal_round * 1_000 + base.events().len();
+    assert!(
+        worst < 25_000,
+        "{poll_round} events for each poll, {signal_round} for each signal: {worst}"
+    );
+}
+
+/// The input of a workflow with two waits at the same time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TwoWaits {
+    first: IssueId,
+    second: IssueId,
+}
+
+/// Runs two waits at the same time in one run.
+#[workflow]
+async fn two_waits(
+    ctx: &WorkflowContext,
+    input: TwoWaits,
+) -> Result<Vec<StatusWait>, WorkflowFailure> {
+    let options = WaitOptions::new(Duration::from_secs(60));
+    let target = StatusTarget::done();
+    let (first, second) = tokio::join!(
+        await_issue_status(ctx, &input.first, &target, &options),
+        await_issue_status(ctx, &input.second, &target, &options),
+    );
+    Ok(vec![first?, second?])
+}
+
+/// R4-harvest-determinism-7: all waits share one signal name, so two waits
+/// at the same time take the signals of each other. The second wait fails
+/// at once with `jira.invalid_input`, on each replay too.
+#[tokio::test]
+async fn two_waits_at_the_same_time_fail_closed() {
+    let handler = two_waits_info().handler;
+    let input = serde_json::to_value(TwoWaits {
+        first: issue_id(ISSUE),
+        second: issue_id(OTHER_ISSUE),
+    })
+    .unwrap();
+    let outcome = WorkflowTestEnv::new()
+        .mock_activity(GET_ISSUE, |_| Ok(issue_at(&done())))
+        .run(handler, input)
+        .await;
+    let failed = outcome.events().iter().find_map(|e| match e {
+        WorkflowEvent::WorkflowFailed { error_type, .. } => Some(error_type.clone()),
+        _ => None,
+    });
+    assert_eq!(failed, Some(Some(INVALID_INPUT_ERROR.to_owned())));
+    // Only the first wait read its issue.
+    assert_eq!(reads(outcome.events()).len(), 1);
+    let report = outcome.replay_check(handler).await;
+    assert!(
+        matches!(report.status, ReplayStatus::ReplaySucceeded),
+        "{report}"
+    );
+    assert_replays_with_the_clock_off_as("two_waits", handler, outcome.events().to_vec()).await;
+
+    // One wait after the other is correct.
+    let outcome = WorkflowTestEnv::new()
+        .mock_activity(GET_ISSUE, |_| Ok(issue_at(&done())))
+        .run(wait_for_issue_info().handler, input_for(ISSUE))
+        .await;
+    assert!(matches!(result(&outcome), StatusWait::Reached { .. }));
+}
+
+fn input_for(issue: &str) -> Value {
+    serde_json::to_value(WaitInput {
+        issue_id: issue_id(issue),
+        target: StatusTarget::done(),
+        options: WaitOptions::new(Duration::from_secs(60)),
+    })
+    .unwrap()
+}
