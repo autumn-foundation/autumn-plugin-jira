@@ -71,9 +71,10 @@ pub use service::{JiraResultExt, JiraService, autumn_error};
 pub use webhook_config::{webhook_endpoint, webhook_endpoint_toml};
 
 // The README snippets compile and run as doc tests. They use `FakeJira`
-// and the `testing` helpers, so they need the `testing` feature.
-#[cfg(all(doctest, feature = "testing"))]
-#[doc = include_str!("../../../README.md")]
+// and the `testing` helpers, so they need the `testing` feature. `build.rs`
+// finds the README in the workspace and in the published package.
+#[cfg(all(doctest, feature = "testing", jira_readme))]
+#[doc = include_str!(env!("AUTUMN_PLUGIN_JIRA_README"))]
 pub struct ReadmeDoctests;
 
 /// The plugin name. autumn uses it to find a plugin that is added two times.

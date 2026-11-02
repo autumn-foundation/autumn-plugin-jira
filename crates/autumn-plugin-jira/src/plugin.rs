@@ -619,10 +619,14 @@ mod tests {
     use super::*;
 
     /// The declared range is the `autumn-web` requirement of the workspace.
+    ///
+    /// Only the workspace has its manifest. `build.rs` sets `jira_workspace`
+    /// there, so the published package still compiles its tests.
+    #[cfg(jira_workspace)]
     #[test]
     fn contract_matches_cargo_toml() {
-        use autumn_web::plugin_contract::{AUTUMN_WEB_VERSION, ContractVerdict, evaluate};
-        let manifest: toml::Table = toml::from_str(include_str!("../../../Cargo.toml")).unwrap();
+        let manifest: toml::Table =
+            toml::from_str(include_str!(env!("AUTUMN_PLUGIN_JIRA_WORKSPACE_MANIFEST"))).unwrap();
         let requirement = manifest["workspace"]["dependencies"]["autumn-web"]["version"]
             .as_str()
             .unwrap();
@@ -633,7 +637,12 @@ mod tests {
             Some(true),
             "the crate takes the workspace requirement"
         );
+    }
 
+    /// The contract is the one that autumn reads, and it fits this autumn.
+    #[test]
+    fn contract_is_compatible() {
+        use autumn_web::plugin_contract::{AUTUMN_WEB_VERSION, ContractVerdict, evaluate};
         let contract = JiraPlugin::new().contract().unwrap();
         assert_eq!(contract, plugin_contract());
         assert_eq!(contract.plugin, PLUGIN_NAME);
