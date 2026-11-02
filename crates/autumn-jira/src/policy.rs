@@ -40,9 +40,23 @@ pub enum Outcome {
 
 /// Classifies an HTTP status.
 #[must_use]
+// The body is the same text as in the Verus spec. Verus has no `contains`.
+#[allow(
+    clippy::manual_range_contains,
+    reason = "the body matches the Verus spec"
+)]
 pub const fn classify_status(status: u16) -> Outcome {
-    let _ = status;
-    Outcome::ClientError
+    if status >= 200 && status <= 299 {
+        Outcome::Success
+    } else if status == 429 {
+        Outcome::RateLimited
+    } else if status >= 300 && status <= 399 {
+        Outcome::Redirect
+    } else if status == 408 || status == 425 || status >= 500 {
+        Outcome::ServerError
+    } else {
+        Outcome::ClientError
+    }
 }
 
 /// The retry class of one operation.
@@ -78,15 +92,71 @@ pub enum Decision {
 /// Decides the next step after attempt number `attempt` (1-based).
 #[must_use]
 pub const fn decide(class: OpClass, outcome: Outcome, attempt: u32, max_attempts: u32) -> Decision {
-    let _ = (class, outcome, attempt, max_attempts);
-    Decision::Retry
+    let max = if max_attempts < MAX_ATTEMPTS {
+        max_attempts
+    } else {
+        MAX_ATTEMPTS
+    };
+    let left = attempt < max;
+    match outcome {
+        Outcome::Success => Decision::Done,
+        Outcome::ClientError | Outcome::Redirect => Decision::Stop,
+        Outcome::ServerError | Outcome::MaybeSent => match class {
+            OpClass::UnsafeWrite => Decision::Unknown,
+            OpClass::MarkedWrite => Decision::Confirm,
+            OpClass::Read | OpClass::IdempotentWrite | OpClass::CheckedWrite => {
+                if left {
+                    Decision::Retry
+                } else {
+                    Decision::Stop
+                }
+            }
+        },
+        Outcome::RateLimited => match class {
+            OpClass::UnsafeWrite => Decision::Stop,
+            OpClass::Read
+            | OpClass::IdempotentWrite
+            | OpClass::CheckedWrite
+            | OpClass::MarkedWrite => {
+                if left {
+                    Decision::Retry
+                } else {
+                    Decision::Stop
+                }
+            }
+        },
+        Outcome::NotSent => {
+            if left {
+                Decision::Retry
+            } else {
+                Decision::Stop
+            }
+        }
+    }
 }
 
 /// Returns the wait in ms before retry number `attempt` (1-based).
+///
+/// The wait is `initial_ms * 2^(attempt - 1)`, capped at `cap_ms`. This is
+/// the proved san-mateo function. `backoff_matches_san_mateo` compares them.
 #[must_use]
 pub const fn backoff_ms(initial_ms: u64, attempt: u32, cap_ms: u64) -> u64 {
-    let _ = (initial_ms, attempt, cap_ms);
-    0
+    let mut b: u64 = if initial_ms <= cap_ms {
+        initial_ms
+    } else {
+        cap_ms
+    };
+    let mut i: u32 = 1;
+    while i < attempt {
+        // At the cap or at zero, the value stays. A large `attempt` costs no time.
+        if b == cap_ms || b == 0 {
+            return b;
+        }
+        // Compare with no overflow: `cap - b <= b` is `2b >= cap`.
+        b = if cap_ms - b <= b { cap_ms } else { b * 2 };
+        i += 1;
+    }
+    b
 }
 
 /// Returns the wait before retry number `attempt`, or `None` when a
@@ -98,22 +168,56 @@ pub const fn retry_wait_ms(
     cap_ms: u64,
     retry_after_ms: Option<u64>,
 ) -> Option<u64> {
-    let _ = (attempt, base_ms, cap_ms, retry_after_ms);
-    None
+    let backoff = backoff_ms(base_ms, attempt, cap_ms);
+    match retry_after_ms {
+        Some(after) => {
+            if after > cap_ms {
+                None
+            } else if after > backoff {
+                Some(after)
+            } else {
+                Some(backoff)
+            }
+        }
+        None => Some(backoff),
+    }
 }
 
 /// Returns `value * permille / 1000`, with no overflow.
+///
+/// A `value` above `u64::MAX / 1300` or a `permille` above 1300 gives
+/// `value` with no change. The Verus file has proof code in this body, so
+/// a proptest checks it.
 #[must_use]
+// `u64::from` is not `const`.
+#[allow(clippy::cast_lossless, reason = "the body matches the Verus spec")]
 pub const fn scale_permille(value: u64, permille: u32) -> u64 {
-    let _ = (value, permille);
-    0
+    if value <= u64::MAX / 1_300 && permille <= 1_300 {
+        value * (permille as u64) / 1_000
+    } else {
+        value
+    }
 }
 
 /// Applies a jitter factor to a wait, then clamps it to the floor and the cap.
 #[must_use]
 pub const fn apply_jitter(wait_ms: u64, permille: u32, floor_ms: u64, cap_ms: u64) -> u64 {
-    let _ = (wait_ms, permille, floor_ms, cap_ms);
-    0
+    let p = if permille < JITTER_MIN_PERMILLE {
+        JITTER_MIN_PERMILLE
+    } else if permille > JITTER_MAX_PERMILLE {
+        JITTER_MAX_PERMILLE
+    } else {
+        permille
+    };
+    let scaled = scale_permille(wait_ms, p);
+    let high = if cap_ms > floor_ms { cap_ms } else { floor_ms };
+    if scaled < floor_ms {
+        floor_ms
+    } else if scaled > high {
+        high
+    } else {
+        scaled
+    }
 }
 
 /// What a durable host knows about the previous attempt.
@@ -132,8 +236,10 @@ pub enum Previous {
 /// Returns `true` when a durable host can send a marked write now.
 #[must_use]
 pub const fn host_may_send(previous: Previous, resend_opt_in: bool) -> bool {
-    let _ = (previous, resend_opt_in);
-    true
+    match previous {
+        Previous::First | Previous::NotSent => true,
+        Previous::MaybeSent | Previous::Unknown => resend_opt_in,
+    }
 }
 
 /// What a token pager does after one page.
@@ -158,15 +264,25 @@ pub const fn token_page_step(
     has_token: bool,
     repeated: bool,
 ) -> PageStep {
-    let _ = (pages_done, max_pages, is_last, has_token, repeated);
-    PageStep::Fetch
+    if is_last || !has_token {
+        PageStep::Done
+    } else if repeated {
+        PageStep::Stalled
+    } else if pages_done >= max_pages {
+        PageStep::Limit
+    } else {
+        PageStep::Fetch
+    }
 }
 
 /// Returns the next `startAt` of an offset pager, or `None` at the end.
 #[must_use]
 pub const fn offset_next(start_at: u64, returned: u64, total: u64) -> Option<u64> {
-    let _ = (start_at, returned, total);
-    None
+    if returned == 0 || start_at > u64::MAX - returned || start_at + returned >= total {
+        None
+    } else {
+        Some(start_at + returned)
+    }
 }
 
 /// The age class of a webhook delivery.
@@ -183,8 +299,17 @@ pub enum Freshness {
 /// Classifies the age of a webhook timestamp.
 #[must_use]
 pub const fn freshness(event_ms: u64, now_ms: u64, max_age_ms: u64, max_skew_ms: u64) -> Freshness {
-    let _ = (event_ms, now_ms, max_age_ms, max_skew_ms);
-    Freshness::Fresh
+    if now_ms > event_ms {
+        if now_ms - event_ms > max_age_ms {
+            Freshness::Stale
+        } else {
+            Freshness::Fresh
+        }
+    } else if event_ms - now_ms > max_skew_ms {
+        Freshness::Future
+    } else {
+        Freshness::Fresh
+    }
 }
 
 /// The result of one verified webhook delivery.
@@ -203,28 +328,51 @@ pub enum Verdict {
 /// Returns the HTTP status for a verified delivery: 200 or 503, never a 4xx.
 #[must_use]
 pub const fn webhook_status(verdict: Verdict) -> u16 {
-    let _ = verdict;
-    200
+    match verdict {
+        Verdict::Accepted | Verdict::Ignored => 200,
+        Verdict::HandlerFailed | Verdict::TimedOut => 503,
+    }
 }
 
 /// Returns `true` for a lower-case hex digit: `0-9` (48..=57) or `a-f` (97..=102).
 #[must_use]
+// The body is the same text as in the Verus spec. Verus has no `contains`.
+#[allow(
+    clippy::manual_range_contains,
+    reason = "the body matches the Verus spec"
+)]
 pub const fn is_lower_hex(b: u8) -> bool {
-    let _ = b;
-    false
+    (b >= 48 && b <= 57) || (b >= 97 && b <= 102)
 }
 
 /// Returns `true` when `header` has the shape `sha256=<64 lower hex>`.
+///
+/// Not in Verus: the proptest `spec_as_test_signature_shape` checks it.
 #[must_use]
 pub fn signature_shape_ok(header: &[u8]) -> bool {
-    let _ = header;
-    false
+    header.len() == 71
+        && header
+            .strip_prefix(b"sha256=")
+            .is_some_and(|hex| hex.iter().all(|b| is_lower_hex(*b)))
 }
 
 /// Quotes a JQL string value. It puts `\` before each `"` and `\`.
+///
+/// The result is one JQL string literal for each input, so a value such as
+/// `x" OR project = SECRET` cannot change the query. Not in Verus: the
+/// proptest `spec_as_test_jql_quote_round_trip` checks it.
 #[must_use]
 pub fn jql_quote(value: &str) -> String {
-    value.to_owned()
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for c in value.chars() {
+        if c == '"' || c == '\\' {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('"');
+    out
 }
 
 #[cfg(test)]
@@ -258,16 +406,12 @@ mod tests {
     /// packaged crate). The caller fails when `CI` is set.
     fn verus_file() -> Option<String> {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../verus/policy.rs");
-        match std::fs::read_to_string(path) {
-            Ok(text) => Some(text),
-            Err(_) => {
-                assert!(
-                    std::env::var_os("CI").is_none(),
-                    "verus/policy.rs is missing in CI"
-                );
-                None
-            }
-        }
+        let text = std::fs::read_to_string(path).ok();
+        assert!(
+            text.is_some() || std::env::var_os("CI").is_none(),
+            "verus/policy.rs is missing in CI"
+        );
+        text
     }
 
     /// The part of this file before the test module.
@@ -519,7 +663,9 @@ mod tests {
         let good = "sha256=a4771c39fbe90f317c7824e83ddef3caae9cb3d976c214ace1f2937e133263c9";
         assert!(signature_shape_ok(good.as_bytes()));
         assert!(!signature_shape_ok(good.to_uppercase().as_bytes()));
-        assert!(!signature_shape_ok(good.replace("sha256", "sha1").as_bytes()));
+        assert!(!signature_shape_ok(
+            good.replace("sha256", "sha1").as_bytes()
+        ));
         assert!(!signature_shape_ok(&good.as_bytes()[..70]));
         assert!(!signature_shape_ok(b""));
         assert_eq!(jql_quote("abc"), "\"abc\"");
@@ -771,13 +917,11 @@ mod tests {
         #[test]
         fn spec_as_test_token_pager_terminates(start in 0_u32..50, max in 0_u32..100, inputs in proptest::collection::vec(any::<(bool, bool, bool)>(), 0..200)) {
             // Each step reads the next input. A step that is not `Fetch` ends the loop.
-            let mut pages = start;
             let mut steps = 0_u32;
             for (is_last, has_token, repeated) in inputs {
-                if token_page_step(pages, max, is_last, has_token, repeated) != PageStep::Fetch {
+                if token_page_step(start + steps, max, is_last, has_token, repeated) != PageStep::Fetch {
                     break;
                 }
-                pages += 1;
                 steps += 1;
             }
             prop_assert!(steps == 0 || start + steps <= max);
