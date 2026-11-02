@@ -425,9 +425,10 @@ It is a separate workspace, because harvest-camel brings C builds that the
 main workspace must not have (ADR 0008). Run it with Postgres:
 
 ```sh
-docker compose -f examples/ecosystem/compose.yaml up -d
 DATABASE_URL=postgres://jira:jira@localhost/jira_test \
   cargo run --locked --manifest-path examples/ecosystem/Cargo.toml
+# Or let the script start Postgres 16 with Docker Compose:
+bash scripts/run-ecosystem.sh
 ```
 
 See [`examples/ecosystem/README.md`](examples/ecosystem/README.md) for the
