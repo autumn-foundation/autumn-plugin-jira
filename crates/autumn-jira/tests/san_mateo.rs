@@ -249,7 +249,6 @@ impl autumn_jira::san_mateo::transport::HttpTransport for Moving {
         &self,
         request: autumn_jira::san_mateo::transport::HttpRequest,
     ) -> Result<HttpResponse, autumn_jira::san_mateo::transport::TransportError> {
-        use autumn_jira::san_mateo::transport::HttpTransport;
         if self.moved.load(std::sync::atomic::Ordering::SeqCst) {
             self.b.send(request).await
         } else {

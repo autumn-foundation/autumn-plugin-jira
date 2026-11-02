@@ -219,6 +219,7 @@ text.
 | V98 | `Transition::is_global` and `Transition::looped` are `Option<bool>`. The resend rule counts a missing flag as `true`. | A reply with no flag made a global transition look safe to send again (R2A-write-safety-6). | 4.5, 7.1 |
 | V99 | New `JiraClient::add_comment_idempotent_first(issue, body, key)`: no lookup before the POST. The comment lookup starts a page back by the drop of the total. | A first attempt could not comment on an issue with more comments than the page cap (R2F-fixcheck-a-1). A delete between two pages hid the marker (R2A-write-safety-5). | 4.5, 7.1 |
 | V100 | `HandlerError::from` maps `OutcomeUnknown` with a marker (`outcome_pending`) to `Permanent`. | A sink that used `?` on an idempotent write answered 503, and the redelivery could send the write again (R2F-fixcheck-a-5). | 4.8 |
+| V101 | `SanMateoBackend` checks a stored cloud id after a 401 or 404 at most one time in each `CLOUD_ID_RECHECK_INTERVAL` (300 s), not one time for its life. New pub const `backend::CLOUD_ID_RECHECK_INTERVAL`. | One ordinary 404 used up the only check, so a site move while the process ran was never seen (R2B-webhooks-secrets-1, R2F-fixcheck-a-4, R2G-fixcheck-b-1). | 4.4, 7.2 |
 
 ---
 
@@ -526,7 +527,8 @@ impl SanMateoTarget {                                                // V9
     #[must_use] pub fn cloud_id(self, cloud_id: CloudId) -> Self;
     #[must_use] pub fn site_url(self, url: impl Into<String>) -> Self;
 }
-pub struct SanMateoBackend { /* SanMateo, target, RwLock<Option<(prefix, Source)>>, confirmed flag (V55) */ }
+pub struct SanMateoBackend { /* SanMateo, target, RwLock<Option<(prefix, Source)>>, time of the last check (V55, V101) */ }
+pub const CLOUD_ID_RECHECK_INTERVAL: Duration = Duration::from_secs(300);  // V101, re-exported in `backend`
 impl SanMateoBackend {
     pub fn new(san: SanMateo, target: SanMateoTarget) -> Self;
     pub const fn target(&self) -> &SanMateoTarget;
@@ -563,14 +565,16 @@ application/json`, `content-type: application/json` when a body exists,
   in an `RwLock`.
 - Stored cloud id check (V55): san-mateo keeps the metadata when a tenant
   connects the same connection to another site, so a stored id can be
-  stale. After the first 401 or 404 reply under a stored id (from metadata
-  or from a discovery), the backend reads `accessible-resources` one time.
-  When the token covers the id, the id is confirmed and the backend does
-  not check it again. Else the backend picks the site again, stores the new
-  id, and uses it from the next attempt on. It never sends the attempt
-  again. A failed check changes nothing, and a later 401 or 404 checks
-  again. A discovered id counts as confirmed. A `target.cloud_id` is never
-  checked.
+  stale. After a 401 or 404 reply under a stored id (from metadata or from
+  a discovery), the backend reads `accessible-resources`. It does this at
+  most one time in each `CLOUD_ID_RECHECK_INTERVAL` (300 s), so ordinary
+  404 replies do not each make a call (V101). When the token covers the
+  id, nothing changes. Else the backend picks the site again, stores the
+  new id in the metadata, and uses it from the next attempt on. It never
+  sends the attempt again. A failed check changes nothing, and the next
+  401 or 404 checks again. A discovery counts as a check. A
+  `target.cloud_id` is never checked. So a site move while the process
+  runs is seen at the first 401 or 404 after the interval.
 - Residual case (V55): when the token covers the old and the new site and
   no `site_url` is set, the backend keeps the stored id. Only a credential
   fingerprint can find this case, and san-mateo gives none.
@@ -1555,7 +1559,7 @@ sequenceDiagram
   the middle of a call, so the plugin caps `[jira.http] timeout_secs` at
   60 (V64). The one-time cloud id discovery and the cloud id check (V55)
   are not in the model: the backend caches the first and does the second
-  only once.
+  at most one time in each `CLOUD_ID_RECHECK_INTERVAL` (V101).
 - Comment lookup cap (V96): `jira_add_comment` gives its client
   `max_pages = min(max_pages, COMMENT_LOOKUP_PAGES)`, so its budget is
   finite. An issue can get more comments between two attempts than 3
