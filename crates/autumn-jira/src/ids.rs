@@ -185,11 +185,24 @@ string_id!(
 );
 
 impl SiteHost {
-    /// Returns the host of an `https` URL.
+    /// Returns the host of an `https` URL, in lower case, with no port.
+    /// The scheme match ignores ASCII case. A URL with user info, a bad
+    /// port or a bad host gives `None`.
     #[must_use]
     pub fn from_url(url: &str) -> Option<Self> {
-        let _ = url;
-        None
+        let scheme = url.get(..8)?;
+        if !scheme.eq_ignore_ascii_case("https://") {
+            return None;
+        }
+        let rest = url.get(8..)?;
+        let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+        let authority = rest.get(..end)?;
+        let host = match authority.split_once(':') {
+            Some((host, port)) if is_port(port) => host,
+            Some(_) => return None,
+            None => authority,
+        };
+        Self::parse(&host.to_ascii_lowercase()).ok()
     }
 }
 
@@ -559,10 +572,26 @@ fn is_cloud_id(text: &str) -> bool {
         })
 }
 
-/// A DNS host name.
-const fn is_site_host(text: &str) -> bool {
-    let _ = text;
-    false
+/// Lower-case DNS labels: each is 1 to 63 chars of `[a-z0-9-]`, with no
+/// `-` at the start or the end. The host has 1 to 253 chars.
+fn is_site_host(text: &str) -> bool {
+    (1..=253).contains(&text.len())
+        && text.split('.').all(|label| {
+            let bytes = label.as_bytes();
+            (1..=63).contains(&bytes.len())
+                && bytes.first() != Some(&b'-')
+                && bytes.last() != Some(&b'-')
+                && bytes
+                    .iter()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
+        })
+}
+
+/// A TCP port: 1 to 65535, digits only.
+fn is_port(text: &str) -> bool {
+    (1..=5).contains(&text.len())
+        && text.bytes().all(|b| b.is_ascii_digit())
+        && text.parse::<u16>().is_ok_and(|p| p > 0)
 }
 
 /// `[a-z0-9][a-z0-9-]{0,62}`.

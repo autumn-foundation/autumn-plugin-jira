@@ -7,7 +7,7 @@ use autumn_jira::webhook::{
     DELIVERY_HEADER, DeliveryMeta, FLOW_HEADER, Flow, RETRY_HEADER, SIGNATURE_HEADER, parse_event,
     sign, verify_signature,
 };
-use autumn_jira::{Delivery, EventSink, HandlerError, JiraEvent};
+use autumn_jira::{Delivery, EventSink, HandlerError, JiraEvent, JiraSite};
 
 const BODY: &[u8] = br#"{
   "timestamp": 1606480436302,
@@ -157,4 +157,32 @@ fn a_site_host_has_a_strict_rule() {
         None,
         "the host of a cloud id site is not known"
     );
+}
+
+#[tokio::test]
+async fn each_fake_delivery_names_its_site() {
+    use autumn_jira::{IssueKey, NewIssue, ProjectKey, request::IssueTypeRef};
+    let fake = autumn_jira_fake::FakeJira::new().with_webhook_secret("s");
+    let site = JiraSite::Subdomain(autumn_jira::ids::SiteName::parse("acme").unwrap());
+    let auth = autumn_jira::BasicAuth::new(
+        autumn_jira_fake::DEFAULT_EMAIL,
+        autumn_jira::san_mateo::Secret::new(autumn_jira_fake::DEFAULT_API_TOKEN),
+    )
+    .unwrap();
+    let client = autumn_jira::JiraClient::api_token(site.clone(), auth, Arc::new(fake.clone()));
+    let project = ProjectKey::parse("OPS").unwrap();
+    let new = NewIssue::new(project, IssueTypeRef::Name("Task".to_owned()), "s");
+    let key: IssueKey = client.create_issue(&new).await.unwrap().key;
+    fake.human_comment(key.as_str(), "hi", "ann").unwrap();
+    let deliveries = fake.take_deliveries();
+    assert!(deliveries.len() >= 2, "{}", deliveries.len());
+    for d in deliveries {
+        let parsed = parse_event(&d.body).unwrap();
+        assert_eq!(
+            parsed.event.site(),
+            site.host().as_ref(),
+            "{}",
+            parsed.event
+        );
+    }
 }

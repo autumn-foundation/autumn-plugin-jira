@@ -29,10 +29,16 @@ impl JiraSite {
         }
     }
 
-    /// Returns the host of the site.
+    /// Returns the host of the site: `acme.atlassian.net`. A webhook
+    /// delivery names this host in `issue.self`
+    /// ([`crate::webhook::Delivery::site`]). A cloud id site gives `None`,
+    /// because the cloud id does not tell the host.
     #[must_use]
-    pub const fn host(&self) -> Option<SiteHost> {
-        None
+    pub fn host(&self) -> Option<SiteHost> {
+        match self {
+            Self::Subdomain(name) => SiteHost::parse(&format!("{name}.atlassian.net")).ok(),
+            Self::CloudId(_) => None,
+        }
     }
 
     /// Returns a label for logs and health: `acme.atlassian.net` or

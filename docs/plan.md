@@ -220,6 +220,7 @@ text.
 | V99 | New `JiraClient::add_comment_idempotent_first(issue, body, key)`: no lookup before the POST. The comment lookup starts a page back by the drop of the total. | A first attempt could not comment on an issue with more comments than the page cap (R2F-fixcheck-a-1). A delete between two pages hid the marker (R2A-write-safety-5). | 4.5, 7.1 |
 | V100 | `HandlerError::from` maps `OutcomeUnknown` with a marker (`outcome_pending`) to `Permanent`. | A sink that used `?` on an idempotent write answered 503, and the redelivery could send the write again (R2F-fixcheck-a-5). | 4.8 |
 | V101 | `SanMateoBackend` checks a stored cloud id after a 401 or 404 at most one time in each `CLOUD_ID_RECHECK_INTERVAL` (300 s), not one time for its life. New pub const `backend::CLOUD_ID_RECHECK_INTERVAL`. | One ordinary 404 used up the only check, so a site move while the process ran was never seen (R2B-webhooks-secrets-1, R2F-fixcheck-a-4, R2G-fixcheck-b-1). | 4.4, 7.2 |
+| V102 | New `ids::SiteHost` (`parse`, `from_url`), `JiraSite::host() -> Option<SiteHost>`, the fields `WebhookIssue::site` and `WebhookComment::site` (the host of `self`), `JiraEvent::site()` and `Delivery::site()`. | A delivery had no site, so a sink could not refuse a delivery of another site with the same secret (R2F-fixcheck-a-2). | 4.2, 4.3, 4.8 |
 
 ---
 
@@ -402,6 +403,7 @@ private wire types (`model::wire`) with `pub(crate) fn from_response(String)
 | `AccountId` | 1..=128 chars of `[A-Za-z0-9:_-]` |
 | `CloudId` | UUID text, lower case, 36 chars |
 | `SiteName` | `^[a-z0-9][a-z0-9-]{0,62}$` (same as the `jira-basic` provider pattern [V]) |
+| `SiteHost` | lower-case DNS labels of `[a-z0-9-]` (1..=63 chars each, no `-` at an end), 1..=253 chars. `SiteHost::from_url(&str) -> Option<Self>` reads the host of an `https` URL: lower case, no port, no user info (V102). |
 | `StatusCategoryKey` | 1..=64 chars of `[a-z0-9-]`. Constants `NEW = "new"`, `INDETERMINATE = "indeterminate"`, `DONE = "done"`. Lenient for responses (the spec shows `in-flight`) [V]. |
 | `FieldId` | `^[a-z][A-Za-z0-9_]{0,63}$` or `^customfield_[0-9]{1,10}$`. The rule is literal: `customfield_12345678901` passes through the first form. |
 | `WebhookDeliveryId` | 1..=200 printable ASCII, no space |
@@ -444,6 +446,7 @@ pub enum JiraSite {
 impl JiraSite {
     pub fn base_url(&self) -> String;   // the only base URL builder (guard test)
     pub fn label(&self) -> String;      // "acme.atlassian.net" or "cloud:<id>"; no secret
+    pub fn host(&self) -> Option<SiteHost>;  // V102: "acme.atlassian.net"; None for a cloud id site
 }
 #[derive(Clone)]
 pub struct BasicAuth { email: String, token: Secret }
@@ -1002,11 +1005,13 @@ pub struct IssueEvent { pub issue: WebhookIssue, pub changelog: Vec<ChangeItem>,
     pub comment: Option<WebhookComment> }   // V56: the comment of an `issue_commented` update
 pub struct CommentEvent { pub issue: WebhookIssue, pub comment: WebhookComment }
 /// Lenient: comment payloads carry a reduced issue (B12). Only `id` is required.
-pub struct WebhookIssue { pub id: IssueId, pub key: Option<IssueKey>, pub fields: WebhookFields }
+pub struct WebhookIssue { pub id: IssueId, pub key: Option<IssueKey>, pub fields: WebhookFields,
+    pub site: Option<SiteHost> }   // V102: the host of `self`
 pub struct WebhookFields { pub summary: Option<String>, pub status: Option<StatusSummary>,
     pub labels: Option<Vec<String>>, pub project: Option<ProjectKey>, pub issue_type: Option<String> }
 pub struct WebhookComment { pub id: CommentId, pub body: Option<Adf>, pub author: Option<AccountId>,
-    pub update_author: Option<AccountId> }  // V57; a string body (REST v2) gives Adf::text (V56)
+    pub update_author: Option<AccountId>,   // V57; a string body (REST v2) gives Adf::text (V56)
+    pub site: Option<SiteHost> }           // V102: the host of `self`
 pub struct ChangeItem { pub field: String, pub from: Option<String>, pub to: Option<String>,
     pub from_string: Option<String>, pub to_string: Option<String> }
 pub struct StatusRef { pub id: Option<StatusId>, pub name: Option<String> }
@@ -1017,7 +1022,9 @@ impl JiraEvent {
     pub fn status_change(&self) -> Option<StatusChange>;   // from the changelog item with field "status"
     pub fn comment(&self) -> Option<&WebhookComment>;     // V56: a comment event, or an issue_commented update
     pub fn has_comment_marker(&self) -> bool;        // V58: the last non-empty line is a full marker (loop guard, B9)
+    pub fn site(&self) -> Option<&SiteHost>;         // V102: the issue and comment site; None for none or two sites
 }
+impl Delivery { pub fn site(&self) -> Option<&SiteHost>; }   // V102: `event.site()`; a sink compares it with `JiraSite::host`
 pub struct ParsedEvent { pub event: JiraEvent, pub timestamp: Option<JiraTimestamp>, pub actor: Option<AccountId> }
 /// Parses after verification. Accepts `changelog.id` as a string or a number (F40).
 /// A comment body and a description can be a string (REST v2) or ADF (V56).
