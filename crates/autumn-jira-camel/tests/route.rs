@@ -572,10 +572,13 @@ async fn key_header_uses_the_idempotent_path() {
     .unwrap();
     assert_eq!(reply(&ex)["outcome"], json!("created"));
     let id = reply(&ex)["id"].clone();
+    // Attempt 1 of harvest sends with no lookup. With no attempt header,
+    // the producer does not know that no earlier call used the key, so it
+    // looks up the marker first and finds the comment.
     let ex = send(
         &camel,
         "direct:comment",
-        attempt(json!("Looking"), "wf-1/a-2", json!(1)),
+        json_with(json!("Looking"), &[(KEY, json!("wf-1/a-2"))]),
     )
     .await
     .unwrap();
@@ -614,6 +617,58 @@ async fn key_header_uses_the_idempotent_path() {
         assert!(validation(&err).contains(KEY), "{bad}: {err}");
     }
     assert_eq!(fake.count(FakeOp::CreateIssue), 2);
+    assert_eq!(fake.count(FakeOp::AddComment), 1);
+    stop(camel).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_first_attempt_comments_on_a_busy_issue() {
+    let fake = FakeJira::new();
+    // A lookup reads at most one page. The issue has more comments than
+    // one page holds.
+    let component = JiraComponent::new(client_with_max_pages(&fake, 1));
+    let camel = start(component, MARKED).await.unwrap();
+    send(&camel, "direct:create", json(json!({"summary": "Busy"})))
+        .await
+        .unwrap();
+    for n in 0..150 {
+        fake.human_comment("OPS-1", &format!("note {n}"), "ann")
+            .unwrap();
+    }
+    // Harvest attempt 1, no camel redelivery: no earlier call used the
+    // key. The producer sends with no lookup first, so the page cap of
+    // the lookup does not stop the comment (R2A-write-safety-3).
+    let ex = send(
+        &camel,
+        "direct:comment",
+        attempt(json!("Escalated"), "wf-9/a-1", json!(1)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(reply(&ex)["outcome"], json!("created"));
+    assert_eq!(fake.count(FakeOp::AddComment), 1);
+    // A camel redelivery of attempt 1 keeps the lookup: the lookup stops
+    // at the page cap, and the producer sends nothing.
+    for redelivery in [
+        (camel_api::HEADER_REDELIVERED, json!(true)),
+        (camel_api::HEADER_REDELIVERY_COUNTER, json!(1)),
+    ] {
+        let message = json_with(
+            json!("Again"),
+            &[(KEY, json!("wf-9/a-2")), (ATTEMPT, json!(1)), redelivery],
+        );
+        let err = send(&camel, "direct:comment", message).await.unwrap_err();
+        assert!(err.to_string().contains("page_limit"), "{err}");
+    }
+    // Harvest attempt 2 keeps the lookup too.
+    let err = send(
+        &camel,
+        "direct:comment",
+        attempt(json!("Again"), "wf-9/a-2", json!(2)),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("page_limit"), "{err}");
     assert_eq!(fake.count(FakeOp::AddComment), 1);
     stop(camel).await;
 }

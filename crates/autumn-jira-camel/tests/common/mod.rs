@@ -43,11 +43,24 @@ pub fn client_on(transport: Arc<dyn HttpTransport>) -> JiraClient {
         Secret::new(autumn_jira_fake::DEFAULT_API_TOKEN),
     )
     .unwrap();
+    JiraClient::api_token(site, auth, transport).with_settings(durable_settings())
+}
+
+/// The settings of a durable host, with short waits.
+pub fn durable_settings() -> ClientSettings {
     let mut settings = ClientSettings::for_durable_host();
     settings.base_backoff_ms = 10;
     settings.max_backoff_ms = 100;
     settings.lookup_delay_ms = 10;
-    JiraClient::api_token(site, auth, transport).with_settings(settings)
+    settings
+}
+
+/// A durable client on the fake that reads at most `max_pages` pages in a
+/// lookup.
+pub fn client_with_max_pages(fake: &FakeJira, max_pages: u32) -> JiraClient {
+    let mut settings = durable_settings();
+    settings.max_pages = max_pages;
+    client(fake).with_settings(settings)
 }
 
 /// A component with the default client on the fake.
