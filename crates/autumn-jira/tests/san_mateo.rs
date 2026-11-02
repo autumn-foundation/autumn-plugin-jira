@@ -192,7 +192,7 @@ async fn backend_errors_are_typed() {
 }
 
 /// A cloud id of a site that the token does not cover any more.
-const OLD_SITE: &str = "11111111-2222-4333-8444-555555555555";
+const OLD_SITE: &str = "99999999-2222-4333-8444-555555555555";
 
 #[tokio::test(start_paused = true)]
 async fn a_stale_metadata_cloud_id_is_checked_after_a_404() {
