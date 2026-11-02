@@ -498,23 +498,31 @@ fn calls(name: &str) -> Vec<OpClass> {
 
 #[test]
 fn start_to_close_covers_the_client_budget() {
-    // The default timeout of `ReqwestTransport` is 60 s for each request.
-    let per_request = Duration::from_secs(60);
+    // The budgets hold for a transport timeout of 60 s or less (R9-test-quality-6).
+    // A `ClientRef::Connection` client sends through san-mateo. One client
+    // send there can be four transport calls: a refresh before the send, the
+    // send, a refresh after a 401 and the send again (R4-harvest-determinism-6).
     let settings = ClientSettings::for_durable_host();
-    for info in activities() {
-        let budget: Duration = calls(info.name)
-            .into_iter()
-            .map(|class| settings.worst_case(class, per_request))
-            .sum();
-        let start_to_close = info.default_start_to_close.expect("a start_to_close");
-        assert!(
-            start_to_close > budget,
-            "{}: {start_to_close:?} <= {budget:?}",
-            info.name
-        );
-        let retry = info.default_retry_policy.clone().expect("a retry policy");
-        assert_eq!(retry.max_attempts, 5, "{}", info.name);
+    for timeout in [1, 30, 60] {
+        for (path, calls_per_send) in [("direct", 1), ("san-mateo", 4)] {
+            let per_request = Duration::from_secs(timeout * calls_per_send);
+            for info in activities() {
+                let budget: Duration = calls(info.name)
+                    .into_iter()
+                    .map(|class| settings.worst_case(class, per_request))
+                    .sum();
+                let start_to_close = info.default_start_to_close.expect("a start_to_close");
+                assert!(
+                    start_to_close > budget,
+                    "{} ({path}, {timeout} s): {start_to_close:?} <= {budget:?}",
+                    info.name
+                );
+                let retry = info.default_retry_policy.clone().expect("a retry policy");
+                assert_eq!(retry.max_attempts, 5, "{}", info.name);
+            }
+        }
     }
+    let per_request = Duration::from_secs(60);
     let marked = settings.worst_case(OpClass::MarkedWrite, per_request);
     let checked = settings.worst_case(OpClass::CheckedWrite, per_request);
     assert_eq!(marked, Duration::from_secs(390));
