@@ -83,6 +83,15 @@ jobs:
         run: python3 scripts/coverage-gate.py cov.json 85
       - name: Doc tests
         run: cargo test --workspace --doc --all-features
+      # The fake answers with the shapes of the Jira spec (ADR 0007). Each
+      # week, read the current spec again and fail on a change.
+      - name: The Jira spec shapes did not change (weekly and manual runs)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: |
+          curl -fsSL --retry 4 -o "$RUNNER_TEMP/swagger-v3.json" \
+            https://developer.atlassian.com/cloud/jira/platform/swagger-v3.v3.json
+          python3 scripts/extract-jira-schemas.py "$RUNNER_TEMP/swagger-v3.json"
+          git diff --exit-code crates/autumn-jira-fake/tests/fixtures/schemas.json
       - uses: actions/upload-artifact@v4
         with:
           name: coverage
