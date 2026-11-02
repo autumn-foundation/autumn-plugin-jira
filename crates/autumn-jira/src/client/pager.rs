@@ -3,9 +3,10 @@
 use std::collections::BTreeSet;
 
 use super::JiraClient;
-use crate::error::Result;
+use crate::error::{JiraError, Op, Result};
 use crate::ids::PageToken;
 use crate::model::Issue;
+use crate::policy::{self, PageStep};
 use crate::request::SearchRequest;
 
 /// Reads the pages of one search. It stops on `isLast`, on no token, on a
@@ -41,8 +42,50 @@ impl SearchPager {
     /// `max_pages`. The typed errors of the call. After an error, the next
     /// call gives `Ok(None)`.
     pub async fn next_page(&mut self) -> Result<Option<Vec<Issue>>> {
-        let _ = (&self.client, &self.request, &self.token, &self.seen, self.done);
-        Err(super::stub())
+        if self.done {
+            return Ok(None);
+        }
+        let page = match self
+            .client
+            .search_page(&self.request, self.token.as_ref())
+            .await
+        {
+            Ok(page) => page,
+            Err(e) => {
+                self.done = true;
+                return Err(e);
+            }
+        };
+        self.pages += 1;
+        let next = page.next_page_token;
+        let repeated = next
+            .as_ref()
+            .is_some_and(|t| self.seen.contains(t.as_str()));
+        let max = self.client.settings.max_pages;
+        match policy::token_page_step(self.pages, max, page.is_last, next.is_some(), repeated) {
+            PageStep::Fetch => {
+                if let Some(token) = next {
+                    self.seen.insert(token.as_str().to_owned());
+                    self.token = Some(token);
+                }
+                Ok(Some(page.issues))
+            }
+            PageStep::Done => {
+                self.done = true;
+                Ok(Some(page.issues))
+            }
+            PageStep::Stalled => {
+                self.done = true;
+                Err(JiraError::PaginationStalled {
+                    op: Op::Search,
+                    pages: self.pages,
+                })
+            }
+            PageStep::Limit => {
+                self.done = true;
+                Err(JiraError::PageLimit { op: Op::Search, max })
+            }
+        }
     }
 
     /// Returns the number of pages read.

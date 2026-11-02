@@ -17,22 +17,30 @@ use std::sync::Arc;
 use san_mateo::SanMateo;
 use san_mateo::clock::{Entropy, OsEntropy};
 use san_mateo::transport::HttpTransport;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::sync::OnceCell;
 
 use crate::adf::Adf;
-use crate::backend::{BackendInfo, DirectBackend, JiraBackend, SanMateoBackend, SanMateoTarget};
-use crate::error::{JiraError, Result};
-use crate::ids::{AccountId, IssueRef, ProjectKey, TransitionId};
+use crate::backend::{
+    ApiRequest, BackendInfo, DirectBackend, JiraBackend, Method, SanMateoBackend, SanMateoTarget,
+    encode_segment,
+};
+use crate::error::{JiraError, Op, Result};
+use crate::ids::{AccountId, IssueRef, PageToken, ProjectKey, TransitionId};
 use crate::jql::Jql;
+use crate::model::wire::{
+    CountWire, EntityPropertyWire, IssueTypePageWire, SearchPage, SearchPageWire, TransitionsWire,
+};
 use crate::model::{
     Comment, CommentPage, CreatedIssue, Issue, IssueRefs, IssueType, Page, Project, ServerInfo,
-    StatusSummary, Transition, User,
+    StatusSummary, Transition, User, decode,
 };
+use crate::policy::{self, OpClass};
 use crate::request::{EditOptions, FieldSet, IssueEdit, NewIssue, SearchRequest, TransitionFields};
 use crate::site::{BasicAuth, JiraSite};
 
 pub(crate) use call::status_error;
+
 pub use crate::error::MarkerRef;
 pub use crate::ids::IdempotencyKey;
 pub use pager::SearchPager;
@@ -98,10 +106,61 @@ impl fmt::Debug for JiraClient {
     }
 }
 
-/// A stub error of the RED step.
-const fn stub() -> JiraError {
-    JiraError::Config {
-        code: "not_written_yet",
+/// The REST API prefix.
+const API: &str = "/rest/api/3";
+/// The page size of the offset pagers.
+const PAGE_SIZE: u32 = 50;
+/// The page size of the comment pager.
+const COMMENT_PAGE_SIZE: u32 = 100;
+/// The longest issue property key.
+const MAX_PROPERTY_KEY: usize = 255;
+
+/// Returns `/rest/api/3/issue/{issue}` with the segment encoded.
+fn issue_path(issue: &IssueRef) -> String {
+    format!("{API}/issue/{}", encode_segment(issue.path_segment()))
+}
+
+/// Returns `count` as `u64`.
+fn count(n: usize) -> u64 {
+    u64::try_from(n).unwrap_or(u64::MAX)
+}
+
+/// Checks an issue property key.
+fn property_key(key: &str) -> Result<&str> {
+    if key.is_empty() || key.chars().count() > MAX_PROPERTY_KEY {
+        return Err(JiraError::invalid(
+            "issue property key",
+            "must have 1 to 255 chars",
+        ));
+    }
+    Ok(key)
+}
+
+/// One page of an offset pager.
+struct OffsetPage<T> {
+    values: Vec<T>,
+    total: Option<u64>,
+    is_last: bool,
+}
+
+impl<T> From<Page<T>> for OffsetPage<T> {
+    fn from(page: Page<T>) -> Self {
+        Self {
+            values: page.values,
+            total: page.total,
+            is_last: page.is_last,
+        }
+    }
+}
+
+impl From<CommentPage> for OffsetPage<Comment> {
+    fn from(page: CommentPage) -> Self {
+        // `total` is the grand total (A4). An empty page also ends the list.
+        Self {
+            values: page.comments,
+            total: Some(page.total),
+            is_last: false,
+        }
     }
 }
 
@@ -169,8 +228,11 @@ impl JiraClient {
     ///
     /// The typed errors of the call.
     pub async fn myself(&self) -> Result<User> {
-        let _ = (&self.myself, &self.entropy);
-        Err(stub())
+        let user: User = self
+            .read(&ApiRequest::new(Op::Myself, Method::Get, format!("{API}/myself")))
+            .await?;
+        let _ = self.myself.set(user.account_id.clone());
+        Ok(user)
     }
 
     /// Returns the account id of the credentials. The first call reads
@@ -180,7 +242,15 @@ impl JiraClient {
     ///
     /// The typed errors of the call.
     pub async fn account_id(&self) -> Result<AccountId> {
-        Err(stub())
+        self.myself
+            .get_or_try_init(|| async {
+                let user: User = self
+                    .read(&ApiRequest::new(Op::Myself, Method::Get, format!("{API}/myself")))
+                    .await?;
+                Ok::<_, JiraError>(user.account_id)
+            })
+            .await
+            .cloned()
     }
 
     /// Reads the site info (`GET /serverInfo`).
@@ -189,7 +259,12 @@ impl JiraClient {
     ///
     /// The typed errors of the call.
     pub async fn server_info(&self) -> Result<ServerInfo> {
-        Err(stub())
+        self.read(&ApiRequest::new(
+            Op::ServerInfo,
+            Method::Get,
+            format!("{API}/serverInfo"),
+        ))
+        .await
     }
 
     /// Reads one project (`GET /project/{key}`).
@@ -198,8 +273,9 @@ impl JiraClient {
     ///
     /// The typed errors of the call.
     pub async fn get_project(&self, key: &ProjectKey) -> Result<Project> {
-        let _ = key;
-        Err(stub())
+        let path = format!("{API}/project/{}", encode_segment(key.as_str()));
+        self.read(&ApiRequest::new(Op::GetProject, Method::Get, path))
+            .await
     }
 
     /// Reads one page of projects (`GET /project/search`).
@@ -208,8 +284,10 @@ impl JiraClient {
     ///
     /// The typed errors of the call.
     pub async fn projects(&self, start_at: u64, max_results: u32) -> Result<Page<Project>> {
-        let _ = (start_at, max_results);
-        Err(stub())
+        let request = ApiRequest::new(Op::ListProjects, Method::Get, format!("{API}/project/search"))
+            .query("startAt", start_at.to_string())
+            .query("maxResults", max_results.to_string());
+        self.read(&request).await
     }
 
     /// Reads all projects, at most `max_pages` pages.
@@ -218,7 +296,10 @@ impl JiraClient {
     ///
     /// `PageLimit` at `max_pages`. The typed errors of each call.
     pub async fn all_projects(&self) -> Result<Vec<Project>> {
-        Err(stub())
+        self.offset_pages(Op::ListProjects, async |start| {
+            self.projects(start, PAGE_SIZE).await.map(OffsetPage::from)
+        })
+        .await
     }
 
     /// Reads the issue types of a project for a create
@@ -228,8 +309,18 @@ impl JiraClient {
     ///
     /// `PageLimit` at `max_pages`. The typed errors of each call.
     pub async fn issue_types(&self, project: &ProjectKey) -> Result<Vec<IssueType>> {
-        let _ = project;
-        Err(stub())
+        let path = format!(
+            "{API}/issue/createmeta/{}/issuetypes",
+            encode_segment(project.as_str())
+        );
+        self.offset_pages(Op::ListIssueTypes, async |start| {
+            let request = ApiRequest::new(Op::ListIssueTypes, Method::Get, path.clone())
+                .query("startAt", start.to_string())
+                .query("maxResults", PAGE_SIZE.to_string());
+            let page: IssueTypePageWire = self.read(&request).await?;
+            Ok(OffsetPage::from(page.into_model()))
+        })
+        .await
     }
 
     /// Creates an issue (`POST /issue`). The client sends it at most once
@@ -240,8 +331,10 @@ impl JiraClient {
     /// `OutcomeUnknown` with no marker after a lost reply. `RateLimited`
     /// after a 429. The typed errors of the call.
     pub async fn create_issue(&self, issue: &NewIssue) -> Result<CreatedIssue> {
-        let _ = issue;
-        Err(stub())
+        let request = ApiRequest::new(Op::CreateIssue, Method::Post, format!("{API}/issue"))
+            .json(&issue.to_body());
+        let reply = self.send_ok(OpClass::UnsafeWrite, &request).await?;
+        decode(Op::CreateIssue, &reply.body)
     }
 
     /// Reads an issue with the default fields.
@@ -264,8 +357,9 @@ impl JiraClient {
         issue: impl Into<IssueRef> + Send,
         fields: &FieldSet,
     ) -> Result<Issue> {
-        let _ = (issue.into(), fields);
-        Err(stub())
+        let request = ApiRequest::new(Op::GetIssue, Method::Get, issue_path(&issue.into()))
+            .query("fields", fields.to_csv());
+        self.read(&request).await
     }
 
     /// Edits an issue (`PUT /issue/{issue}`). `notifyUsers` goes in the
@@ -280,8 +374,12 @@ impl JiraClient {
         edit: &IssueEdit,
         options: EditOptions,
     ) -> Result<()> {
-        let _ = (issue.into(), edit, options);
-        Err(stub())
+        let mut request = ApiRequest::new(Op::EditIssue, Method::Put, issue_path(&issue.into()))
+            .json(&edit.to_body());
+        request.query = options.to_query();
+        // A 204 has no body, and a 200 body is not needed: no parse.
+        self.send_ok(OpClass::IdempotentWrite, &request).await?;
+        Ok(())
     }
 
     /// Deletes an issue (`DELETE /issue/{issue}`).
@@ -295,8 +393,17 @@ impl JiraClient {
         issue: impl Into<IssueRef> + Send,
         delete_subtasks: bool,
     ) -> Result<DeleteOutcome> {
-        let _ = (issue.into(), delete_subtasks);
-        Err(stub())
+        let request = ApiRequest::new(Op::DeleteIssue, Method::Delete, issue_path(&issue.into()))
+            .query("deleteSubtasks", delete_subtasks.to_string());
+        match self.run(OpClass::IdempotentWrite, &request).await {
+            Ok(_) => Ok(DeleteOutcome::Deleted),
+            Err(failure) => match failure.error {
+                JiraError::NotFoundOrForbidden { .. } if failure.after_maybe_sent => {
+                    Ok(DeleteOutcome::GoneAfterRetry)
+                }
+                error => Err(error),
+            },
+        }
     }
 
     /// Sets an issue property (`PUT /issue/{issue}/properties/{key}`).
@@ -311,8 +418,14 @@ impl JiraClient {
         key: &str,
         value: &Value,
     ) -> Result<()> {
-        let _ = (issue.into(), key, value);
-        Err(stub())
+        let path = format!(
+            "{}/properties/{}",
+            issue_path(&issue.into()),
+            encode_segment(property_key(key)?)
+        );
+        let request = ApiRequest::new(Op::SetProperty, Method::Put, path).json(value);
+        self.send_ok(OpClass::IdempotentWrite, &request).await?;
+        Ok(())
     }
 
     /// Reads an issue property. `None` when Jira gives 404.
@@ -325,8 +438,19 @@ impl JiraClient {
         issue: impl Into<IssueRef> + Send,
         key: &str,
     ) -> Result<Option<Value>> {
-        let _ = (issue.into(), key);
-        Err(stub())
+        let path = format!(
+            "{}/properties/{}",
+            issue_path(&issue.into()),
+            encode_segment(property_key(key)?)
+        );
+        match self
+            .read::<EntityPropertyWire>(&ApiRequest::new(Op::GetProperty, Method::Get, path))
+            .await
+        {
+            Ok(property) => Ok(Some(property.value)),
+            Err(JiraError::NotFoundOrForbidden { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     /// Reads the transitions that the issue has now.
@@ -335,8 +459,11 @@ impl JiraClient {
     ///
     /// The typed errors of the call.
     pub async fn transitions(&self, issue: impl Into<IssueRef> + Send) -> Result<Vec<Transition>> {
-        let _ = issue.into();
-        Err(stub())
+        let path = format!("{}/transitions", issue_path(&issue.into()));
+        let list: TransitionsWire = self
+            .read(&ApiRequest::new(Op::GetTransitions, Method::Get, path))
+            .await?;
+        Ok(list.transitions)
     }
 
     /// Does one transition by id. The client sends it at most once after a
@@ -352,8 +479,9 @@ impl JiraClient {
         id: &TransitionId,
         fields: &TransitionFields,
     ) -> Result<()> {
-        let _ = (issue.into(), id, fields);
-        Err(stub())
+        let request = transition_request(&issue.into(), id, fields);
+        self.send_ok(OpClass::UnsafeWrite, &request).await?;
+        Ok(())
     }
 
     /// Moves an issue to a status with no transition fields. See
@@ -379,8 +507,9 @@ impl JiraClient {
     /// `OutcomeUnknown` with no marker after a lost reply. The typed errors
     /// of the call.
     pub async fn add_comment(&self, issue: impl Into<IssueRef> + Send, body: &Adf) -> Result<Comment> {
-        let _ = (issue.into(), body);
-        Err(stub())
+        let request = comment_request(&issue.into(), body);
+        let reply = self.send_ok(OpClass::UnsafeWrite, &request).await?;
+        decode(Op::AddComment, &reply.body)
     }
 
     /// Reads one page of comments, oldest first.
@@ -394,8 +523,11 @@ impl JiraClient {
         start_at: u64,
         max_results: u32,
     ) -> Result<CommentPage> {
-        let _ = (issue.into(), start_at, max_results);
-        Err(stub())
+        let path = format!("{}/comment", issue_path(&issue.into()));
+        let request = ApiRequest::new(Op::ListComments, Method::Get, path)
+            .query("startAt", start_at.to_string())
+            .query("maxResults", max_results.to_string());
+        self.read(&request).await
     }
 
     /// Reads all comments, at most `max_pages` pages.
@@ -404,8 +536,13 @@ impl JiraClient {
     ///
     /// `PageLimit` at `max_pages`. The typed errors of each call.
     pub async fn all_comments(&self, issue: impl Into<IssueRef> + Send) -> Result<Vec<Comment>> {
-        let _ = issue.into();
-        Err(stub())
+        let issue = issue.into();
+        self.offset_pages(Op::ListComments, async |start| {
+            self.comments(issue.clone(), start, COMMENT_PAGE_SIZE)
+                .await
+                .map(OffsetPage::from)
+        })
+        .await
     }
 
     /// Starts a search (`POST /search/jql`). Call
@@ -421,8 +558,16 @@ impl JiraClient {
     ///
     /// The errors of [`SearchPager::next_page`].
     pub async fn search_all(&self, request: SearchRequest, max_issues: usize) -> Result<Vec<Issue>> {
-        let _ = (request, max_issues);
-        Err(stub())
+        let mut pager = self.search(request);
+        let mut out = Vec::new();
+        while out.len() < max_issues {
+            match pager.next_page().await? {
+                Some(issues) => out.extend(issues),
+                None => break,
+            }
+        }
+        out.truncate(max_issues);
+        Ok(out)
     }
 
     /// Returns the approximate number of issues of a JQL query
@@ -432,7 +577,69 @@ impl JiraClient {
     ///
     /// The typed errors of the call.
     pub async fn approximate_count(&self, jql: &Jql) -> Result<u64> {
-        let _ = jql;
-        Err(stub())
+        let request = ApiRequest::new(
+            Op::Count,
+            Method::Post,
+            format!("{API}/search/approximate-count"),
+        )
+        .json(&json!({"jql": jql.as_str()}));
+        let count: CountWire = self.read(&request).await?;
+        Ok(count.count)
     }
+
+    /// Reads one page of a search.
+    pub(crate) async fn search_page(
+        &self,
+        request: &SearchRequest,
+        token: Option<&PageToken>,
+    ) -> Result<SearchPage> {
+        let api = ApiRequest::new(Op::Search, Method::Post, format!("{API}/search/jql"))
+            .json(&request.to_body(token)?);
+        let page: SearchPageWire = self.read(&api).await?;
+        Ok(page.into_model())
+    }
+
+    /// Reads all pages of an offset pager, at most `max_pages` pages.
+    async fn offset_pages<T>(
+        &self,
+        op: Op,
+        mut fetch: impl AsyncFnMut(u64) -> Result<OffsetPage<T>>,
+    ) -> Result<Vec<T>> {
+        let max = self.settings.max_pages;
+        let mut out = Vec::new();
+        let mut start = 0_u64;
+        let mut pages = 0_u32;
+        loop {
+            if pages >= max {
+                return Err(JiraError::PageLimit { op, max });
+            }
+            let page = fetch(start).await?;
+            pages += 1;
+            let returned = count(page.values.len());
+            out.extend(page.values);
+            if page.is_last {
+                return Ok(out);
+            }
+            let next = page.total.map_or_else(
+                || (returned > 0).then(|| start.saturating_add(returned)),
+                |total| policy::offset_next(start, returned, total),
+            );
+            match next {
+                Some(n) => start = n,
+                None => return Ok(out),
+            }
+        }
+    }
+}
+
+/// Returns the request of a transition.
+fn transition_request(issue: &IssueRef, id: &TransitionId, fields: &TransitionFields) -> ApiRequest {
+    let path = format!("{}/transitions", issue_path(issue));
+    ApiRequest::new(Op::DoTransition, Method::Post, path).json(&fields.to_body(id))
+}
+
+/// Returns the request of a new comment.
+fn comment_request(issue: &IssueRef, body: &Adf) -> ApiRequest {
+    let path = format!("{}/comment", issue_path(issue));
+    ApiRequest::new(Op::AddComment, Method::Post, path).json(&json!({"body": body.as_value()}))
 }

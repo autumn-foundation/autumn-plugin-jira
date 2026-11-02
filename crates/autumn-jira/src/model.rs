@@ -404,7 +404,6 @@ from_wire!(AccessibleResource, wire::AccessibleResourceWire);
 /// # Errors
 ///
 /// `JiraError::Decode` when the body does not decode.
-#[allow(dead_code, reason = "the client of WP3 uses it")]
 pub(crate) fn decode<T: DeserializeOwned>(op: Op, body: &[u8]) -> Result<T> {
     serde_json::from_slice(body).map_err(|e| {
         let class = match e.classify() {

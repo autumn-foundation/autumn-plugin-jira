@@ -35,7 +35,6 @@ pub enum IssueTypeRef {
 
 impl IssueTypeRef {
     /// Returns the JSON body.
-    #[allow(dead_code, reason = "the client of WP3 uses it")]
     pub(crate) fn to_body(&self) -> Value {
         match self {
             Self::Id(id) => json!({"id": id}),
@@ -132,7 +131,6 @@ impl NewIssue {
     }
 
     /// Returns the JSON body of `POST /issue`.
-    #[allow(dead_code, reason = "the client of WP3 uses it")]
     pub(crate) fn to_body(&self) -> Value {
         let mut fields = Map::new();
         fields.insert("project".to_owned(), json!({"key": self.project}));
@@ -232,7 +230,6 @@ impl IssueEdit {
     }
 
     /// Returns the JSON body.
-    #[allow(dead_code, reason = "the client of WP3 uses it")]
     pub(crate) fn to_body(&self) -> Value {
         let mut body = Map::new();
         if !self.fields.is_empty() {
@@ -263,7 +260,6 @@ impl EditOptions {
     }
 
     /// Returns the query pairs.
-    #[allow(dead_code, reason = "the client of WP3 uses it")]
     pub(crate) fn to_query(self) -> Vec<(String, String)> {
         self.notify_users
             .map(|n| ("notifyUsers".to_owned(), n.to_string()))
@@ -386,7 +382,6 @@ impl SearchRequest {
     /// # Errors
     ///
     /// `JiraError::InvalidInput` for more than 5 properties.
-    #[allow(dead_code, reason = "the client of WP3 uses it")]
     pub(crate) fn to_body(&self, next_page_token: Option<&PageToken>) -> Result<Value> {
         if self.properties.len() > MAX_SEARCH_PROPERTIES {
             return Err(JiraError::invalid(
@@ -486,7 +481,6 @@ impl TransitionFields {
     }
 
     /// Returns the JSON body of `POST /issue/{issue}/transitions`.
-    #[allow(dead_code, reason = "the client of WP3 uses it")]
     pub(crate) fn to_body(&self, id: &TransitionId) -> Value {
         let mut body = Map::new();
         body.insert("transition".to_owned(), json!({"id": id}));

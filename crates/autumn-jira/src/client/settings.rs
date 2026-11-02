@@ -4,6 +4,15 @@ use std::time::Duration;
 
 use crate::policy::{self, OpClass};
 
+/// The attempts of one call on a durable host.
+const DURABLE_ATTEMPTS: u32 = 2;
+/// The first retry wait on a durable host.
+const DURABLE_BASE_MS: u64 = 500;
+/// The largest retry wait on a durable host.
+const DURABLE_MAX_BACKOFF_MS: u64 = 10_000;
+/// The marker lookups on a durable host.
+const DURABLE_LOOKUPS: u32 = 1;
+
 /// The limits of one client.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -51,13 +60,19 @@ impl ClientSettings {
     /// lookup with no delay.
     #[must_use]
     pub fn for_durable_host() -> Self {
-        Self::default()
+        Self::default().durable()
     }
 
     /// Keeps `jitter` and `marker_label_prefix`. Caps the other fields at
     /// the durable values.
     #[must_use]
-    pub const fn durable(self) -> Self {
+    pub fn durable(mut self) -> Self {
+        self.max_attempts = self.max_attempts.min(DURABLE_ATTEMPTS);
+        self.base_backoff_ms = self.base_backoff_ms.min(DURABLE_BASE_MS);
+        self.max_backoff_ms = self.max_backoff_ms.min(DURABLE_MAX_BACKOFF_MS);
+        self.max_pages = self.max_pages.min(policy::DEFAULT_MAX_PAGES);
+        self.lookup_attempts = self.lookup_attempts.min(DURABLE_LOOKUPS);
+        self.lookup_delay_ms = 0;
         self
     }
 
@@ -65,7 +80,24 @@ impl ClientSettings {
     /// a transport timeout of `per_request`.
     #[must_use]
     pub fn worst_case(&self, class: OpClass, per_request: Duration) -> Duration {
-        let _ = (class, per_request);
-        Duration::ZERO
+        let attempts = self.max_attempts.clamp(1, policy::MAX_ATTEMPTS);
+        let waits = Duration::from_millis(self.max_backoff_ms).saturating_mul(attempts - 1);
+        // One call of `attempts` sends with the longest wait between them.
+        let one = per_request.saturating_mul(attempts).saturating_add(waits);
+        match class {
+            OpClass::Read | OpClass::IdempotentWrite | OpClass::UnsafeWrite => one,
+            OpClass::MarkedWrite => {
+                let lookups = self.lookup_attempts.min(policy::MAX_LOOKUPS);
+                let lookup = Duration::from_millis(self.lookup_delay_ms).saturating_add(one);
+                // The pre-lookup, the write, then the lookups.
+                one.saturating_mul(2)
+                    .saturating_add(lookup.saturating_mul(lookups))
+            }
+            OpClass::CheckedWrite => {
+                // Each attempt reads the status and the transitions first.
+                let reads = one.saturating_mul(2).saturating_add(per_request);
+                reads.saturating_mul(attempts).saturating_add(waits)
+            }
+        }
     }
 }

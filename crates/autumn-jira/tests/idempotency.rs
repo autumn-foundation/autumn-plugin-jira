@@ -242,7 +242,6 @@ async fn lost_comment_reply_is_found() {
     let text = comment.body.unwrap().to_plain_text();
     assert_eq!(text, format!("Fixed\n{}", k.comment_marker()));
     assert_eq!(fake.count(FakeOp::AddComment), 1);
-    assert_eq!(client.all_comments(&issue).await.unwrap().len(), 1);
     // The lookup reads the newest comments first.
     let lookup = fake
         .requests()
@@ -250,6 +249,7 @@ async fn lost_comment_reply_is_found() {
         .rfind(|r| r.method == "GET" && r.path.ends_with("/comment"))
         .unwrap();
     assert!(lookup.query.contains("orderBy=-created"), "{}", lookup.query);
+    assert_eq!(client.all_comments(&issue).await.unwrap().len(), 1);
 
     // A lookup that finds nothing: outcome unknown, with the marker.
     fake.fault(FakeOp::AddComment, Fault::Status(500));

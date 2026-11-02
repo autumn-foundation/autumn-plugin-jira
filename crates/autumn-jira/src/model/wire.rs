@@ -135,7 +135,6 @@ impl StatusWire {
     }
 
     /// Returns the summary, or `None` with no id.
-    #[allow(dead_code, reason = "the webhook types and the client use it")]
     pub(crate) fn into_summary(self) -> Option<StatusSummary> {
         self.into_status().map(|s| s.summary())
     }
@@ -469,7 +468,6 @@ impl<T> PageWire<T> {
 /// `PageOfCreateMetaIssueTypes`: the issue types of a project.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code, reason = "the client of WP3 uses it")]
 pub(crate) struct IssueTypePageWire {
     #[serde(default)]
     issue_types: Vec<IssueTypeWire>,
@@ -479,7 +477,6 @@ pub(crate) struct IssueTypePageWire {
     total: Option<u64>,
 }
 
-#[allow(dead_code, reason = "the client of WP3 uses it")]
 impl IssueTypePageWire {
     /// Returns the page. `is_last` holds when the page reaches `total`, or
     /// when Jira gives no `total`. A type with no id is skipped.
@@ -504,7 +501,6 @@ impl IssueTypePageWire {
 /// `SearchAndReconcileResults`: one page of `POST /search/jql`.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code, reason = "the client of WP3 uses it")]
 pub(crate) struct SearchPageWire {
     #[serde(default)]
     pub(crate) issues: Vec<IssueWire>,
@@ -516,7 +512,6 @@ pub(crate) struct SearchPageWire {
 
 /// One page of `POST /search/jql`, decoded.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code, reason = "the client of WP3 uses it")]
 pub(crate) struct SearchPage {
     pub(crate) issues: Vec<Issue>,
     /// `true` when Jira says `isLast`. An absent `isLast` with no token is last too.
@@ -525,7 +520,6 @@ pub(crate) struct SearchPage {
     pub(crate) next_page_token: Option<PageToken>,
 }
 
-#[allow(dead_code, reason = "the client of WP3 uses it")]
 impl SearchPageWire {
     pub(crate) fn into_model(self) -> SearchPage {
         let next_page_token = self.next_page_token.and_then(|t| PageToken::parse(&t).ok());
@@ -539,14 +533,12 @@ impl SearchPageWire {
 
 /// `{"count": n}` of `POST /search/approximate-count`.
 #[derive(Debug, Deserialize)]
-#[allow(dead_code, reason = "the client of WP3 uses it")]
 pub(crate) struct CountWire {
     pub(crate) count: u64,
 }
 
 /// `{"transitions": [...]}` of `GET /issue/{issue}/transitions`.
 #[derive(Deserialize)]
-#[allow(dead_code, reason = "the client of WP3 uses it")]
 pub(crate) struct TransitionsWire {
     #[serde(default)]
     pub(crate) transitions: Vec<Transition>,
@@ -554,9 +546,9 @@ pub(crate) struct TransitionsWire {
 
 /// `EntityProperty`: `{"key": k, "value": v}`.
 #[derive(Debug, Deserialize)]
-#[allow(dead_code, reason = "the client of WP3 uses it")]
 pub(crate) struct EntityPropertyWire {
     #[serde(default)]
+    #[allow(dead_code, reason = "part of the wire shape; the client reads only the value")]
     pub(crate) key: Option<String>,
     #[serde(default)]
     pub(crate) value: Value,
@@ -565,7 +557,6 @@ pub(crate) struct EntityPropertyWire {
 /// `ErrorCollection`: `{"errorMessages": [...], "errors": {field: message}}`.
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code, reason = "the client of WP3 uses it")]
 pub(crate) struct ErrorCollection {
     #[serde(default)]
     pub(crate) error_messages: Vec<String>,
@@ -573,7 +564,6 @@ pub(crate) struct ErrorCollection {
     pub(crate) errors: Map<String, Value>,
 }
 
-#[allow(dead_code, reason = "the client of WP3 uses it")]
 impl ErrorCollection {
     /// Reads an error body leniently. A body that is not JSON gives an empty collection.
     pub(crate) fn parse(body: &[u8]) -> Self {
