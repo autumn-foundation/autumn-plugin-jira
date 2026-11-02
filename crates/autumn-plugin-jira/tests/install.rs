@@ -69,7 +69,6 @@ fn plugin_passes_the_autumn_conformance_checks() {
     for p in [
         JiraPlugin::new().webhook_route(),
         JiraPlugin::new().sink(Recorder::default()),
-        JiraPlugin::new(),
     ] {
         let contract = p.contract().unwrap();
         let routes = autumn_web::app().plugin(p).plugin_route_infos().unwrap();

@@ -12,12 +12,31 @@ use autumn_web::reexports::http::StatusCode;
 use autumn_web::route_listing::{RouteClassification, RouteInfo};
 use autumn_web::webhook::SignedWebhook;
 
+use crate::runtime::Cell;
+
 /// The module name in the route listing.
 pub(crate) const MODULE: &str = "autumn_plugin_jira::webhook";
 
-/// The router to merge: one `POST` route at the full webhook path.
-pub(crate) fn webhook_router(webhook_path: &str) -> Router<AppState> {
-    Router::new().route(webhook_path, post(log_only))
+/// The router to merge: one `POST` route at the full webhook path. The
+/// route answers 503 until the plugin starts.
+pub(crate) fn router(webhook_path: &str, cell: Cell) -> Router<AppState> {
+    Router::new().route(
+        webhook_path,
+        post(move |hook: SignedWebhook| {
+            let started = cell.get().is_some();
+            async move {
+                if !started {
+                    return StatusCode::SERVICE_UNAVAILABLE;
+                }
+                tracing::debug!(
+                    delivery_id = hook.delivery_id().unwrap_or("none"),
+                    bytes = hook.raw_body().len(),
+                    "jira webhook received"
+                );
+                StatusCode::OK
+            }
+        }),
+    )
 }
 
 /// The route for `autumn routes` and the routes audit.
@@ -32,16 +51,4 @@ pub(crate) fn route_info(webhook_path: &str) -> RouteInfo {
         module: Some(MODULE.to_owned()),
         ..RouteInfo::default()
     }
-}
-
-/// The handler when no sink is set. autumn has checked the signature and
-/// the delivery id before this runs. The handler logs the delivery id,
-/// never the body.
-async fn log_only(hook: SignedWebhook) -> StatusCode {
-    tracing::debug!(
-        delivery_id = hook.delivery_id().unwrap_or("none"),
-        bytes = hook.raw_body().len(),
-        "jira webhook received; no sink is set"
-    );
-    StatusCode::OK
 }
