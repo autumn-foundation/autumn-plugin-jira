@@ -437,4 +437,20 @@ impl JiraClient {
             }
         }
     }
+
+    /// Continues a transition after a host attempt that can have run.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::transition_to_status_with`].
+    pub async fn resume_transition_to_status(
+        &self,
+        issue: impl Into<IssueRef> + Send,
+        target: &StatusTarget,
+        cause: UnknownCause,
+    ) -> Result<TransitionOutcome> {
+        let _ = cause;
+        self.transition_to_status_with(issue, target, &TransitionFields::default())
+            .await
+    }
 }

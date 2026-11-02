@@ -767,3 +767,217 @@ async fn transition_400_after_lost_reply_reads_the_status() {
     assert_eq!(posts.load(Ordering::SeqCst), 2);
     assert_eq!(fake.count(FakeOp::DoTransition), 2);
 }
+
+/// The `DoTransition` requests of a scripted backend.
+fn transition_posts(backend: &Scripted) -> usize {
+    backend
+        .requests()
+        .iter()
+        .filter(|r| r.op == Op::DoTransition)
+        .count()
+}
+
+/// A client with two attempts for each call, as a durable host has.
+fn two_attempts(backend: Arc<Scripted>) -> JiraClient {
+    let mut settings = fast_settings();
+    settings.max_attempts = 2;
+    JiraClient::new(backend).with_settings(settings)
+}
+
+#[tokio::test(start_paused = true)]
+async fn transition_maybe_sent_on_the_last_attempt_is_outcome_unknown() {
+    let fake = FakeJira::new();
+    let plain = api_token_client(&fake);
+    let issue = plain.create_issue(&task("t")).await.unwrap().key;
+    let backend = Scripted::new(Arc::new(direct(Arc::new(fake.clone()))), |_, _| None);
+    let client = two_attempts(Arc::clone(&backend));
+    // Attempt 1 does not commit. Attempt 2 commits, and the reply is a 504.
+    fake.fault(FakeOp::DoTransition, Fault::Status(503));
+    fake.fault(FakeOp::DoTransition, Fault::StatusAfterCommit(504));
+    let err = client
+        .transition_to_status(&issue, &StatusTarget::in_progress())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        JiraError::OutcomeUnknown {
+            op: Op::DoTransition,
+            cause: UnknownCause::ServerError(504),
+            marker: None,
+        }
+    );
+    assert!(!err.is_retryable(), "a host retry must not send again");
+    assert!(err.may_have_run());
+    assert_eq!(transition_posts(&backend), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_rate_limit_after_a_maybe_sent_attempt_is_outcome_unknown() {
+    let fake = FakeJira::new();
+    let plain = api_token_client(&fake);
+    let issue = plain.create_issue(&task("t")).await.unwrap().key;
+    let backend = Scripted::new(Arc::new(direct(Arc::new(fake.clone()))), |_, _| None);
+    let client = two_attempts(Arc::clone(&backend));
+    fake.fault(FakeOp::DoTransition, Fault::Status(503));
+    fake.rate_limit(FakeOp::DoTransition, 1, 1);
+    let err = client
+        .transition_to_status(&issue, &StatusTarget::in_progress())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        JiraError::OutcomeUnknown {
+            op: Op::DoTransition,
+            cause: UnknownCause::ServerError(503),
+            marker: None,
+        }
+    );
+    assert!(err.may_have_run());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_status_read_after_a_maybe_sent_attempt_is_outcome_unknown() {
+    let fake = FakeJira::new();
+    let plain = api_token_client(&fake);
+    let issue = plain.create_issue(&task("t")).await.unwrap().key;
+    let posted = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&posted);
+    let backend = Scripted::new(Arc::new(direct(Arc::new(fake.clone()))), move |r, _| {
+        match r.op {
+            Op::DoTransition => flag.store(true, Ordering::SeqCst),
+            Op::GetIssue if flag.load(Ordering::SeqCst) => {
+                return Some(Ok(json_reply(404, &json!({"errorMessages": ["gone"]}))));
+            }
+            _ => {}
+        }
+        None
+    });
+    let client = JiraClient::new(backend.clone()).with_settings(fast_settings());
+    fake.fault(FakeOp::DoTransition, Fault::NetworkAfterCommit);
+    let err = client
+        .transition_to_status(&issue, &StatusTarget::in_progress())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        JiraError::OutcomeUnknown {
+            op: Op::DoTransition,
+            cause: UnknownCause::Network,
+            marker: None,
+        }
+    );
+    assert_eq!(transition_posts(&backend), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn transition_400_after_maybe_sent_when_moved_on_is_outcome_unknown() {
+    let fake = FakeJira::new();
+    let plain = api_token_client(&fake);
+    let issue = plain.create_issue(&task("t")).await.unwrap().key;
+    let path = format!("/rest/api/3/issue/{issue}");
+    let stale_issue = capture(&fake, Op::GetIssue, &path, &[("fields", "status")]).await;
+    let stale_list = capture(
+        &fake,
+        Op::GetTransitions,
+        &format!("{path}/transitions"),
+        &[],
+    )
+    .await;
+    let posts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let stale = Arc::new(AtomicBool::new(true));
+    let (count, lag, automation, name) = (
+        Arc::clone(&posts),
+        Arc::clone(&stale),
+        fake.clone(),
+        issue.to_string(),
+    );
+    let backend = Scripted::new(Arc::new(direct(Arc::new(fake.clone()))), move |r, _| {
+        let after_first = count.load(Ordering::SeqCst) == 1;
+        match r.op {
+            Op::DoTransition => {
+                count.fetch_add(1, Ordering::SeqCst);
+                None
+            }
+            // An automation moves the issue on, and the re-read lags.
+            Op::GetIssue if after_first && lag.load(Ordering::SeqCst) => {
+                let _ = automation.human_transition(&name, "Done", "ann");
+                Some(Ok(json_reply(200, &stale_issue)))
+            }
+            Op::GetTransitions if after_first && lag.swap(false, Ordering::SeqCst) => {
+                Some(Ok(json_reply(200, &stale_list)))
+            }
+            _ => None,
+        }
+    });
+    let client = JiraClient::new(backend.clone()).with_settings(fast_settings());
+    fake.fault(FakeOp::DoTransition, Fault::NetworkAfterCommit);
+    let err = client
+        .transition_to_status(&issue, &StatusTarget::in_progress())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        JiraError::OutcomeUnknown {
+            op: Op::DoTransition,
+            cause: UnknownCause::Network,
+            marker: None,
+        }
+    );
+    assert!(err.may_have_run());
+    assert_eq!(fake.count(FakeOp::DoTransition), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_resumed_transition_at_the_target_is_already_there() {
+    let fake = FakeJira::new();
+    let plain = api_token_client(&fake);
+    let issue = plain.create_issue(&task("t")).await.unwrap().key;
+    // The attempt of the host before committed the move.
+    fake.human_transition(issue.as_str(), "In Progress", "ann")
+        .unwrap();
+    let backend = Scripted::new(Arc::new(direct(Arc::new(fake.clone()))), |_, _| None);
+    let client = JiraClient::new(backend.clone()).with_settings(fast_settings());
+    let outcome = client
+        .resume_transition_to_status(&issue, &StatusTarget::in_progress(), UnknownCause::Timeout)
+        .await
+        .unwrap();
+    assert!(
+        matches!(&outcome, TransitionOutcome::AlreadyThere(s) if s.name == "In Progress"),
+        "{outcome:?}"
+    );
+    assert_eq!(transition_posts(&backend), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_resumed_transition_off_the_target_sends_nothing() {
+    let fake = FakeJira::new();
+    let plain = api_token_client(&fake);
+    let issue = plain.create_issue(&task("t")).await.unwrap().key;
+    let backend = Scripted::new(Arc::new(direct(Arc::new(fake.clone()))), |_, _| None);
+    let client = JiraClient::new(backend.clone()).with_settings(fast_settings());
+    let err = client
+        .resume_transition_to_status(&issue, &StatusTarget::in_progress(), UnknownCause::Timeout)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        JiraError::OutcomeUnknown {
+            op: Op::DoTransition,
+            cause: UnknownCause::Timeout,
+            marker: None,
+        }
+    );
+    assert!(!err.is_retryable());
+    let ops: Vec<Op> = backend.requests().iter().map(|r| r.op).collect();
+    assert_eq!(ops, vec![Op::GetIssue], "one status read and no send");
+    // A failed read is also not a send again.
+    let gone = Scripted::new(Arc::new(direct(Arc::new(fake.clone()))), |r, _| {
+        (r.op == Op::GetIssue).then(|| Ok(json_reply(404, &json!({}))))
+    });
+    let client = JiraClient::new(gone).with_settings(fast_settings());
+    let err = client
+        .resume_transition_to_status(&issue, &StatusTarget::in_progress(), UnknownCause::Network)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "outcome_unknown");
+}
