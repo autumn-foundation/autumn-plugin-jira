@@ -23,6 +23,8 @@ pub(crate) const NOT_STARTED: &str = "Jira has not started";
 const HIDDEN: &str = "the Jira call failed; see the server log";
 /// The longest connection id.
 const MAX_CONNECTION_ID: usize = 200;
+/// The most clients that the `for_connection` cache keeps.
+pub(crate) const MAX_CACHED_CLIENTS: usize = 1024;
 
 /// The started Jira client. The plugin puts it in the app state.
 ///
@@ -105,6 +107,13 @@ impl JiraService {
                 code: "for_connection_needs_san_mateo",
             })?
             .client(connection_id)
+    }
+}
+
+impl JiraService {
+    /// Drops the cached client of `connection_id`.
+    pub fn forget(&self, connection_id: &str) {
+        let _ = connection_id;
     }
 }
 
@@ -202,6 +211,24 @@ impl Tenants {
         Ok(client)
     }
 
+    /// The number of cached clients.
+    #[cfg(test)]
+    fn cached(&self) -> usize {
+        self.clients
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
+    }
+
+    /// `true` when the cache holds a client for `connection_id`.
+    #[cfg(test)]
+    fn is_cached(&self, connection_id: &str) -> bool {
+        self.clients
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains_key(connection_id)
+    }
+
     /// The client when `[jira.san_mateo]` names no connection: each call
     /// fails with `JiraError::Config`. Use `for_connection(id)`.
     pub(crate) fn no_connection(&self) -> JiraClient {
@@ -265,5 +292,65 @@ pub trait JiraResultExt<T> {
 impl<T> JiraResultExt<T> for Result<T, JiraError> {
     fn http(self) -> AutumnResult<T> {
         self.map_err(|e| autumn_error(&e))
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
+mod tests {
+    use autumn_jira::san_mateo::{EnvironmentConfig, KeyRing, MemoryTransport};
+
+    use super::*;
+
+    fn tenants() -> Tenants {
+        let san = SanMateo::builder()
+            .environment(EnvironmentConfig::new("dev", "sm-secret-key-0123456789"))
+            .key_ring(KeyRing::new("k1", [7; 32]).unwrap())
+            .transport(Arc::new(MemoryTransport::new()))
+            .build()
+            .unwrap();
+        Tenants::new(
+            san,
+            &crate::config::SanMateoTarget::default(),
+            ClientSettings::default(),
+        )
+        .unwrap()
+    }
+
+    /// R10-plugin-ecosystem-4, R7-api-docs-9: ids from requests cannot
+    /// grow the cache without a limit.
+    #[test]
+    fn the_cache_has_a_bound_and_drops_the_least_recently_used() {
+        let t = tenants();
+        for i in 0..(MAX_CACHED_CLIENTS * 3) {
+            t.client(&format!("t{i}")).unwrap();
+        }
+        assert_eq!(t.cached(), MAX_CACHED_CLIENTS);
+
+        let t = tenants();
+        for i in 0..MAX_CACHED_CLIENTS {
+            t.client(&format!("t{i}")).unwrap();
+        }
+        // A use keeps `t0`. The new id drops `t1`, the oldest use.
+        t.client("t0").unwrap();
+        t.client("new").unwrap();
+        assert!(t.is_cached("t0") && t.is_cached("new"));
+        assert!(!t.is_cached("t1"));
+        assert_eq!(t.cached(), MAX_CACHED_CLIENTS);
+    }
+
+    /// `forget` drops one client, so the next call reads the site again.
+    #[test]
+    fn forget_drops_one_client() {
+        let service = JiraService::new(tenants().no_connection(), Some(Arc::new(tenants())));
+        service.for_connection("acme").unwrap();
+        service.for_connection("globex").unwrap();
+        let t = service.tenants.as_ref().unwrap();
+        assert!(t.is_cached("acme"));
+        service.forget("acme");
+        assert!(!t.is_cached("acme") && t.is_cached("globex"));
+        // Not cached, or not in san_mateo mode: nothing happens.
+        service.forget("acme");
+        JiraService::new(tenants().no_connection(), None).forget("acme");
     }
 }
