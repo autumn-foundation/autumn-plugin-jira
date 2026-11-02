@@ -60,7 +60,12 @@ async fn boot_child_server() {
     .await;
 }
 
-struct KillOnDrop(Child);
+/// The child and the file with its stdout and stderr.
+///
+/// The child writes to a file, not to a pipe. Nothing reads a pipe while
+/// the child runs, so a full pipe (64 KiB on Linux) would block the logs of
+/// the child, and then its server would stop.
+struct KillOnDrop(Child, PathBuf);
 
 impl Drop for KillOnDrop {
     fn drop(&mut self) {
@@ -102,24 +107,21 @@ fn spawn(dir: &Path, port: u16, env: &[(&str, &str)]) -> KillOnDrop {
     .current_dir(dir)
     .env(CHILD_MARK, "1")
     .env("AUTUMN_SERVER__PORT", port.to_string())
-    .env("AUTUMN_SERVER__HOST", "127.0.0.1")
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped());
+    .env("AUTUMN_SERVER__HOST", "127.0.0.1");
+    let log = dir.join("child.log");
+    let file = std::fs::File::create(&log).unwrap();
+    cmd.stdout(Stdio::from(file.try_clone().unwrap()))
+        .stderr(Stdio::from(file));
     for (k, v) in env {
         cmd.env(k, v);
     }
-    KillOnDrop(cmd.spawn().unwrap())
+    KillOnDrop(cmd.spawn().unwrap(), log)
 }
 
-fn output_of(child: &mut Child) -> String {
-    let mut out = String::new();
-    if let Some(mut e) = child.stderr.take() {
-        std::io::Read::read_to_string(&mut e, &mut out).unwrap();
-    }
-    if let Some(mut o) = child.stdout.take() {
-        std::io::Read::read_to_string(&mut o, &mut out).unwrap();
-    }
-    out
+/// The stdout and stderr of the child. Call it after the child stops.
+fn output_of(child: &mut KillOnDrop) -> String {
+    let _ = child.0.wait();
+    String::from_utf8_lossy(&std::fs::read(&child.1).unwrap()).into_owned()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -145,7 +147,7 @@ async fn missing_secret_exits_and_names_the_variable() {
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
-    let out = output_of(&mut child.0);
+    let out = output_of(&mut child);
     assert!(!status.success(), "{out}");
     assert!(out.contains("BOOT_JIRA_TOKEN"), "{out}");
     assert!(!out.contains(SECRET), "{out}");
@@ -175,7 +177,7 @@ async fn the_app_boots_and_takes_a_signed_post() {
         if let Some(status) = child.0.try_wait().unwrap() {
             panic!(
                 "the app stopped at boot ({status}):\n{}",
-                output_of(&mut child.0)
+                output_of(&mut child)
             );
         }
         assert!(
@@ -243,7 +245,7 @@ async fn the_app_boots_and_takes_a_signed_post() {
         "{health}"
     );
     child.0.kill().unwrap();
-    let out = output_of(&mut child.0);
+    let out = output_of(&mut child);
     assert!(!out.contains("no JiraService"), "{out}");
     assert!(
         !out.contains(SECRET) && !out.contains(DEFAULT_API_TOKEN),
