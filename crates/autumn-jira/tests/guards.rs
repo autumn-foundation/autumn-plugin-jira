@@ -1421,59 +1421,104 @@ mod check {
             .collect()
     }
 
-    /// The `key = value` lines of the `[package]` table of a manifest.
-    fn package_keys(manifest: &str) -> BTreeMap<String, String> {
+    /// The `key = value` lines of one table of a manifest. An array can
+    /// span lines: the value runs to its closing bracket.
+    fn table_keys(manifest: &str, table: &str) -> BTreeMap<String, String> {
+        let header = format!("[{table}]");
         let mut out = BTreeMap::new();
-        let mut in_package = false;
+        let mut in_table = false;
+        let mut open: Option<(String, String)> = None;
         for line in manifest.lines() {
             let t = strip_toml_comment(line).trim();
-            if t.starts_with('[') {
-                in_package = t == "[package]";
+            if let Some((key, mut value)) = open.take() {
+                value.push_str(t);
+                if value.matches('[').count() > value.matches(']').count() {
+                    open = Some((key, value));
+                } else {
+                    out.insert(key, value);
+                }
                 continue;
             }
-            if let (true, Some((key, value))) = (in_package, t.split_once('=')) {
-                out.insert(key.trim().to_owned(), value.trim().to_owned());
+            if t.starts_with('[') {
+                in_table = t == header;
+                continue;
+            }
+            if let (true, Some((key, value))) = (in_table, t.split_once('=')) {
+                let (key, value) = (key.trim().to_owned(), value.trim().to_owned());
+                if value.matches('[').count() > value.matches(']').count() {
+                    open = Some((key, value));
+                } else {
+                    out.insert(key, value);
+                }
             }
         }
         out
     }
 
+    /// The `[package]` keys of a manifest. A `key.workspace = true` takes
+    /// the value of `[workspace.package]` in the root manifest, as cargo
+    /// does. A key that the workspace does not have stays out.
+    fn package_keys(manifest: &str, workspace: &str) -> BTreeMap<String, String> {
+        let shared = table_keys(workspace, "workspace.package");
+        let mut out = BTreeMap::new();
+        for (key, value) in table_keys(manifest, "package") {
+            match key.strip_suffix(".workspace") {
+                Some(name) if value == "true" => {
+                    if let Some(v) = shared.get(name) {
+                        out.insert(name.to_owned(), v.clone());
+                    }
+                }
+                _ => {
+                    out.insert(key, value);
+                }
+            }
+        }
+        out
+    }
+
+    /// The quoted strings of a TOML value.
+    fn quoted(value: &str) -> Vec<&str> {
+        value.split('"').skip(1).step_by(2).collect()
+    }
+
     /// The crates.io metadata of a crate that is published: `description`,
-    /// `readme`, one to five `keywords`, and `categories`. A crate with
-    /// `publish = false` needs none. It gives the `readme` value, so the
-    /// caller can check that the file exists.
+    /// `readme`, one to five `keywords`, and `categories`. No value is
+    /// empty. A crate with `publish = false` needs none. It gives the
+    /// `readme` value, so the caller can check that the file exists.
     pub fn publish_metadata_violations(
         path: &str,
         manifest: &str,
     ) -> (Vec<String>, Option<String>) {
-        let keys = package_keys(manifest);
+        publish_metadata_violations_in(path, manifest, "")
+    }
+
+    /// `publish_metadata_violations` with the root manifest of the
+    /// workspace, for `key.workspace = true` (R2E-tests-guards-7).
+    pub fn publish_metadata_violations_in(
+        path: &str,
+        manifest: &str,
+        workspace: &str,
+    ) -> (Vec<String>, Option<String>) {
+        let keys = package_keys(manifest, workspace);
         if keys.get("publish").is_some_and(|v| v == "false") {
             return (Vec::new(), None);
         }
         let mut out = Vec::new();
         for key in ["description", "readme", "keywords", "categories"] {
-            if !keys.contains_key(key) {
-                out.push(format!("{path}: [package] has no `{key}`"));
-            }
-        }
-        if let Some(words) = keys.get("keywords") {
-            let count = words.matches('"').count() / 2;
-            if !(1..=5).contains(&count) {
-                out.push(format!("{path}: {count} keywords; crates.io takes 1 to 5"));
+            match keys.get(key).map(|v| quoted(v)) {
+                None => out.push(format!("{path}: [package] has no `{key}`")),
+                Some(items) if items.is_empty() || items.iter().any(|i| i.trim().is_empty()) => {
+                    out.push(format!("{path}: [package] has an empty `{key}`"));
+                }
+                Some(items) if key == "keywords" && items.len() > 5 => {
+                    let count = items.len();
+                    out.push(format!("{path}: {count} keywords; crates.io takes 1 to 5"));
+                }
+                Some(_) => {}
             }
         }
         let readme = keys.get("readme").map(|v| v.trim_matches('"').to_owned());
         (out, readme)
-    }
-
-    /// `publish_metadata_violations` with the root manifest of the
-    /// workspace, for `key.workspace = true`.
-    pub fn publish_metadata_violations_in(
-        path: &str,
-        manifest: &str,
-        _workspace: &str,
-    ) -> (Vec<String>, Option<String>) {
-        publish_metadata_violations(path, manifest)
     }
 
     /// The words of a text as one line: Markdown line breaks and comment
@@ -2479,7 +2524,8 @@ fn published_crates_have_metadata() {
     let mut found = Vec::new();
     for krate in CRATES {
         let path = format!("crates/{krate}/Cargo.toml");
-        let (problems, readme) = check::publish_metadata_violations(&path, &read(&path));
+        let (problems, readme) =
+            check::publish_metadata_violations_in(&path, &read(&path), &read("Cargo.toml"));
         found.extend(problems);
         if let Some(readme) = readme
             && !root().join("crates").join(krate).join(&readme).is_file()
