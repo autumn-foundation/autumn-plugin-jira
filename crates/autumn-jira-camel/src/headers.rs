@@ -374,7 +374,7 @@ mod tests {
             let marked = marked(&m, &o).unwrap().unwrap();
             assert_eq!(marked.previous, Previous::Unknown, "{redelivery:?}");
             // With no key, the write fails and names the key header.
-            let err = super::marked(&message(&[redelivery.clone()]), &o).unwrap_err();
+            let err = super::marked(&message(std::slice::from_ref(&redelivery)), &o).unwrap_err();
             assert!(err.to_string().contains(HEADER_HARVEST_KEY), "{err}");
         }
         for none in [
@@ -386,7 +386,10 @@ mod tests {
         ] {
             let m = message(&[key.clone(), first.clone(), none.clone()]);
             assert_eq!(marked(&m, &o).unwrap().unwrap().previous, Previous::First);
-            assert_eq!(marked(&message(&[none.clone()]), &o).unwrap(), None);
+            assert_eq!(
+                marked(&message(std::slice::from_ref(&none)), &o).unwrap(),
+                None
+            );
         }
     }
 
