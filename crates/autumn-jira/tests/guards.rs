@@ -879,9 +879,9 @@ mod check {
                         }
                     });
                     let named = named.map(|m| m.trim_matches(['"', '\'']).to_owned());
-                    found = Some(named.unwrap_or_else(|| match dir {
-                        Some(d) => format!("{d}/Cargo.toml"),
-                        None => "Cargo.toml".to_owned(),
+                    found = Some(named.unwrap_or_else(|| {
+                        dir.as_ref()
+                            .map_or_else(|| "Cargo.toml".to_owned(), |d| format!("{d}/Cargo.toml"))
                     }));
                 }
                 _ => {}

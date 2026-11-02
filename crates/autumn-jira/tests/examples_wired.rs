@@ -209,6 +209,13 @@ mod wired {
     /// block comments, escapes, raw strings, and char literals as against
     /// lifetimes.
     pub fn code_of(text: &str) -> String {
+        scrub(text, false)
+    }
+
+    /// The source with the comments as spaces. With `keep_strings`, the
+    /// string and char literals stay. Each char keeps its place, so the
+    /// output lines up char for char with [`code_of`].
+    fn scrub(text: &str, keep_strings: bool) -> String {
         let chars: Vec<char> = text.chars().collect();
         let n = chars.len();
         let at = |i: usize| chars.get(i).copied().unwrap_or('\0');
@@ -255,7 +262,9 @@ mod wired {
                     while j < n && !(chars[j] == '"' && (1..=hashes).all(|k| at(j + k) == '#')) {
                         j += 1;
                     }
-                    blank(&mut out, open + 1, j);
+                    if !keep_strings {
+                        blank(&mut out, open + 1, j);
+                    }
                     (j + 1 + hashes).min(n)
                 } else {
                     i + 1
@@ -265,14 +274,20 @@ mod wired {
                 while j < n && chars[j] != '"' {
                     j += if chars[j] == '\\' { 2 } else { 1 };
                 }
-                blank(&mut out, i + 1, j);
+                if !keep_strings {
+                    blank(&mut out, i + 1, j);
+                }
                 (j + 1).min(n)
             } else if c == '\'' && at(i + 1) == '\\' {
                 let j = (i + 3..n).find(|&j| chars[j] == '\'').unwrap_or(n);
-                blank(&mut out, i + 1, j);
+                if !keep_strings {
+                    blank(&mut out, i + 1, j);
+                }
                 (j + 1).min(n)
             } else if c == '\'' && at(i + 2) == '\'' {
-                blank(&mut out, i + 1, i + 2);
+                if !keep_strings {
+                    blank(&mut out, i + 1, i + 2);
+                }
                 i + 3
             } else {
                 i + 1
@@ -286,16 +301,40 @@ mod wired {
     /// attribute to the `;` or the matching `}` of the item. The input is
     /// the output of [`code_of`].
     pub fn without_test_items(code: &str) -> String {
-        const ATTR: &str = "#[cfg(test)]";
-        let mut out = String::new();
-        let mut rest = code;
-        while let Some(at) = rest.find(ATTR) {
-            out.push_str(&rest[..at]);
-            let item = &rest[at + ATTR.len()..];
+        let chars: Vec<char> = code.chars().collect();
+        keep_outside(&chars, &test_item_ranges(&chars))
+    }
+
+    /// The chars of `chars` outside the ranges.
+    fn keep_outside(chars: &[char], ranges: &[std::ops::Range<usize>]) -> String {
+        chars
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !ranges.iter().any(|r| r.contains(i)))
+            .map(|(_, c)| *c)
+            .collect()
+    }
+
+    /// The char ranges of the items under `#[cfg(test)]`: from the
+    /// attribute to the `;` or the matching `}` of the item. The input is
+    /// the output of [`code_of`], so no brace in a string or a comment
+    /// counts.
+    fn test_item_ranges(chars: &[char]) -> Vec<std::ops::Range<usize>> {
+        const ATTR: [char; 12] = ['#', '[', 'c', 'f', 'g', '(', 't', 'e', 's', 't', ')', ']'];
+        let n = chars.len();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i + ATTR.len() <= n {
+            if chars[i..i + ATTR.len()] != ATTR {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            let mut j = i + ATTR.len();
             let mut depth = 0_i32;
-            let mut end = item.len();
-            for (j, c) in item.char_indices() {
-                match c {
+            let mut end = n;
+            while j < n {
+                match chars[j] {
                     '(' | '[' => depth += 1,
                     ')' | ']' => depth -= 1,
                     ';' if depth == 0 => {
@@ -304,14 +343,14 @@ mod wired {
                     }
                     '{' if depth == 0 => {
                         let mut braces = 0_i32;
-                        for (k, d) in item[j..].char_indices() {
+                        for (k, d) in chars.iter().enumerate().skip(j) {
                             match d {
                                 '{' => braces += 1,
                                 '}' => braces -= 1,
                                 _ => {}
                             }
                             if braces == 0 {
-                                end = j + k + 1;
+                                end = k + 1;
                                 break;
                             }
                         }
@@ -319,11 +358,24 @@ mod wired {
                     }
                     _ => {}
                 }
+                j += 1;
             }
-            rest = &item[end.min(item.len())..];
+            out.push(start..end);
+            i = end;
         }
-        out.push_str(rest);
         out
+    }
+
+    /// The code lines of an example for a snippet check: no comment and
+    /// no `#[cfg(test)]` item, but with the strings (R2E-tests-guards-9).
+    fn snippet_lines(text: &str) -> Vec<String> {
+        let code: Vec<char> = code_of(text).chars().collect();
+        let kept: Vec<char> = scrub(text, true).chars().collect();
+        keep_outside(&kept, &test_item_ranges(&code))
+            .lines()
+            .map(|l| l.trim().to_owned())
+            .filter(|l| !l.is_empty())
+            .collect()
     }
 
     /// The source rules of one example: a time bound, test code, a
@@ -498,8 +550,9 @@ mod wired {
     }
 
     /// A README snippet that says "From the <name> example" holds only
-    /// lines of that example. `source` gives the text of an example by
-    /// name.
+    /// code lines of that example, in the same order. Comments and test
+    /// items of the example do not count. `source` gives the text of an
+    /// example by name.
     pub fn snippet_violations(
         readme: &str,
         source: &dyn Fn(&str) -> Option<String>,
@@ -523,12 +576,16 @@ mod wired {
                 ));
                 continue;
             };
-            let lines: Vec<&str> = text.lines().map(str::trim).collect();
-            for line in body[1..].iter().map(|l| l.trim()).filter(|l| !l.is_empty()) {
-                if !lines.contains(&line) {
-                    out.push(format!(
-                        "README: the `{name}` snippet has a line that the example does not have: {line}"
-                    ));
+            // The code lines of the snippet come in the same order in the
+            // code of the example. A comment in the snippet is not checked.
+            let lines = snippet_lines(&text);
+            let mut from = 0;
+            for line in snippet_lines(&body[1..].join("\n")) {
+                match lines[from..].iter().position(|l| *l == line) {
+                    Some(k) => from += k + 1,
+                    None => out.push(format!(
+                        "README: the `{name}` snippet has a line that the example code does not have in this order: {line}"
+                    )),
                 }
             }
         }
