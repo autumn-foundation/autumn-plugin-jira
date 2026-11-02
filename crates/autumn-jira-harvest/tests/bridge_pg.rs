@@ -25,7 +25,7 @@ use autumn_harvest::pool::{DbRole, EngineDbTimeouts, engine_pool};
 use autumn_harvest::prelude::{ExecutionId, WorkflowHandleClient};
 use autumn_harvest::worker::DbPool;
 use autumn_jira::client::ClientSettings;
-use autumn_jira::ids::{SiteHost, SiteName, WebhookDeliveryId};
+use autumn_jira::ids::{CloudId, SiteHost, SiteName, WebhookDeliveryId};
 use autumn_jira::request::IssueTypeRef;
 use autumn_jira::san_mateo::Secret;
 use autumn_jira::san_mateo::clock::{Entropy, OsEntropy};
@@ -34,7 +34,9 @@ use autumn_jira::{
     BasicAuth, Delivery, EventSink, HandlerError, IssueKey, JiraClient, JiraSite, NewIssue,
     ProjectKey,
 };
-use autumn_jira_fake::{ANN, DEFAULT_API_TOKEN, DEFAULT_EMAIL, FakeJira, FakeOp, Fault};
+use autumn_jira_fake::{
+    ANN, DEFAULT_API_TOKEN, DEFAULT_CLOUD_ID, DEFAULT_EMAIL, FakeJira, FakeOp, Fault,
+};
 use autumn_jira_harvest::{
     HarvestSignalBridge, IssueSignal, ROUTES_PROPERTY, RouteBinding, RouteKey, RouteOutcome,
     SIGNAL, SignalRoute, TRACKED_LABEL,
@@ -380,11 +382,12 @@ async fn forged_tag_makes_no_db_call() {
     assert!(!debug.contains("bridge-route-key"), "{debug}");
 }
 
-/// R2-webhook-security-1: a delivery does not name its Jira site. Site B
-/// posts a status change of its issue 10000 to the endpoint of site A, and
-/// site A has a run that waits on its own issue 10000. The bridge reads the
-/// status from its own site, so the signal holds the status of the issue of
-/// site A, not the status in the payload of site B.
+/// R2-webhook-security-1: site B posts a status change of its issue 10000
+/// to the endpoint of site A, and site A has a run that waits on its own
+/// issue 10000. A cloud id client does not tell its site host, so this
+/// bridge has no site check. It reads the status from its own site, so the
+/// signal holds the status of the issue of site A, not the status in the
+/// payload of site B.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_delivery_of_another_site_gives_the_status_of_this_site() {
     let Some(url) = database_url() else { return };
@@ -393,19 +396,29 @@ async fn a_delivery_of_another_site_gives_the_status_of_this_site() {
     let workflow_id = format!("incident:{}", nonce());
     let started = start_run(&pool, &url, &workflow_id).await;
     let site_a = fake();
-    let site_b = fake();
+    let site_b = fake().with_site("beta", "22222222-2222-4333-8444-555555555555");
     let route = SignalRoute::new(WORKFLOW, &workflow_id).unwrap();
     let ours = tracked_issue(
         &site_a,
         vec![route.property_entry(&route_key(), &test_binding())],
     )
     .await;
-    let theirs = tracked_issue(&site_b, vec![]).await;
+    let theirs = tracked_issue_on(&site_b, "beta", vec![]).await;
     let our_id = client(&site_a).get_issue(ours.clone()).await.unwrap().id;
-    let their_id = client(&site_b).get_issue(theirs.clone()).await.unwrap().id;
+    let their_id = client_on(&site_b, "beta")
+        .get_issue(theirs.clone())
+        .await
+        .unwrap()
+        .id;
     assert_eq!(our_id, their_id, "the two sites use the same issue id");
     let delivery = status_change(&site_b, &theirs);
-    let bridge = make_bridge(pool.clone(), &site_a);
+    let cloud = JiraClient::api_token(
+        JiraSite::CloudId(CloudId::parse(DEFAULT_CLOUD_ID).unwrap()),
+        BasicAuth::new(DEFAULT_EMAIL, Secret::new(DEFAULT_API_TOKEN)).unwrap(),
+        Arc::new(site_a.clone()),
+    );
+    let bridge =
+        HarvestSignalBridge::new(pool.clone(), cloud, route_key()).allow_workflow(WORKFLOW);
     assert_eq!(
         bridge.route(&delivery).await.unwrap(),
         vec![RouteOutcome::Signalled]

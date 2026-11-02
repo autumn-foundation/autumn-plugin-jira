@@ -2259,8 +2259,11 @@ pub fn routes_from_property(value: &Value, key: &RouteKey, allowed: &BTreeSet<St
    for each routed delivery.
 4a. For each route: tag check in constant time against the id and the
    labels of the read issue (forged or copied: `BadTag`, counted, `warn`,
-   no DB call, B10). Not in the allowlist: `NotAllowed`. The signal gets the
-   status and key of the read, not the payload values.
+   no DB call, B10). Not in the allowlist: `NotAllowed`. The signal gets
+   the id and key of the read. Its status (R2C-harvest-4): when the step 0
+   site check ran and passed, the status of the payload, else the status of
+   the read. So a status that the issue passes in a few seconds still ends
+   a wait, when the bridge knows its site host.
 5. `resolve_execution_id_by_workflow_id(conn, name, id)` [V]. `None`:
    `NoRun`. `ResolvedRun.state` terminal: `Finished`.
 6. `signal::send_signal_idempotent(conn, exec_id, SIGNAL, payload,

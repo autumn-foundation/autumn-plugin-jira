@@ -295,7 +295,7 @@ impl HarvestSignalBridge {
         let signal = routes
             .iter()
             .any(|(_, checked)| *checked == RouteOutcome::Signalled)
-            .then(|| signal_of(delivery, &current));
+            .then(|| signal_of(delivery, &current, self.site.is_some()));
         let payload = signal
             .as_ref()
             .map(serde_json::to_value)
@@ -400,15 +400,30 @@ fn client_host(info: &BackendInfo) -> Option<SiteHost> {
     SiteHost::parse(&info.site).ok()
 }
 
-/// Makes the signal of a delivery. The status and the key come from a read
-/// of the issue on the site of the client, not from the payload.
-fn signal_of(delivery: &Delivery, current: &Issue) -> IssueSignal {
+/// Makes the signal of a delivery. The id and the key come from a read of
+/// the issue on the site of the client, not from the payload.
+///
+/// The status depends on `site_checked`: `true` when the bridge knows its
+/// site host and the delivery names that host. Then the delivery comes from
+/// the site of the bridge. The signal gets the status that the payload
+/// reports, together with the time of the payload. An issue can pass a
+/// status in a few seconds, and the bridge can get the delivery after the
+/// next move. The reported status still ends a wait for it
+/// (R2C-harvest-4). Else, or when the payload has no status, the signal
+/// gets the status of the read. A bridge with no site host loses a brief
+/// status in that case, so give each bridge its site host.
+fn signal_of(delivery: &Delivery, current: &Issue, site_checked: bool) -> IssueSignal {
+    let reported = delivery
+        .event
+        .issue()
+        .and_then(|issue| issue.fields.status.clone())
+        .filter(|_| site_checked);
     IssueSignal {
         delivery_id: delivery.meta.id.clone(),
         event: delivery.event.name().to_owned(),
         issue_id: current.id.clone(),
         issue_key: Some(current.key.clone()),
-        status: current.status(),
+        status: reported.or_else(|| current.status()),
         timestamp_ms: delivery.timestamp.map(|t| t.epoch_ms()),
     }
 }
