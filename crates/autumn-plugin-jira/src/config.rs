@@ -871,6 +871,11 @@ mod tests {
             ("[jira.http]\nmax_pages = 0\n", "max_pages"),
             ("[jira.http]\nlookup_attempts = 0\n", "lookup_attempts"),
             ("[jira.http]\ntimeout_secs = 0\n", "timeout_secs"),
+            // R9-test-quality-6: the harvest budgets hold for 60 s or less.
+            (
+                "[jira.http]\ntimeout_secs = 61\n",
+                "[jira.http] timeout_secs",
+            ),
             (
                 "[jira.http]\nbase_backoff_ms = 5\nmax_backoff_ms = 4\n",
                 "max_backoff_ms",

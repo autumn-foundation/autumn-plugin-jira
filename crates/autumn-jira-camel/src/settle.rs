@@ -88,4 +88,15 @@ mod tests {
         settle(Duration::from_millis(60)).await;
         assert!(start.elapsed() >= Duration::from_millis(60));
     }
+
+    /// The wait is a tokio timer. A paused tokio clock moves it, and no
+    /// thread sleeps for the wait.
+    #[tokio::test(start_paused = true)]
+    async fn the_wait_follows_the_tokio_clock() {
+        let start = tokio::time::Instant::now();
+        let wait = Duration::from_secs(3_600);
+        let ended = tokio::time::timeout(wait + Duration::from_secs(1), settle(wait)).await;
+        assert!(ended.is_ok(), "the wait did not end on the tokio clock");
+        assert_eq!(start.elapsed(), wait);
+    }
 }

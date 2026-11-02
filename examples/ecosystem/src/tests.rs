@@ -28,7 +28,7 @@ use tokio::sync::Mutex;
 use super::*;
 use crate::summary::EXPECTED;
 use crate::transport::{JIRA_INTEGRATION, LEAD};
-use crate::workflow::Outcome;
+use crate::workflow::{ChatOutput, Outcome};
 
 /// The pinned copy of `harvest_camel::is_retryable` and its samples, from
 /// the camel crate. The test below compares it with the real function.
@@ -244,14 +244,26 @@ async fn webhook_negatives() {
     // The delivery, the same delivery again, a tampered copy, a copy from
     // the bot.
     assert_eq!(report.webhook_statuses, vec![200, 409, 401, 200]);
-    assert_eq!(report.bridge.signalled, 1, "one signal");
+    // The bridge is a sink for all actors (R2-webhook-security-5): a status
+    // that the bot sets must signal a waiting run too. So the copy from the
+    // bot gets to the bridge. It has its own delivery id. The run takes it
+    // as a late signal (`drain_jira_signals`), or the run is already
+    // finished.
+    assert_eq!(report.bridge.deliveries, 2, "{:?}", report.bridge);
+    assert!(report.bridge.signalled >= 1, "{:?}", report.bridge);
     assert_eq!(
-        report.webhook_counters["accepted"], 1,
+        report.bridge.signalled + report.bridge.finished,
+        2,
+        "{:?}",
+        report.bridge
+    );
+    assert_eq!(
+        report.webhook_counters["accepted"], 2,
         "{}",
         report.webhook_counters
     );
     assert_eq!(
-        report.webhook_counters["ignored_self"], 1,
+        report.webhook_counters["ignored_self"], 0,
         "{}",
         report.webhook_counters
     );
@@ -565,4 +577,119 @@ async fn boot_three_plugins_real_http() {
     for name in ["jira", "san_mateo"] {
         assert!(components.get(name).is_some(), "no {name} in {health}");
     }
+}
+
+// --- R4-harvest-determinism-2: a Jira signal after the wait ---------------
+
+/// An in-memory env with a mock for each activity of `incident_flow`. The
+/// issue is Done at the first read of the wait, so the wait ends at once.
+fn flow_env() -> autumn_harvest::testing::WorkflowTestEnv {
+    use autumn_jira_harvest::{
+        GET_ISSUE, jira_add_comment_info, jira_create_issue_info, jira_transition_to_status_info,
+    };
+    let in_progress = json!({"id": "3", "name": "In Progress", "category": "indeterminate"});
+    let done = json!({"id": "4", "name": "Done", "category": "done"});
+    let issue = json!({
+        "id": "10001",
+        "key": "OPS-1",
+        "summary": "Disk full",
+        "status": done,
+        "labels": ["autumn-tracked"],
+        "updated": null
+    });
+    let created = json!({"id": "10001", "key": "OPS-1", "outcome": "created"});
+    let moved = json!({"outcome": "moved", "status": in_progress, "via": "21"});
+    let comment = json!({"id": "20001", "outcome": "created"});
+    let chat = serde_json::to_value(ChatOutput {
+        status: 201,
+        worker: "A".to_owned(),
+    })
+    .unwrap();
+    let project = json!({"status": 200, "headers": [], "body": {"lead": {"accountId": LEAD}}});
+    autumn_harvest::testing::WorkflowTestEnv::new()
+        .with_workflow_id(format!("{ALERT}.sim"))
+        .mock_activity(san_mateo_harvest::san_mateo_proxy_info().name, move |_| {
+            Ok(project.clone())
+        })
+        .mock_activity(jira_create_issue_info().name, move |_| Ok(created.clone()))
+        .mock_activity(jira_transition_to_status_info().name, move |_| {
+            Ok(moved.clone())
+        })
+        .mock_activity(GET_ISSUE, move |_| Ok(issue.clone()))
+        .mock_activity(jira_add_comment_info().name, move |_| Ok(comment.clone()))
+        .mock_activity(notify_chat_info().name, move |_| Ok(chat.clone()))
+}
+
+/// The input of the in-memory run: no poll, a wait of 600 s.
+fn flow_input() -> Value {
+    serde_json::to_value(AlertInput {
+        alert_id: ALERT.to_owned(),
+        summary: "Disk full".to_owned(),
+        cloud_id: autumn_jira_fake::DEFAULT_CLOUD_ID.to_owned(),
+        settle_secs: 3,
+        wait_secs: 600,
+        poll_every_secs: None,
+    })
+    .unwrap()
+}
+
+/// A webhook can come after the wait, while the run adds its comment or
+/// tells the chat. Each seed sends the Done signal at another task
+/// boundary. Every history must replay: the run takes a late signal with
+/// `drain_jira_signals` before it returns. A late signal is a signal after
+/// the schedule of the comment, which comes after the wait.
+#[tokio::test]
+async fn a_late_jira_signal_replays() {
+    use autumn_harvest::WorkflowEvent;
+    use autumn_harvest::dst::SeedPlan;
+    use autumn_jira_harvest::{IssueSignal, SIGNAL, jira_add_comment_info};
+    // Jira sends a delivery again until it gets a 2xx, and each copy from
+    // another actor has its own id. So more than one signal can come.
+    let done = |n: u32| {
+        serde_json::to_value(IssueSignal {
+            delivery_id: autumn_jira::ids::WebhookDeliveryId::parse(&format!("acme-{n}")).unwrap(),
+            event: "jira:issue_updated".to_owned(),
+            issue_id: autumn_jira::IssueId::parse("10001").unwrap(),
+            issue_key: None,
+            status: Some(
+                serde_json::from_value(json!({"id": "4", "name": "Done", "category": "done"}))
+                    .unwrap(),
+            ),
+            timestamp_ms: Some(9_000_000_000_000),
+        })
+        .unwrap()
+    };
+    let env = flow_env();
+    let mut late = 0;
+    let mut sim = env.simulation().seeds(SeedPlan {
+        first: 0,
+        count: 64,
+    });
+    for n in 1..=4 {
+        sim = sim.signal(SIGNAL, done(n));
+    }
+    let report = sim
+        .sweep(incident_flow_info().handler, flow_input(), |run| {
+            let output: IncidentOutput =
+                serde_json::from_value(run.result().clone().expect("the run ends")).unwrap();
+            assert_eq!(output.outcome, Outcome::Resolved, "seed {}", run.seed());
+            let events = run.events();
+            let at = |hit: &dyn Fn(&WorkflowEvent) -> bool| events.iter().position(hit);
+            let comment = at(&|e| {
+                matches!(e, WorkflowEvent::ActivityScheduled { name, .. }
+                    if name == jira_add_comment_info().name)
+            });
+            let signal = events
+                .iter()
+                .rposition(|e| matches!(e, WorkflowEvent::SignalReceived { .. }));
+            if signal > comment {
+                late += 1;
+            }
+        })
+        .await;
+    if let Err(failure) = report {
+        panic!("{failure}");
+    }
+    // Some seeds send the signal after the end of the wait.
+    assert!(late > 0, "no seed sent the signal late");
 }

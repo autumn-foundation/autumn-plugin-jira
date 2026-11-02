@@ -37,7 +37,8 @@ use autumn_jira::{
 };
 use autumn_jira_fake::{DEFAULT_API_TOKEN, DEFAULT_EMAIL, FakeJira, FakeOp, Fault};
 use autumn_jira_harvest::activities::{
-    LONG_WRITE_START_TO_CLOSE, READ_START_TO_CLOSE, WRITE_START_TO_CLOSE,
+    COMMENT_LOOKUP_PAGES, COMMENT_START_TO_CLOSE, LONG_WRITE_START_TO_CLOSE, READ_START_TO_CLOSE,
+    WRITE_START_TO_CLOSE,
 };
 use autumn_jira_harvest::{
     AddCommentInput, CONFIG_ERROR, ClientRef, CreateIssueInput, CreateIssueOutput, CreateKind,
@@ -484,7 +485,17 @@ fn names_are_pinned() {
 fn calls(name: &str) -> Vec<OpClass> {
     match name {
         // The lookup-only path is one read. The send path is one marked write.
-        "jira_create_issue" | "jira_add_comment" => vec![OpClass::MarkedWrite],
+        "jira_create_issue" => vec![OpClass::MarkedWrite],
+        // The marked write counts one page for the lookup before the send and
+        // one page for the lookup after it. The comment lookup also reads
+        // `GET /myself` one time (a cold cache), and up to
+        // `COMMENT_LOOKUP_PAGES - 1` more pages in each of the two lookups.
+        "jira_add_comment" => {
+            let extra = 2 * (usize::try_from(COMMENT_LOOKUP_PAGES).unwrap() - 1);
+            let mut calls = vec![OpClass::MarkedWrite, OpClass::Read];
+            calls.extend(std::iter::repeat_n(OpClass::Read, extra));
+            calls
+        }
         "jira_get_issue" | "jira_search_page" => vec![OpClass::Read],
         "jira_edit_issue" | "jira_delete_issue" => vec![OpClass::IdempotentWrite],
         "jira_transition_to_status" => vec![OpClass::CheckedWrite],
@@ -509,6 +520,9 @@ fn start_to_close_covers_the_client_budget() {
     let max = autumn_jira_harvest::activities::MAX_TRANSPORT_TIMEOUT.as_secs();
     let san_mateo = u64::from(autumn_jira_harvest::activities::SAN_MATEO_CALLS_PER_SEND);
     assert_eq!((max, san_mateo), (60, 4));
+    // The plugin caps `[jira.http] timeout_secs` at the core value. The
+    // plugin does not depend on harvest, so this test keeps the two equal.
+    assert_eq!(max, autumn_jira::client::MAX_TRANSPORT_TIMEOUT_SECS);
     for timeout in [1, 30, max] {
         for (path, calls_per_send) in [("direct", 1), ("san-mateo", san_mateo)] {
             let per_request = Duration::from_secs(timeout * calls_per_send);
@@ -543,7 +557,7 @@ fn start_to_close_covers_the_client_budget() {
         by_name("jira_create_issue"),
         Some(LONG_WRITE_START_TO_CLOSE)
     );
-    assert_eq!(by_name("jira_add_comment"), Some(LONG_WRITE_START_TO_CLOSE));
+    assert_eq!(by_name("jira_add_comment"), Some(COMMENT_START_TO_CLOSE));
     assert_eq!(
         by_name("jira_transition_to_status"),
         Some(LONG_WRITE_START_TO_CLOSE)
@@ -556,6 +570,10 @@ fn start_to_close_covers_the_client_budget() {
     assert_eq!(
         (READ_START_TO_CLOSE, LONG_WRITE_START_TO_CLOSE),
         (Duration::from_secs(540), Duration::from_secs(2_520))
+    );
+    assert_eq!(
+        (COMMENT_LOOKUP_PAGES, COMMENT_START_TO_CLOSE),
+        (3, Duration::from_secs(4_200))
     );
 }
 
@@ -1179,4 +1197,38 @@ async fn a_delete_404_after_any_failed_attempt_is_gone() {
             .unwrap();
         assert_eq!(gone.outcome, DeleteKind::GoneAfterRetry, "{attempt}");
     }
+}
+
+/// R1-write-safety-9 and the B2 budget: the marker lookup of
+/// `jira_add_comment` reads at most `COMMENT_LOOKUP_PAGES` pages. At the cap
+/// it fails closed: the lookup gives no "not found", so no attempt sends the
+/// comment.
+#[tokio::test(start_paused = true)]
+async fn the_comment_lookup_reads_at_most_its_page_cap() {
+    let fake = FakeJira::new();
+    let durable = durable(&fake);
+    let key = human_issue(&fake, "Printer").await;
+    // 100 comments for each page. The person adds one page more than the cap.
+    let person = client(&fake, "acme");
+    let notes = 100 * (COMMENT_LOOKUP_PAGES + 1);
+    for n in 0..notes {
+        person
+            .add_comment(key_ref(&key), &autumn_jira::Adf::text(&format!("note {n}")))
+            .await
+            .unwrap();
+    }
+    let posts = fake.count(FakeOp::AddComment);
+    let first = first_ctx();
+    let comment = AddCommentInput::new(key_ref(&key), "Fixed it");
+    // The send path: the lookup before the send stops at the cap.
+    let failure = comment.run(&durable, &first).await.unwrap_err();
+    assert_ne!(failure.error_type, OUTCOME_UNKNOWN_ERROR, "{failure:?}");
+    let cap = usize::try_from(COMMENT_LOOKUP_PAGES).unwrap();
+    assert_eq!(fake.count(FakeOp::GetComments), cap);
+    // The lookup-only path stops at the cap too.
+    let ctx = retry_of(&first, 2, None);
+    let failure = comment.run(&durable, &ctx).await.unwrap_err();
+    assert!(failure.error_type.starts_with(ERROR_PREFIX), "{failure:?}");
+    assert_eq!(fake.count(FakeOp::GetComments), 2 * cap);
+    assert_eq!(fake.count(FakeOp::AddComment), posts, "no comment is sent");
 }

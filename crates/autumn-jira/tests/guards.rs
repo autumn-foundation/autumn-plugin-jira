@@ -1571,6 +1571,43 @@ mod check {
         out
     }
 
+    /// The doc comments (`///` and `//!`) of a Rust file as Markdown. Each
+    /// other line is empty, so the line numbers stay the same.
+    fn doc_text(src: &str) -> String {
+        src.lines()
+            .map(|line| {
+                let t = line.trim_start();
+                t.strip_prefix("///")
+                    .or_else(|| t.strip_prefix("//!"))
+                    .map_or("", |rest| rest.strip_prefix(' ').unwrap_or(rest))
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// First-person words. ASD-STE100 code comments name the thing that
+    /// acts, not the writer.
+    const FIRST_PERSON: [&str; 3] = ["we", "our", "us"];
+
+    /// ASD-STE100 for doc comments (R7-api-docs-15): the rules of
+    /// [`prose_violations`], no first-person word, and no passive "is not
+    /// sent".
+    pub fn comment_violations(path: &str, src: &str) -> Vec<String> {
+        let md = doc_text(src);
+        let mut out = prose_violations(path, &md);
+        for (line, paragraph) in paragraphs(&md) {
+            let text = plain(&paragraph).to_lowercase();
+            let words: Vec<&str> = text.split(|c: char| !c.is_alphanumeric()).collect();
+            if let Some(word) = FIRST_PERSON.iter().find(|w| words.contains(*w)) {
+                out.push(format!("{path}:{line}: first person `{word}`: {paragraph}"));
+            }
+            if text.contains("is not sent") {
+                out.push(format!("{path}:{line}: passive `is not sent`: {paragraph}"));
+            }
+        }
+        out
+    }
+
     /// Claims that the code does not keep (review rounds R2 and R7), each
     /// with the rule that is true.
     const STALE_CLAIMS: [(&str, &str); 5] = [
@@ -2466,6 +2503,52 @@ fn docs_are_ste_prose_sees_a_long_sentence() {
     ] {
         assert_eq!(check::prose_violations(p, &good), NONE, "{good}");
     }
+}
+
+/// The Rust files whose doc comments the STE check reads: the `src` of each
+/// crate and of the ecosystem example.
+fn doc_comment_files() -> Vec<PathBuf> {
+    let mut files = src_files(&CRATES);
+    files.extend(files_under(&root().join("examples/ecosystem/src"), &["rs"]));
+    files
+}
+
+#[test]
+fn doc_comments_are_ste_prose() {
+    assert_files(
+        "doc_comments_are_ste_prose",
+        &doc_comment_files(),
+        check::comment_violations,
+    );
+}
+
+#[test]
+fn doc_comments_are_ste_prose_sees_each_kind() {
+    let p = "crates/x/src/lib.rs";
+    let long = "one two three four five six seven eight nine ten eleven twelve thirteen \
+                fourteen fifteen sixteen seventeen eighteen nineteen twenty twenty-one \
+                twenty-two twenty-three twenty-four twenty-five twenty-six.";
+    for bad in [
+        format!("//! Intro.\n//! {long}\n"),
+        format!("    /// - {long}\nfn f() {{}}\n"),
+        "/// The chat API of our team.\n".to_owned(),
+        "/// We read the issue first.\n".to_owned(),
+        "/// The write is not sent again.\n".to_owned(),
+    ] {
+        assert_eq!(check::comment_violations(p, &bad).len(), 1, "{bad}");
+    }
+    for good in [
+        format!("// {long}\n"),
+        format!("/// ```text\n/// {long}\n/// ```\n"),
+        format!("let s = \"{long}\";\n"),
+        "/// The bridge reads the status. It sends one signal.\n".to_owned(),
+        "/// The trust of the user status.\n".to_owned(),
+    ] {
+        assert_eq!(check::comment_violations(p, &good), NONE, "{good}");
+    }
+    // The line number is the line of the comment in the file.
+    let found = check::comment_violations(p, "fn a() {}\n\n/// Our API.\nfn b() {}\n");
+    assert!(found[0].starts_with("crates/x/src/lib.rs:3: "), "{found:?}");
 }
 
 // --- No stale claims in the docs -------------------------------------------
