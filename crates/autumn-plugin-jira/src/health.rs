@@ -52,8 +52,9 @@ struct Probe {
 ///   `/actuator/health` does not fail.
 ///
 /// The details hold the mode, the site, the last HTTP status, the time of
-/// the last call, the webhook counters, `self_filter` and the
-/// `max_body_bytes` of the endpoint. They never hold an email, an account
+/// the last call, the webhook counters, `self_filter`, the
+/// `max_body_bytes` of the endpoint and `handler_tasks`, the handler tasks
+/// that run now. They never hold an email, an account
 /// id or a token.
 pub struct JiraHealth {
     cell: Cell,
@@ -165,6 +166,7 @@ fn details(runtime: &Runtime) -> HashMap<String, Value> {
         ("webhook".to_owned(), json!(runtime.counters.snapshot())),
         ("self_filter".to_owned(), json!(self_filter)),
         ("max_body_bytes".to_owned(), json!(runtime.max_body_bytes)),
+        ("handler_tasks".to_owned(), json!(runtime.handler_tasks())),
     ])
 }
 

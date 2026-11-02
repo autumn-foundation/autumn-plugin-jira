@@ -190,7 +190,20 @@ pub struct JiraWebhookConfig {
     /// The most that an event time can be in the future, in seconds.
     pub max_future_skew_secs: u64,
     /// The longest wait for each sink, in milliseconds. 1 or more.
+    ///
+    /// After this time the route answers 503, and the task of the sink
+    /// continues until `abandon_after_ms`.
     pub handler_timeout_ms: u64,
+    /// The most handler tasks that run at the same time. 1 or more.
+    ///
+    /// A task that times out continues, and it holds its slot until it
+    /// ends. When each slot holds a task, the route answers 503 at once,
+    /// starts no task, and adds one to `timed_out`. So a sink that hangs
+    /// cannot make tasks without a limit.
+    pub max_handler_tasks: u32,
+    /// The longest time of one handler task, in milliseconds. Then the
+    /// plugin stops the task. It must be `handler_timeout_ms` or more.
+    pub abandon_after_ms: u64,
     /// Events by these account ids are ignored. Use a dedicated service
     /// account for the writes of the app, and put its id here.
     pub ignore_actor_account_ids: Vec<String>,
@@ -203,6 +216,8 @@ impl Default for JiraWebhookConfig {
             max_age_secs: 7200,
             max_future_skew_secs: 300,
             handler_timeout_ms: 8000,
+            max_handler_tasks: 64,
+            abandon_after_ms: 300_000,
             ignore_actor_account_ids: Vec::new(),
         }
     }
@@ -215,6 +230,8 @@ impl std::fmt::Debug for JiraWebhookConfig {
             .field("max_age_secs", &self.max_age_secs)
             .field("max_future_skew_secs", &self.max_future_skew_secs)
             .field("handler_timeout_ms", &self.handler_timeout_ms)
+            .field("max_handler_tasks", &self.max_handler_tasks)
+            .field("abandon_after_ms", &self.abandon_after_ms)
             // A count only: an account id identifies a person.
             .field(
                 "ignore_actor_account_ids",
@@ -402,6 +419,15 @@ impl JiraConfig {
             self.webhook.handler_timeout_ms,
             "[jira.webhook] handler_timeout_ms",
         )?;
+        require_positive(
+            u64::from(self.webhook.max_handler_tasks),
+            "[jira.webhook] max_handler_tasks",
+        )?;
+        if self.webhook.abandon_after_ms < self.webhook.handler_timeout_ms {
+            return Err(PluginError::config(
+                "[jira.webhook] abandon_after_ms must be handler_timeout_ms or more",
+            ));
+        }
         require_positive(self.health.timeout_ms, "[jira.health] timeout_ms")?;
         Ok(())
     }
@@ -782,6 +808,14 @@ mod tests {
                 "handler_timeout_ms",
             ),
             ("[jira.health]\ntimeout_ms = 0\n", "timeout_ms"),
+            (
+                "[jira.webhook]\nmax_handler_tasks = 0\n",
+                "max_handler_tasks",
+            ),
+            (
+                "[jira.webhook]\nhandler_timeout_ms = 10\nabandon_after_ms = 9\n",
+                "abandon_after_ms",
+            ),
         ];
         for (text, word) in bad {
             let e = JiraConfig::from_toml_str(text).unwrap_err().to_string();

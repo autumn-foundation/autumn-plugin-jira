@@ -8,6 +8,7 @@ use std::sync::{Arc, OnceLock};
 use autumn_jira::{Delivery, EventSink, HandlerError, JiraClient};
 use autumn_web::AppState;
 use serde::Serialize;
+use tokio::sync::Semaphore;
 
 use crate::config::{JiraHealthConfig, JiraWebhookConfig};
 use crate::health::JiraHealth;
@@ -78,8 +79,9 @@ pub struct WebhookCounters {
     pub permanent: u64,
     /// Deliveries with a transient handler error. The route answers 503.
     pub handler_failed: u64,
-    /// Deliveries with a handler that did not finish in time. The route
-    /// answers 503.
+    /// Deliveries with a handler that did not finish in time, or that
+    /// found no free handler slot (`max_handler_tasks`). The route answers
+    /// 503.
     pub timed_out: u64,
 }
 
@@ -143,6 +145,18 @@ pub(crate) struct Runtime {
     pub(crate) mode: &'static str,
     /// `max_body_bytes` of the webhook endpoint, when the route is mounted.
     pub(crate) max_body_bytes: Option<usize>,
+    /// One permit for each handler task that can run:
+    /// `[jira.webhook] max_handler_tasks`.
+    pub(crate) slots: Arc<Semaphore>,
+}
+
+impl Runtime {
+    /// The handler tasks that run now, also the tasks that timed out.
+    pub(crate) fn handler_tasks(&self) -> usize {
+        usize::try_from(self.webhook.max_handler_tasks)
+            .unwrap_or(usize::MAX)
+            .saturating_sub(self.slots.available_permits())
+    }
 }
 
 impl std::fmt::Debug for Runtime {

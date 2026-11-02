@@ -16,7 +16,9 @@
 //! 4. It runs each handler in order, each in its own task, under
 //!    `handler_timeout_ms`. A transient error or a timeout gives 503, and
 //!    the later handlers do not run. autumn then frees the replay keys, so
-//!    Jira can send the delivery again.
+//!    Jira can send the delivery again. Each task holds one of the
+//!    `max_handler_tasks` slots until it ends, at most `abandon_after_ms`.
+//!    With no free slot, the route answers 503 and starts no task.
 //!
 //! After step 1 the route answers 200 or 503 only. Webhooks are at least
 //! once: a handler can get the same delivery again, also when another
@@ -162,18 +164,46 @@ impl Runtime {
     }
 
     /// Runs each handler in order, each in a spawned task, and waits for
-    /// each under `handler_timeout_ms`. A task that times out runs to its
-    /// end.
+    /// each under `handler_timeout_ms`.
+    ///
+    /// Each task holds one of the `max_handler_tasks` slots until it ends.
+    /// A task that times out continues until `abandon_after_ms`, and then
+    /// the plugin stops it. With no free slot, the route answers 503 and
+    /// starts no task.
     async fn dispatch(&self, state: &AppState, delivery: &Arc<Delivery>) -> Verdict {
         let limit = Duration::from_millis(self.webhook.handler_timeout_ms);
+        let abandon = Duration::from_millis(self.webhook.abandon_after_ms);
         let id = delivery.meta.id.as_str();
         let event = delivery.event.name();
         for handler in &self.handlers {
             let name = handler.name();
-            let task = tokio::spawn(handler.run(Arc::clone(delivery), state.clone()));
+            let Ok(slot) = Arc::clone(&self.slots).try_acquire_owned() else {
+                tracing::warn!(
+                    delivery_id = id,
+                    event,
+                    handler = name,
+                    max_handler_tasks = self.webhook.max_handler_tasks,
+                    "jira webhook has no free handler slot; Jira sends the delivery again"
+                );
+                return Verdict::TimedOut;
+            };
+            let run = handler.run(Arc::clone(delivery), state.clone());
+            let (task_id, task_name) = (id.to_owned(), name.to_owned());
+            let task = tokio::spawn(async move {
+                let result = tokio::time::timeout(abandon, run).await;
+                if result.is_err() {
+                    tracing::warn!(
+                        delivery_id = task_id,
+                        handler = task_name,
+                        "jira webhook handler stopped after abandon_after_ms"
+                    );
+                }
+                drop(slot);
+                result
+            });
             match tokio::time::timeout(limit, task).await {
-                Ok(Ok(Ok(()))) => {}
-                Ok(Ok(Err(HandlerError::Permanent(reason)))) => {
+                Ok(Ok(Ok(Ok(())))) => {}
+                Ok(Ok(Ok(Err(HandlerError::Permanent(reason))))) => {
                     Counters::add(&self.counters.permanent);
                     tracing::error!(
                         delivery_id = id,
@@ -183,7 +213,7 @@ impl Runtime {
                         "jira webhook handler failed; Jira does not send it again"
                     );
                 }
-                Ok(Ok(Err(HandlerError::Transient(reason)))) => {
+                Ok(Ok(Ok(Err(HandlerError::Transient(reason))))) => {
                     tracing::warn!(
                         delivery_id = id,
                         event,
@@ -203,13 +233,14 @@ impl Runtime {
                     );
                     return Verdict::HandlerFailed;
                 }
-                Err(_) => {
+                // The task stopped at `abandon_after_ms`, or the wait ended.
+                Ok(Ok(Err(_))) | Err(_) => {
                     tracing::warn!(
                         delivery_id = id,
                         event,
                         handler = name,
                         timeout_ms = self.webhook.handler_timeout_ms,
-                        "jira webhook handler did not finish in time; it runs to its end, and Jira sends the delivery again"
+                        "jira webhook handler did not finish in time; it runs until abandon_after_ms, and Jira sends the delivery again"
                     );
                     return Verdict::TimedOut;
                 }

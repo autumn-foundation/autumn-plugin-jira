@@ -16,6 +16,7 @@ use autumn_web::app::AppBuilder;
 use autumn_web::plugin::Plugin;
 use autumn_web::plugin_contract::PluginContract;
 use autumn_web::{AppState, AutumnError, ProcessRole};
+use tokio::sync::Semaphore;
 
 use crate::config::{JiraConfig, JiraHttpConfig, JiraMode, JiraWebhookConfig};
 use crate::error::PluginError;
@@ -353,9 +354,13 @@ impl JiraPlugin {
             handlers = self.handlers.len(),
             "jira started"
         );
+        let slots = Arc::new(Semaphore::new(
+            usize::try_from(config.webhook.max_handler_tasks).unwrap_or(Semaphore::MAX_PERMITS),
+        ));
         Ok(Arc::new(Runtime {
             service,
             health_client,
+            slots,
             webhook: config.webhook,
             health: config.health,
             handlers: self.handlers.clone(),

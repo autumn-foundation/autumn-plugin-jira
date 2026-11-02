@@ -527,3 +527,42 @@ async fn hung_handlers_have_a_bound() {
         Some(u64::try_from(DEFAULT_MAX_HANDLER_TASKS + extra).unwrap())
     );
 }
+
+/// R10-plugin-ecosystem-3: the plugin stops a task at `abandon_after_ms`,
+/// and the slot is free again. The health details show the live tasks.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hung_task_stops_at_abandon_after_ms() {
+    let (started, live) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let mut config = JiraConfig::default();
+    config.webhook.handler_timeout_ms = 10;
+    config.webhook.abandon_after_ms = 100;
+    config.webhook.max_handler_tasks = 1;
+    let (s, l) = (Arc::clone(&started), Arc::clone(&live));
+    let plugin = JiraPlugin::with_config(config)
+        .client(client_on(Arc::new(FakeJira::new())))
+        .on_event(move |_delivery: Arc<Delivery>, _state: AppState| {
+            let (started, live) = (Arc::clone(&s), Arc::clone(&l));
+            async move {
+                started.fetch_add(1, Ordering::SeqCst);
+                live.fetch_add(1, Ordering::SeqCst);
+                let _live = Live(live);
+                std::future::pending::<()>().await;
+                Ok(())
+            }
+        });
+    let client = app(plugin);
+    deliver(&client, "a-1", &fresh()).await.assert_status(503);
+    // The one slot is full: no new task.
+    deliver(&client, "a-2", &fresh()).await.assert_status(503);
+    assert_eq!(started.load(Ordering::SeqCst), 1);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(live.load(Ordering::SeqCst), 0, "the task stopped");
+    // The slot is free again.
+    deliver(&client, "a-3", &fresh()).await.assert_status(503);
+    assert_eq!(started.load(Ordering::SeqCst), 2);
+    // autumn caches the health report, so the test reads it one time.
+    let health = json_of(&client.get("/actuator/health").send().await);
+    let details = &health["components"]["jira"]["details"];
+    assert_eq!(details["handler_tasks"], json!(1), "{health}");
+    assert_eq!(details["webhook"]["timed_out"], json!(3), "{health}");
+}
