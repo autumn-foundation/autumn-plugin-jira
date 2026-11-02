@@ -2376,6 +2376,10 @@ fn weekly_updates_get_the_one_version_check_sees_a_gap() {
                   \x20       run: cargo update\n";
     let eco = "jobs:\n  eco:\n    steps:\n\
                \x20     - run: cargo update --manifest-path \"$MANIFEST\"\n";
+    let eco_eq = "jobs:\n  eco:\n    steps:\n\
+                  \x20     - run: cargo update --manifest-path=\"$MANIFEST\"\n";
+    let eco_cd = "jobs:\n  eco:\n    steps:\n\
+                  \x20     - run: cd examples/ecosystem && cargo update\n";
     for bad in [
         weekly.to_owned(),
         format!(
@@ -2383,12 +2387,18 @@ fn weekly_updates_get_the_one_version_check_sees_a_gap() {
         ),
         format!("{weekly}      - if: false\n        run: bash scripts/one-version.sh Cargo.toml\n"),
         format!("{eco}      - run: bash scripts/one-version.sh Cargo.toml\n"),
+        // R2E-tests-guards-8: the `=` form and an update after `cd`.
+        format!("{eco_eq}      - run: bash scripts/one-version.sh Cargo.toml\n"),
+        eco_cd.to_owned(),
+        format!("{eco_cd}      - run: bash scripts/one-version.sh Cargo.toml\n"),
     ] {
         assert_eq!(check::update_violations(&bad).len(), 1, "{bad}");
     }
     for good in [
         format!("{weekly}      - run: bash scripts/one-version.sh Cargo.toml\n"),
         format!("{eco}      - run: bash scripts/one-version.sh \"$MANIFEST\"\n"),
+        format!("{eco_eq}      - run: bash scripts/one-version.sh \"$MANIFEST\"\n"),
+        format!("{eco_cd}      - run: bash scripts/one-version.sh examples/ecosystem/Cargo.toml\n"),
         "jobs:\n  lock:\n    steps:\n      - run: echo \"Run: cargo update -p a\"\n".to_owned(),
     ] {
         assert_eq!(check::update_violations(&good), NONE, "{good}");
