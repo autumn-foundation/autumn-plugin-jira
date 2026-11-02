@@ -25,7 +25,7 @@ use autumn_harvest::pool::{DbRole, EngineDbTimeouts, engine_pool};
 use autumn_harvest::prelude::{ExecutionId, WorkflowHandleClient};
 use autumn_harvest::worker::DbPool;
 use autumn_jira::client::ClientSettings;
-use autumn_jira::ids::{SiteName, WebhookDeliveryId};
+use autumn_jira::ids::{SiteHost, SiteName, WebhookDeliveryId};
 use autumn_jira::request::IssueTypeRef;
 use autumn_jira::san_mateo::Secret;
 use autumn_jira::san_mateo::clock::{Entropy, OsEntropy};
@@ -161,7 +161,7 @@ async fn start_run(
     client.start_or_load(&mut conn, params).await.unwrap()
 }
 
-fn bridge(pool: DbPool, fake: &FakeJira) -> HarvestSignalBridge {
+fn make_bridge(pool: DbPool, fake: &FakeJira) -> HarvestSignalBridge {
     // Short retry waits: a test must not wait for the default backoff.
     let mut settings = ClientSettings::default();
     settings.base_backoff_ms = 50;
@@ -181,7 +181,7 @@ async fn duplicate_delivery_gives_one_signal() {
     let route = SignalRoute::new(WORKFLOW, &workflow_id).unwrap();
     let key = tracked_issue(&fake, vec![route.property_entry(&route_key())]).await;
     let delivery = status_change(&fake, &key);
-    let bridge = bridge(pool.clone(), &fake);
+    let bridge = make_bridge(pool.clone(), &fake);
 
     assert_eq!(
         bridge.route(&delivery).await.unwrap(),
@@ -224,7 +224,7 @@ async fn missing_run_is_skipped() {
     let route = SignalRoute::new(WORKFLOW, &format!("incident:{}", nonce())).unwrap();
     let key = tracked_issue(&fake, vec![route.property_entry(&route_key())]).await;
     let delivery = status_change(&fake, &key);
-    let bridge = bridge(pool(&url), &fake);
+    let bridge = make_bridge(pool(&url), &fake);
     assert_eq!(
         bridge.route(&delivery).await.unwrap(),
         vec![RouteOutcome::NoRun]
@@ -250,7 +250,7 @@ async fn finished_run_is_skipped() {
     let route = SignalRoute::new(WORKFLOW, &workflow_id).unwrap();
     let key = tracked_issue(&fake, vec![route.property_entry(&route_key())]).await;
     let delivery = status_change(&fake, &key);
-    let bridge = bridge(pool.clone(), &fake);
+    let bridge = make_bridge(pool.clone(), &fake);
     assert_eq!(
         bridge.route(&delivery).await.unwrap(),
         vec![RouteOutcome::Finished]
@@ -270,7 +270,7 @@ async fn db_error_is_transient() {
     let route = SignalRoute::new(WORKFLOW, "incident:closed-db").unwrap();
     let key = tracked_issue(&fake, vec![route.property_entry(&route_key())]).await;
     let delivery = status_change(&fake, &key);
-    let bridge = bridge(pool(CLOSED_URL), &fake);
+    let bridge = make_bridge(pool(CLOSED_URL), &fake);
     let err = bridge.route(&delivery).await.unwrap_err();
     assert!(matches!(err, HandlerError::Transient(_)), "{err:?}");
     assert!(!err.to_string().contains("jira:jira"), "{err}");
@@ -301,7 +301,7 @@ async fn forged_tag_makes_no_db_call() {
     let key = tracked_issue(&fake, vec![forged, other.property_entry(&route_key())]).await;
     let delivery = status_change(&fake, &key);
     // Each DB call on this pool fails, so Ok means no DB call.
-    let bridge = bridge(pool(CLOSED_URL), &fake);
+    let bridge = make_bridge(pool(CLOSED_URL), &fake);
     assert_eq!(
         bridge.route(&delivery).await.unwrap(),
         vec![RouteOutcome::BadTag, RouteOutcome::NotAllowed]
@@ -363,7 +363,7 @@ async fn a_delivery_of_another_site_gives_the_status_of_this_site() {
     let their_id = client(&site_b).get_issue(theirs.clone()).await.unwrap().id;
     assert_eq!(our_id, their_id, "the two sites use the same issue id");
     let delivery = status_change(&site_b, &theirs);
-    let bridge = bridge(pool.clone(), &site_a);
+    let bridge = make_bridge(pool.clone(), &site_a);
     assert_eq!(
         bridge.route(&delivery).await.unwrap(),
         vec![RouteOutcome::Signalled]
@@ -378,4 +378,57 @@ async fn a_delivery_of_another_site_gives_the_status_of_this_site() {
     assert_eq!(payload.issue_key.as_ref(), Some(&ours));
     // The issue of site A did not move.
     assert_eq!(payload.status.unwrap().name, "To Do");
+}
+
+/// R2F-fixcheck-a-2: one webhook secret can serve two sites by mistake. The
+/// bridge serves the site of its client. It refuses a delivery whose
+/// `issue.self` names another host, or names no host, and it makes no call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_delivery_of_another_site_is_refused() {
+    let site_a = fake();
+    let site_b = fake().with_site("beta", "22222222-2222-4333-8444-555555555555");
+    let route = SignalRoute::new(WORKFLOW, "incident:other-site").unwrap();
+    let ours = tracked_issue(&site_a, vec![route.property_entry(&route_key())]).await;
+    let theirs = tracked_issue(&site_b, vec![route.property_entry(&route_key())]).await;
+    let delivery = status_change(&site_b, &theirs);
+    assert_eq!(delivery.site().map(|s| s.as_str()), Some("beta.atlassian.net"));
+    // Each DB call on this pool fails, so Ok means no DB call.
+    let bridge = make_bridge(pool(CLOSED_URL), &site_a);
+    assert_eq!(bridge.route(&delivery).await.unwrap(), vec![]);
+    assert_eq!(site_a.count(FakeOp::GetProperty), 0, "no Jira call");
+    assert_eq!(site_a.count(FakeOp::GetIssue), 0, "no Jira call");
+    let counters = bridge.counters();
+    assert_eq!((counters.other_site, counters.skipped), (1, 0));
+
+    // A delivery that names no site is refused too.
+    let mut body: Value = serde_json::from_slice(&raw_status_change(&site_a, &ours)).unwrap();
+    body["issue"].as_object_mut().unwrap().remove("self");
+    let parsed = parse_event(&serde_json::to_vec(&body).unwrap()).unwrap();
+    let meta = DeliveryMeta::new(
+        WebhookDeliveryId::parse("acme-no-site").unwrap(),
+        0,
+        Flow::Primary,
+    );
+    let unnamed = Delivery::new(meta, parsed);
+    assert_eq!(unnamed.site(), None);
+    assert_eq!(bridge.route(&unnamed).await.unwrap(), vec![]);
+    assert_eq!(bridge.counters().other_site, 2);
+    assert_eq!(site_a.count(FakeOp::GetProperty), 0, "no Jira call");
+
+    // A bridge with an explicit site host: a san-mateo client does not
+    // tell its host, so the app gives it. A delivery of acme is then
+    // another site.
+    let ours_delivery = status_change(&site_a, &ours);
+    let beta = make_bridge(pool(CLOSED_URL), &site_a)
+        .site_host(SiteHost::parse("beta.atlassian.net").unwrap());
+    assert_eq!(beta.route(&ours_delivery).await.unwrap(), vec![]);
+    assert_eq!(beta.counters().other_site, 1);
+    assert_eq!(site_a.count(FakeOp::GetProperty), 0, "no Jira call");
+}
+
+/// The body of the next status change of `key`, as Jira posts it.
+fn raw_status_change(fake: &FakeJira, key: &IssueKey) -> Vec<u8> {
+    fake.human_transition(key.as_str(), "In Progress", ANN)
+        .unwrap();
+    fake.take_deliveries().pop().expect("a delivery").body
 }
