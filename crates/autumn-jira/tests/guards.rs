@@ -929,14 +929,43 @@ mod check {
             .collect()
     }
 
+    /// The words that can come before a command in one segment: a shell
+    /// keyword, `!`, or a wrapper that runs the command.
+    const COMMAND_PREFIXES: [&str; 10] = [
+        "then", "do", "else", "elif", "if", "while", "until", "!", "time", "env",
+    ];
+
+    /// Returns `true` for a `NAME=value` word: an assignment before a
+    /// command.
+    fn is_assignment(word: &str) -> bool {
+        word.split_once('=').is_some_and(|(name, _)| {
+            !name.is_empty()
+                && !name.starts_with('-')
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+    }
+
+    /// The words of a segment with no shell keyword, wrapper or assignment
+    /// at the start (R3-tests-docs-guards-4).
+    fn command_words(command: &str) -> Vec<&str> {
+        let words = shell_words(command);
+        let start = words
+            .iter()
+            .position(|w| !COMMAND_PREFIXES.contains(w) && !is_assignment(w))
+            .unwrap_or(words.len());
+        words[start..].to_vec()
+    }
+
     /// The manifest of a `cargo update` in a shell line, or `None`. The
     /// update can come after `&&`, `||`, `;` or `|`, and can follow a `cd`.
-    /// Both `--manifest-path p` and `--manifest-path=p` name the manifest
+    /// A shell keyword such as `then`, a wrapper such as `env X=1` or
+    /// `time`, and an assignment can come before it. Both
+    /// `--manifest-path p` and `--manifest-path=p` name the manifest
     /// (R2E-tests-guards-8).
     fn updated_manifest(line: &str, dir: &mut Option<String>) -> Option<String> {
         let mut found = None;
         for command in line.split(['&', '|', ';']) {
-            let words = shell_words(command);
+            let words = command_words(command);
             match words.as_slice() {
                 ["cd", to, ..] => *dir = Some((*to).trim_end_matches('/').to_owned()),
                 ["cargo", "update", rest @ ..] => {
