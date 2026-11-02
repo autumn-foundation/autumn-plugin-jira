@@ -55,6 +55,11 @@ impl Adf {
         &self.0
     }
 
+    /// Returns the JSON value, by value.
+    pub(crate) fn into_value(self) -> Value {
+        self.0
+    }
+
     /// Checks the root and wraps a JSON value.
     ///
     /// # Errors

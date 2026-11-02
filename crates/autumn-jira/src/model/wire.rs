@@ -22,16 +22,25 @@ use crate::time::JiraTimestamp;
 fn lenient_time<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> std::result::Result<Option<JiraTimestamp>, D::Error> {
-    let _ = Option::<Value>::deserialize(deserializer)?;
-    Ok(None)
+    let value = Option::<Value>::deserialize(deserializer)?;
+    Ok(match value {
+        Some(Value::String(text)) => JiraTimestamp::parse(&text).ok(),
+        Some(Value::Number(n)) => n.as_i64().and_then(JiraTimestamp::from_epoch_ms),
+        _ => None,
+    })
 }
 
 /// Reads an ADF value. A value that is not a `doc` gives `None` (lenient).
 fn lenient_adf<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> std::result::Result<Option<Adf>, D::Error> {
-    let _ = Option::<Value>::deserialize(deserializer)?;
-    Ok(None)
+    let value = Option::<Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|v| Adf::from_value(v).ok()))
+}
+
+/// Returns a non-empty text, or `None`.
+fn present(text: Option<String>) -> Option<String> {
+    text.filter(|t| !t.is_empty())
 }
 
 /// `IssueBean`.
@@ -47,12 +56,14 @@ pub(crate) struct IssueWire {
 
 impl IssueWire {
     pub(crate) fn into_model(self) -> Issue {
-        let _ = (self.id, self.key, self.fields, self.properties);
         Issue {
-            id: IssueId::from_response(String::new()),
-            key: IssueKey::from_response(String::new()),
-            fields: IssueFields::default(),
-            properties: Map::new(),
+            id: IssueId::from_response(self.id),
+            key: IssueKey::from_response(self.key),
+            fields: self
+                .fields
+                .map(IssueFieldsWire::into_model)
+                .unwrap_or_default(),
+            properties: self.properties.unwrap_or_default(),
         }
     }
 }
@@ -82,8 +93,25 @@ pub(crate) struct IssueFieldsWire {
     other: Map<String, Value>,
 }
 
+impl IssueFieldsWire {
+    fn into_model(self) -> IssueFields {
+        IssueFields {
+            summary: self.summary,
+            status: self.status.and_then(StatusWire::into_status),
+            issue_type: self.issue_type.and_then(IssueTypeWire::into_option),
+            project: self.project.and_then(ProjectRefWire::into_option),
+            assignee: self.assignee.and_then(UserWire::into_option),
+            labels: self.labels.unwrap_or_default(),
+            created: self.created,
+            updated: self.updated,
+            description: self.description,
+            other: self.other,
+        }
+    }
+}
+
 /// `StatusDetails`.
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct StatusWire {
     #[serde(default)]
@@ -97,11 +125,17 @@ pub(crate) struct StatusWire {
 impl StatusWire {
     /// Returns the status, or `None` with no id.
     pub(crate) fn into_status(self) -> Option<Status> {
-        let _ = (self.id, self.name, self.status_category);
-        None
+        Some(Status {
+            id: StatusId::from_response(present(self.id)?),
+            name: self.name.unwrap_or_default(),
+            category: self
+                .status_category
+                .and_then(StatusCategoryWire::into_model),
+        })
     }
 
     /// Returns the summary, or `None` with no id.
+    #[allow(dead_code, reason = "the webhook types and the client use it")]
     pub(crate) fn into_summary(self) -> Option<StatusSummary> {
         self.into_status().map(|s| s.summary())
     }
@@ -128,8 +162,17 @@ pub(crate) struct StatusCategoryWire {
 
 impl StatusCategoryWire {
     fn into_model(self) -> Option<StatusCategory> {
-        let _ = (self.id, self.key, self.name);
-        None
+        // The spec gives an integer. A string of digits is read too.
+        let id = match self.id {
+            Some(Value::Number(n)) => n.as_i64(),
+            Some(Value::String(s)) => s.parse().ok(),
+            _ => None,
+        };
+        Some(StatusCategory {
+            id,
+            key: StatusCategoryKey::from_response(present(self.key)?),
+            name: self.name,
+        })
     }
 }
 
@@ -146,8 +189,11 @@ pub(crate) struct IssueTypeWire {
 
 impl IssueTypeWire {
     fn into_option(self) -> Option<IssueType> {
-        let _ = (self.id, self.name, self.subtask);
-        None
+        Some(IssueType {
+            id: IssueTypeId::from_response(present(self.id)?),
+            name: self.name.unwrap_or_default(),
+            subtask: self.subtask.unwrap_or(false),
+        })
     }
 
     pub(crate) fn into_model(self) -> IssueType {
@@ -172,8 +218,11 @@ pub(crate) struct ProjectRefWire {
 
 impl ProjectRefWire {
     fn into_option(self) -> Option<ProjectRef> {
-        let _ = (self.id, self.key, self.name);
-        None
+        Some(ProjectRef {
+            id: ProjectId::from_response(present(self.id)?),
+            key: ProjectKey::from_response(present(self.key)?),
+            name: self.name,
+        })
     }
 
     pub(crate) fn into_model(self) -> ProjectRef {
@@ -201,19 +250,12 @@ pub(crate) struct ProjectWire {
 
 impl ProjectWire {
     pub(crate) fn into_model(self) -> Project {
-        let _ = (
-            self.id,
-            self.key,
-            self.name,
-            self.project_type_key,
-            self.simplified,
-        );
         Project {
-            id: ProjectId::from_response(String::new()),
-            key: ProjectKey::from_response(String::new()),
-            name: String::new(),
-            project_type_key: None,
-            simplified: None,
+            id: ProjectId::from_response(self.id),
+            key: ProjectKey::from_response(self.key),
+            name: self.name.unwrap_or_default(),
+            project_type_key: self.project_type_key,
+            simplified: self.simplified,
         }
     }
 }
@@ -235,15 +277,15 @@ pub(crate) struct UserWire {
 }
 
 impl UserWire {
-    fn into_option(self) -> Option<User> {
-        let _ = (
-            self.account_id,
-            self.display_name,
-            self.email_address,
-            self.active,
-            self.account_type,
-        );
-        None
+    /// Returns the user, or `None` with no account id.
+    pub(crate) fn into_option(self) -> Option<User> {
+        Some(User {
+            account_id: AccountId::from_response(present(self.account_id)?),
+            display_name: self.display_name,
+            email_address: self.email_address,
+            active: self.active,
+            account_type: self.account_type,
+        })
     }
 
     pub(crate) fn into_model(self) -> User {
@@ -273,13 +315,12 @@ pub(crate) struct CommentWire {
 
 impl CommentWire {
     pub(crate) fn into_model(self) -> Comment {
-        let _ = (self.id, self.body, self.author, self.created, self.updated);
         Comment {
-            id: CommentId::from_response(String::new()),
-            body: None,
-            author: None,
-            created: None,
-            updated: None,
+            id: CommentId::from_response(self.id),
+            body: self.body,
+            author: self.author.and_then(UserWire::into_option),
+            created: self.created,
+            updated: self.updated,
         }
     }
 }
@@ -298,11 +339,14 @@ pub(crate) struct CommentPageWire {
 
 impl CommentPageWire {
     pub(crate) fn into_model(self) -> CommentPage {
-        let _ = (self.comments, self.start_at, self.total);
         CommentPage {
-            comments: Vec::new(),
-            start_at: 0,
-            total: 0,
+            comments: self
+                .comments
+                .into_iter()
+                .map(CommentWire::into_model)
+                .collect(),
+            start_at: self.start_at,
+            total: self.total,
         }
     }
 }
@@ -322,16 +366,14 @@ pub(crate) struct TransitionWire {
 
 impl TransitionWire {
     pub(crate) fn into_model(self) -> Transition {
-        let _ = (self.id, self.name, self.to, self.has_screen);
         Transition {
-            id: TransitionId::from_response(String::new()),
-            name: String::new(),
-            to: StatusSummary::new(
-                StatusId::from_response(String::new()),
-                String::new(),
-                StatusCategoryKey::from_response(String::new()),
+            id: TransitionId::from_response(self.id),
+            name: self.name.unwrap_or_default(),
+            to: self.to.map_or_else(
+                || StatusWire::default().into_model().summary(),
+                |to| to.into_model().summary(),
             ),
-            has_screen: false,
+            has_screen: self.has_screen.unwrap_or(false),
         }
     }
 }
@@ -345,10 +387,9 @@ pub(crate) struct CreatedIssueWire {
 
 impl CreatedIssueWire {
     pub(crate) fn into_model(self) -> CreatedIssue {
-        let _ = (self.id, self.key);
         CreatedIssue {
-            id: IssueId::from_response(String::new()),
-            key: IssueKey::from_response(String::new()),
+            id: IssueId::from_response(self.id),
+            key: IssueKey::from_response(self.key),
         }
     }
 }
@@ -367,11 +408,10 @@ pub(crate) struct ServerInfoWire {
 
 impl ServerInfoWire {
     pub(crate) fn into_model(self) -> ServerInfo {
-        let _ = (self.base_url, self.version, self.deployment_type);
         ServerInfo {
-            base_url: None,
-            version: None,
-            deployment_type: None,
+            base_url: self.base_url,
+            version: self.version,
+            deployment_type: self.deployment_type,
         }
     }
 }
@@ -390,12 +430,11 @@ pub(crate) struct AccessibleResourceWire {
 
 impl AccessibleResourceWire {
     pub(crate) fn into_model(self) -> AccessibleResource {
-        let _ = (self.id, self.name, self.url, self.scopes);
         AccessibleResource {
-            id: CloudId::from_response(String::new()),
-            name: String::new(),
-            url: String::new(),
-            scopes: Vec::new(),
+            id: CloudId::from_response(self.id),
+            name: self.name.unwrap_or_default(),
+            url: self.url.unwrap_or_default(),
+            scopes: self.scopes,
         }
     }
 }
@@ -415,13 +454,14 @@ pub(crate) struct PageWire<T> {
 }
 
 impl<T> PageWire<T> {
+    /// Returns the page. An absent `isLast` counts as the last page, so a
+    /// pager can never loop on it.
     pub(crate) fn into_model(self) -> Page<T> {
-        let _ = (self.values, self.start_at, self.total, self.is_last);
         Page {
-            values: Vec::new(),
-            start_at: 0,
-            total: None,
-            is_last: false,
+            values: self.values,
+            start_at: self.start_at,
+            total: self.total,
+            is_last: self.is_last.unwrap_or(true),
         }
     }
 }
@@ -442,14 +482,21 @@ pub(crate) struct IssueTypePageWire {
 #[allow(dead_code, reason = "the client of WP3 uses it")]
 impl IssueTypePageWire {
     /// Returns the page. `is_last` holds when the page reaches `total`, or
-    /// when Jira gives no `total`.
+    /// when Jira gives no `total`. A type with no id is skipped.
     pub(crate) fn into_model(self) -> Page<IssueType> {
-        let _ = (self.issue_types, self.start_at, self.total);
+        let returned = self.issue_types.len() as u64;
+        let is_last = self.total.is_none_or(|total| {
+            crate::policy::offset_next(self.start_at, returned, total).is_none()
+        });
         Page {
-            values: Vec::new(),
-            start_at: 0,
-            total: None,
-            is_last: false,
+            values: self
+                .issue_types
+                .into_iter()
+                .filter_map(IssueTypeWire::into_option)
+                .collect(),
+            start_at: self.start_at,
+            total: self.total,
+            is_last,
         }
     }
 }
@@ -481,11 +528,11 @@ pub(crate) struct SearchPage {
 #[allow(dead_code, reason = "the client of WP3 uses it")]
 impl SearchPageWire {
     pub(crate) fn into_model(self) -> SearchPage {
-        let _ = (self.issues, self.is_last, self.next_page_token);
+        let next_page_token = self.next_page_token.and_then(|t| PageToken::parse(&t).ok());
         SearchPage {
-            issues: Vec::new(),
-            is_last: false,
-            next_page_token: None,
+            issues: self.issues.into_iter().map(IssueWire::into_model).collect(),
+            is_last: self.is_last.unwrap_or_else(|| next_page_token.is_none()),
+            next_page_token,
         }
     }
 }
@@ -530,18 +577,24 @@ pub(crate) struct ErrorCollection {
 impl ErrorCollection {
     /// Reads an error body leniently. A body that is not JSON gives an empty collection.
     pub(crate) fn parse(body: &[u8]) -> Self {
-        let _ = body;
-        Self::default()
+        serde_json::from_slice(body).unwrap_or_default()
     }
 
     /// The `errorMessages`, then each `errors` message as `field: message`.
     pub(crate) fn messages(&self) -> Vec<String> {
-        Vec::new()
+        let mut out = self.error_messages.clone();
+        for (field, message) in &self.errors {
+            match message {
+                Value::String(text) => out.push(format!("{field}: {text}")),
+                other => out.push(format!("{field}: {other}")),
+            }
+        }
+        out
     }
 
     /// The field names of `errors`, sorted.
     pub(crate) fn fields(&self) -> Vec<String> {
-        Vec::new()
+        self.errors.keys().cloned().collect()
     }
 }
 

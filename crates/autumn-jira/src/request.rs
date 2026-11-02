@@ -35,9 +35,12 @@ pub enum IssueTypeRef {
 
 impl IssueTypeRef {
     /// Returns the JSON body.
+    #[allow(dead_code, reason = "the client of WP3 uses it")]
     pub(crate) fn to_body(&self) -> Value {
-        let _ = self;
-        Value::Null
+        match self {
+            Self::Id(id) => json!({"id": id}),
+            Self::Name(name) => json!({"name": name}),
+        }
     }
 }
 
@@ -74,39 +77,39 @@ impl NewIssue {
     }
 
     /// Sets the description.
-    pub fn description(self, description: Adf) -> Self {
-        let _ = description;
+    pub fn description(mut self, description: Adf) -> Self {
+        self.description = Some(description);
         self
     }
 
     /// Adds labels.
-    pub fn labels(self, labels: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        let _ = labels.into_iter().map(Into::into).count();
+    pub fn labels(mut self, labels: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.labels.extend(labels.into_iter().map(Into::into));
         self
     }
 
     /// Sets the assignee.
-    pub fn assignee(self, account: AccountId) -> Self {
-        let _ = account;
+    pub fn assignee(mut self, account: AccountId) -> Self {
+        self.assignee = Some(account);
         self
     }
 
     /// Sets the priority by name.
-    pub fn priority_name(self, name: impl Into<String>) -> Self {
-        let _ = name.into();
+    pub fn priority_name(mut self, name: impl Into<String>) -> Self {
+        self.priority_name = Some(name.into());
         self
     }
 
     /// Sets a field as given. The app owns custom fields: the value goes
     /// to Jira with no change, and it replaces a typed field of the same id.
-    pub fn field(self, id: FieldId, value: Value) -> Self {
-        let _ = (id, value);
+    pub fn field(mut self, id: FieldId, value: Value) -> Self {
+        self.fields.push((id, value));
         self
     }
 
     /// Adds an issue property. Jira sets it in the same create call.
-    pub fn property(self, key: impl Into<String>, value: Value) -> Self {
-        let _ = (key.into(), value);
+    pub fn property(mut self, key: impl Into<String>, value: Value) -> Self {
+        self.properties.push((key.into(), value));
         self
     }
 
@@ -129,16 +132,38 @@ impl NewIssue {
     }
 
     /// Returns the JSON body of `POST /issue`.
+    #[allow(dead_code, reason = "the client of WP3 uses it")]
     pub(crate) fn to_body(&self) -> Value {
-        let _ = (
-            &self.issue_type,
-            &self.description,
-            &self.assignee,
-            &self.priority_name,
-            &self.fields,
-            &self.properties,
-        );
-        Value::Null
+        let mut fields = Map::new();
+        fields.insert("project".to_owned(), json!({"key": self.project}));
+        fields.insert("issuetype".to_owned(), self.issue_type.to_body());
+        fields.insert("summary".to_owned(), json!(self.summary));
+        if let Some(description) = &self.description {
+            fields.insert("description".to_owned(), description.as_value().clone());
+        }
+        if !self.labels.is_empty() {
+            fields.insert("labels".to_owned(), json!(self.labels));
+        }
+        if let Some(assignee) = &self.assignee {
+            fields.insert("assignee".to_owned(), json!({"accountId": assignee}));
+        }
+        if let Some(priority) = &self.priority_name {
+            fields.insert("priority".to_owned(), json!({"name": priority}));
+        }
+        for (id, value) in &self.fields {
+            fields.insert(id.as_str().to_owned(), value.clone());
+        }
+        let mut body = Map::new();
+        body.insert("fields".to_owned(), Value::Object(fields));
+        if !self.properties.is_empty() {
+            let properties: Vec<Value> = self
+                .properties
+                .iter()
+                .map(|(key, value)| json!({"key": key, "value": value}))
+                .collect();
+            body.insert("properties".to_owned(), Value::Array(properties));
+        }
+        Value::Object(body)
     }
 }
 
@@ -158,38 +183,45 @@ impl IssueEdit {
     }
 
     /// Sets the summary.
-    pub fn set_summary(self, summary: impl Into<String>) -> Self {
-        let _ = summary.into();
+    pub fn set_summary(mut self, summary: impl Into<String>) -> Self {
+        self.fields
+            .insert("summary".to_owned(), Value::String(summary.into()));
         self
     }
 
     /// Sets the description.
-    pub fn set_description(self, description: Adf) -> Self {
-        let _ = description;
+    pub fn set_description(mut self, description: Adf) -> Self {
+        self.fields
+            .insert("description".to_owned(), description.into_value());
         self
     }
 
     /// Adds a label.
-    pub fn add_label(self, label: impl Into<String>) -> Self {
-        let _ = label.into();
+    pub fn add_label(mut self, label: impl Into<String>) -> Self {
+        self.label_ops.push(json!({"add": label.into()}));
         self
     }
 
     /// Removes a label.
-    pub fn remove_label(self, label: impl Into<String>) -> Self {
-        let _ = label.into();
+    pub fn remove_label(mut self, label: impl Into<String>) -> Self {
+        self.label_ops.push(json!({"remove": label.into()}));
         self
     }
 
     /// Sets the assignee. `None` removes the assignee.
-    pub fn set_assignee(self, account: Option<AccountId>) -> Self {
-        let _ = account;
+    pub fn set_assignee(mut self, account: Option<AccountId>) -> Self {
+        let value = account.map_or(Value::Null, |a| json!({"accountId": a}));
+        self.fields.insert("assignee".to_owned(), value);
         self
     }
 
     /// Sets a field as given. The app owns custom fields.
-    pub fn set_field(self, id: FieldId, value: Value) -> Self {
-        let _ = (id, value);
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "builder style: the caller hands over the id"
+    )]
+    pub fn set_field(mut self, id: FieldId, value: Value) -> Self {
+        self.fields.insert(id.as_str().to_owned(), value);
         self
     }
 
@@ -200,8 +232,16 @@ impl IssueEdit {
     }
 
     /// Returns the JSON body.
+    #[allow(dead_code, reason = "the client of WP3 uses it")]
     pub(crate) fn to_body(&self) -> Value {
-        Value::Null
+        let mut body = Map::new();
+        if !self.fields.is_empty() {
+            body.insert("fields".to_owned(), Value::Object(self.fields.clone()));
+        }
+        if !self.label_ops.is_empty() {
+            body.insert("update".to_owned(), json!({"labels": self.label_ops}));
+        }
+        Value::Object(body)
     }
 }
 
@@ -223,8 +263,12 @@ impl EditOptions {
     }
 
     /// Returns the query pairs.
+    #[allow(dead_code, reason = "the client of WP3 uses it")]
     pub(crate) fn to_query(self) -> Vec<(String, String)> {
-        Vec::new()
+        self.notify_users
+            .map(|n| ("notifyUsers".to_owned(), n.to_string()))
+            .into_iter()
+            .collect()
     }
 }
 
@@ -249,20 +293,21 @@ const DEFAULT_FIELDS: [&str; 9] = [
 impl Default for FieldSet {
     /// `summary,status,issuetype,project,assignee,labels,created,updated,description`.
     fn default() -> Self {
-        Self(Vec::new())
+        Self(DEFAULT_FIELDS.into_iter().map(FieldId::known).collect())
     }
 }
 
 impl FieldSet {
     /// A set of the given fields, in order, with no duplicates.
     pub fn new(fields: impl IntoIterator<Item = FieldId>) -> Self {
-        let _ = fields.into_iter().count();
-        Self(Vec::new())
+        fields.into_iter().fold(Self(Vec::new()), Self::with)
     }
 
-    /// Adds a field.
-    pub fn with(self, field: FieldId) -> Self {
-        let _ = field;
+    /// Adds a field. A field that is in the set already is skipped.
+    pub fn with(mut self, field: FieldId) -> Self {
+        if !self.0.contains(&field) {
+            self.0.push(field);
+        }
         self
     }
 
@@ -275,7 +320,11 @@ impl FieldSet {
     /// Returns the fields joined by `,` for a query.
     #[must_use]
     pub fn to_csv(&self) -> String {
-        String::new()
+        self.0
+            .iter()
+            .map(FieldId::as_str)
+            .collect::<Vec<_>>()
+            .join(",")
     }
 }
 
@@ -302,20 +351,21 @@ impl SearchRequest {
     }
 
     /// Sets the fields. Each search sends its fields (F17).
-    pub fn fields(self, fields: FieldSet) -> Self {
-        let _ = fields;
+    pub fn fields(mut self, fields: FieldSet) -> Self {
+        self.fields = fields;
         self
     }
 
     /// Sets the page size, clamped to 1 to 100.
-    pub fn max_results(self, max: u32) -> Self {
-        let _ = max;
+    pub fn max_results(mut self, max: u32) -> Self {
+        self.max_results = max.clamp(1, MAX_SEARCH_RESULTS);
         self
     }
 
-    /// Asks for issue properties. Jira takes up to 5.
-    pub fn properties(self, keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        let _ = keys.into_iter().map(Into::into).count();
+    /// Asks for issue properties. Jira takes up to 5: more give
+    /// `InvalidInput` when the client sends the search.
+    pub fn properties(mut self, keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.properties.extend(keys.into_iter().map(Into::into));
         self
     }
 
@@ -336,9 +386,25 @@ impl SearchRequest {
     /// # Errors
     ///
     /// `JiraError::InvalidInput` for more than 5 properties.
+    #[allow(dead_code, reason = "the client of WP3 uses it")]
     pub(crate) fn to_body(&self, next_page_token: Option<&PageToken>) -> Result<Value> {
-        let _ = (next_page_token, &self.fields, &self.properties);
-        Err(JiraError::invalid("search", "not ready"))
+        if self.properties.len() > MAX_SEARCH_PROPERTIES {
+            return Err(JiraError::invalid(
+                "search",
+                "a search takes up to 5 issue properties",
+            ));
+        }
+        let mut body = Map::new();
+        body.insert("jql".to_owned(), json!(self.jql.as_str()));
+        body.insert("fields".to_owned(), json!(self.fields.ids()));
+        body.insert("maxResults".to_owned(), json!(self.max_results));
+        if !self.properties.is_empty() {
+            body.insert("properties".to_owned(), json!(self.properties));
+        }
+        if let Some(token) = next_page_token {
+            body.insert("nextPageToken".to_owned(), json!(token.as_str()));
+        }
+        Ok(Value::Object(body))
     }
 }
 
@@ -377,15 +443,21 @@ impl StatusTarget {
     /// Returns `true` when `status` is at the target.
     #[must_use]
     pub fn matches(&self, status: &StatusSummary) -> bool {
-        let _ = status;
-        false
+        match self {
+            Self::Name(name) => name.eq_ignore_ascii_case(&status.name),
+            Self::Id(id) => *id == status.id,
+            Self::Category(category) => *category == status.category,
+        }
     }
 }
 
 impl fmt::Display for StatusTarget {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let _ = f;
-        Ok(())
+        match self {
+            Self::Name(name) => write!(f, "status {name}"),
+            Self::Id(id) => write!(f, "status id {id}"),
+            Self::Category(category) => write!(f, "category {category}"),
+        }
     }
 }
 
@@ -402,22 +474,29 @@ pub struct TransitionFields {
 impl TransitionFields {
     /// Sets a field.
     #[must_use]
-    pub fn field(self, name: impl Into<String>, value: Value) -> Self {
-        let _ = (name.into(), value);
+    pub fn field(mut self, name: impl Into<String>, value: Value) -> Self {
+        self.fields.insert(name.into(), value);
         self
     }
 
     /// Sets the resolution by name: `{"resolution": {"name": ..}}`.
     #[must_use]
     pub fn resolution(self, name: &str) -> Self {
-        let _ = name;
-        self
+        self.field("resolution", json!({"name": name}))
     }
 
     /// Returns the JSON body of `POST /issue/{issue}/transitions`.
+    #[allow(dead_code, reason = "the client of WP3 uses it")]
     pub(crate) fn to_body(&self, id: &TransitionId) -> Value {
-        let _ = id;
-        json!(null)
+        let mut body = Map::new();
+        body.insert("transition".to_owned(), json!({"id": id}));
+        if !self.fields.is_empty() {
+            body.insert("fields".to_owned(), Value::Object(self.fields.clone()));
+        }
+        if !self.update.is_empty() {
+            body.insert("update".to_owned(), Value::Object(self.update.clone()));
+        }
+        Value::Object(body)
     }
 }
 
@@ -524,7 +603,7 @@ mod tests {
         );
         assert!(IssueEdit::new().is_empty());
         assert_eq!(IssueEdit::new().to_body(), json!({}));
-        assert!(EditOptions::default().to_query().is_empty());
+        assert_eq!(EditOptions::default().to_query(), []);
         assert_eq!(
             EditOptions::notify_users(false).to_query(),
             [("notifyUsers".to_owned(), "false".to_owned())]
@@ -544,7 +623,7 @@ mod tests {
         assert_eq!(FieldSet::default().ids().len(), DEFAULT_FIELDS.len());
         let summary = FieldId::parse("summary").unwrap();
         let status = FieldId::parse("status").unwrap();
-        let set = FieldSet::new([summary.clone(), status.clone(), summary.clone()])
+        let set = FieldSet::new([summary.clone(), status.clone(), summary])
             .with(FieldId::parse("customfield_10010").unwrap())
             .with(status);
         assert_eq!(set.to_csv(), "summary,status,customfield_10010");

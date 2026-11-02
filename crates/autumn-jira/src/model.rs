@@ -178,14 +178,13 @@ pub struct IssueSummary {
 
 impl From<&Issue> for IssueSummary {
     fn from(issue: &Issue) -> Self {
-        let _ = issue;
         Self {
-            id: IssueId::from_response(String::new()),
-            key: IssueKey::from_response(String::new()),
-            summary: None,
-            status: None,
-            labels: Vec::new(),
-            updated: None,
+            id: issue.id.clone(),
+            key: issue.key.clone(),
+            summary: issue.fields.summary.clone(),
+            status: issue.status(),
+            labels: issue.fields.labels.clone(),
+            updated: issue.fields.updated,
         }
     }
 }
@@ -407,8 +406,18 @@ from_wire!(AccessibleResource, wire::AccessibleResourceWire);
 /// `JiraError::Decode` when the body does not decode.
 #[allow(dead_code, reason = "the client of WP3 uses it")]
 pub(crate) fn decode<T: DeserializeOwned>(op: Op, body: &[u8]) -> Result<T> {
-    let _ = (op, body);
-    Err(JiraError::Config { code: "not_ready" })
+    serde_json::from_slice(body).map_err(|e| {
+        let class = match e.classify() {
+            serde_json::error::Category::Io => "io",
+            serde_json::error::Category::Syntax => "syntax",
+            serde_json::error::Category::Data => "data",
+            serde_json::error::Category::Eof => "eof",
+        };
+        JiraError::Decode {
+            op,
+            reason: format!("{class} error at line {} column {}", e.line(), e.column()),
+        }
+    })
 }
 
 #[cfg(test)]
