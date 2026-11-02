@@ -178,7 +178,6 @@ pub enum UnknownCause {
 
 /// The marker of a marked write. A lookup can find the write by it later.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[non_exhaustive]
 pub struct MarkerRef {
     /// The marker label of an idempotent create.
     pub label: Option<String>,

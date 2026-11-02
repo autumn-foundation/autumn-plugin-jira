@@ -31,7 +31,6 @@ pub enum Order {
 
 /// A JQL field.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum JqlField {
     /// `project`.
     Project,

@@ -5,7 +5,6 @@
 
 /// The kind of a write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum WriteKind {
     /// A label on an issue.
     Label,
@@ -17,7 +16,6 @@ pub enum WriteKind {
 
 /// One thing that the client writes to Jira.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub struct JiraWrite {
     /// The label, the property key or the text.
     pub what: &'static str,

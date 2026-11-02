@@ -46,7 +46,6 @@ type HmacSha256 = Hmac<Sha256>;
 
 /// One verified delivery.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub struct Delivery {
     /// The headers of the delivery.
     pub meta: DeliveryMeta,
@@ -73,7 +72,6 @@ impl Delivery {
 
 /// The headers of one delivery.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub struct DeliveryMeta {
     /// `X-Atlassian-Webhook-Identifier`.
     pub id: WebhookDeliveryId,
@@ -93,7 +91,6 @@ impl DeliveryMeta {
 
 /// The delivery flow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum Flow {
     /// Jira sends it within about 30 seconds.
     Primary,
@@ -142,7 +139,6 @@ pub enum JiraEvent {
 
 /// An issue event.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub struct IssueEvent {
     /// The issue.
     pub issue: WebhookIssue,
@@ -154,7 +150,6 @@ pub struct IssueEvent {
 
 /// A comment event.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub struct CommentEvent {
     /// The issue. Comment payloads carry a reduced issue.
     pub issue: WebhookIssue,
@@ -165,7 +160,6 @@ pub struct CommentEvent {
 /// The issue of a payload. Lenient: comment payloads carry a reduced issue
 /// (B12). Only `id` is required.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub struct WebhookIssue {
     /// The numeric id.
     pub id: IssueId,
@@ -177,7 +171,6 @@ pub struct WebhookIssue {
 
 /// The fields of a payload issue. Each is `None` when the payload has none.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-#[non_exhaustive]
 pub struct WebhookFields {
     /// `summary`.
     pub summary: Option<String>,
@@ -193,7 +186,6 @@ pub struct WebhookFields {
 
 /// The comment of a payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub struct WebhookComment {
     /// The numeric id.
     pub id: CommentId,
@@ -205,7 +197,6 @@ pub struct WebhookComment {
 
 /// One changelog item.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub struct ChangeItem {
     /// The field name, for example `status`.
     pub field: String,
@@ -221,7 +212,6 @@ pub struct ChangeItem {
 
 /// One side of a status change.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub struct StatusRef {
     /// The status id.
     pub id: Option<StatusId>,
@@ -231,7 +221,6 @@ pub struct StatusRef {
 
 /// A status change from the changelog.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub struct StatusChange {
     /// The old status.
     pub from: StatusRef,
@@ -306,7 +295,6 @@ impl fmt::Display for JiraEvent {
 
 /// A parsed payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub struct ParsedEvent {
     /// The event.
     pub event: JiraEvent,

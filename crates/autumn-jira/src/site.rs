@@ -12,7 +12,6 @@ use crate::ids::{CloudId, SiteName};
 
 /// A Jira Cloud site. Only the two fixed host shapes exist.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum JiraSite {
     /// `https://{subdomain}.atlassian.net`. Classic API token.
     Subdomain(SiteName),
