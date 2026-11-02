@@ -622,3 +622,148 @@ async fn failed_comment_lookup_after_a_lost_reply_is_outcome_unknown() {
         .count();
     assert_eq!(posts, 1);
 }
+
+/// Reads one reply of the fake with a plain backend, for a script.
+async fn capture(fake: &FakeJira, op: Op, path: &str, query: &[(&str, &str)]) -> Value {
+    use autumn_jira::backend::{ApiRequest, JiraBackend, Method};
+    let mut request = ApiRequest::new(op, Method::Get, path);
+    for (k, v) in query {
+        request = request.query(k, *v);
+    }
+    let reply = direct(Arc::new(fake.clone())).send(request).await.unwrap();
+    serde_json::from_slice(&reply.body).unwrap()
+}
+
+/// The transitions reply of the fake for `key`, each made global.
+async fn global_transitions(fake: &FakeJira, key: &str) -> Value {
+    let path = format!("/rest/api/3/issue/{key}/transitions");
+    let mut list = capture(fake, Op::GetTransitions, &path, &[]).await;
+    for t in list["transitions"].as_array_mut().unwrap() {
+        t["isGlobal"] = json!(true);
+    }
+    list
+}
+
+#[tokio::test(start_paused = true)]
+async fn transition_after_maybe_sent_stops_when_the_issue_moved_on() {
+    let fake = FakeJira::new();
+    let plain = api_token_client(&fake);
+    let issue = plain.create_issue(&task("t")).await.unwrap().key;
+    let global = global_transitions(&fake, issue.as_str()).await;
+    let posted = Arc::new(AtomicBool::new(false));
+    let (flag, automation, name) = (Arc::clone(&posted), fake.clone(), issue.to_string());
+    let backend = Scripted::new(Arc::new(direct(Arc::new(fake.clone()))), move |r, _| {
+        match r.op {
+            Op::DoTransition => flag.store(true, Ordering::SeqCst),
+            // An automation moves the issue on after the commit.
+            Op::GetIssue if flag.load(Ordering::SeqCst) => {
+                let _ = automation.human_transition(&name, "Done", "ann");
+            }
+            // A global transition goes back to the target.
+            Op::GetTransitions if flag.load(Ordering::SeqCst) => {
+                return Some(Ok(json_reply(200, &global)));
+            }
+            _ => {}
+        }
+        None
+    });
+    let client = JiraClient::new(backend.clone()).with_settings(fast_settings());
+    fake.fault(FakeOp::DoTransition, Fault::NetworkAfterCommit);
+    let err = client
+        .transition_to_status(&issue, &StatusTarget::in_progress())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            JiraError::OutcomeUnknown {
+                op: Op::DoTransition,
+                marker: None,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    let posts = backend
+        .requests()
+        .iter()
+        .filter(|r| r.op == Op::DoTransition)
+        .count();
+    assert_eq!(posts, 1, "no second transition");
+}
+
+#[tokio::test(start_paused = true)]
+async fn global_transition_after_maybe_sent_is_not_sent_again() {
+    let fake = FakeJira::new();
+    let plain = api_token_client(&fake);
+    let issue = plain.create_issue(&task("t")).await.unwrap().key;
+    let global = global_transitions(&fake, issue.as_str()).await;
+    let backend = Scripted::new(Arc::new(direct(Arc::new(fake.clone()))), move |r, _| {
+        (r.op == Op::GetTransitions).then(|| Ok(json_reply(200, &global)))
+    });
+    let client = JiraClient::new(backend.clone()).with_settings(fast_settings());
+    fake.fault(FakeOp::DoTransition, Fault::Timeout);
+    let err = client
+        .transition_to_status(&issue, &StatusTarget::in_progress())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        JiraError::OutcomeUnknown {
+            op: Op::DoTransition,
+            cause: UnknownCause::Timeout,
+            marker: None,
+        }
+    );
+    assert_eq!(fake.count(FakeOp::DoTransition), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn transition_400_after_lost_reply_reads_the_status() {
+    let fake = FakeJira::new();
+    let plain = api_token_client(&fake);
+    let issue = plain.create_issue(&task("t")).await.unwrap().key;
+    // The status and the transitions before the commit: the stale reads.
+    let path = format!("/rest/api/3/issue/{issue}");
+    let stale_issue = capture(&fake, Op::GetIssue, &path, &[("fields", "status")]).await;
+    let stale_list = capture(
+        &fake,
+        Op::GetTransitions,
+        &format!("{path}/transitions"),
+        &[],
+    )
+    .await;
+    let posts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let stale = Arc::new(AtomicBool::new(true));
+    let (count, lag) = (Arc::clone(&posts), Arc::clone(&stale));
+    let backend = Scripted::new(Arc::new(direct(Arc::new(fake.clone()))), move |r, _| {
+        let after_first = count.load(Ordering::SeqCst) == 1;
+        match r.op {
+            Op::DoTransition => {
+                count.fetch_add(1, Ordering::SeqCst);
+                None
+            }
+            // The first re-read lags: it gives the old status.
+            Op::GetIssue if after_first && lag.load(Ordering::SeqCst) => {
+                Some(Ok(json_reply(200, &stale_issue)))
+            }
+            Op::GetTransitions if after_first && lag.swap(false, Ordering::SeqCst) => {
+                Some(Ok(json_reply(200, &stale_list)))
+            }
+            _ => None,
+        }
+    });
+    let client = JiraClient::new(backend.clone()).with_settings(fast_settings());
+    // Attempt 1 commits, and the reply is lost.
+    fake.fault(FakeOp::DoTransition, Fault::NetworkAfterCommit);
+    let outcome = client
+        .transition_to_status(&issue, &StatusTarget::in_progress())
+        .await
+        .unwrap();
+    assert!(
+        matches!(&outcome, TransitionOutcome::Moved { to, .. } if to.name == "In Progress"),
+        "{outcome:?}"
+    );
+    assert_eq!(posts.load(Ordering::SeqCst), 2);
+    assert_eq!(fake.count(FakeOp::DoTransition), 2);
+}
