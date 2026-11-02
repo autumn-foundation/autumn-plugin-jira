@@ -83,6 +83,23 @@ fn fresh() -> Vec<u8> {
     issue_updated(Some(now_ms()), "acct-ann")
 }
 
+/// Regression (CI run 41412594892): two bodies in one millisecond were
+/// equal. autumn keys its replay store on the signature too, so the second
+/// delivery got 409. Each test body must be unique.
+#[tokio::test(flavor = "multi_thread")]
+async fn deliveries_in_one_millisecond_are_all_accepted() {
+    let fake = FakeJira::new();
+    let log = log();
+    let client = app(plugin(&fake).sink(Scripted::new("a", &log)));
+    let ts = now_ms();
+    for n in 0..3 {
+        deliver(&client, &format!("ms-{n}"), &issue_updated(Some(ts), "acct-ann"))
+            .await
+            .assert_status(200);
+    }
+    assert_eq!(entries(&log), ["a:ms-0", "a:ms-1", "a:ms-2"]);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn signed_is_200() {
     let fake = FakeJira::new();
