@@ -548,7 +548,10 @@ pub(crate) struct TransitionsWire {
 #[derive(Debug, Deserialize)]
 pub(crate) struct EntityPropertyWire {
     #[serde(default)]
-    #[allow(dead_code, reason = "part of the wire shape; the client reads only the value")]
+    #[allow(
+        dead_code,
+        reason = "part of the wire shape; the client reads only the value"
+    )]
     pub(crate) key: Option<String>,
     #[serde(default)]
     pub(crate) value: Value,

@@ -101,8 +101,12 @@ impl JiraClient {
             return Ok(CreateOutcome::Found(found));
         }
         let label = key.marker_label(&self.settings.marker_label_prefix);
-        let request = ApiRequest::new(Op::CreateIssue, Method::Post, format!("{}/issue", super::API))
-            .json(&marked_body(issue, key, &label));
+        let request = ApiRequest::new(
+            Op::CreateIssue,
+            Method::Post,
+            format!("{}/issue", super::API),
+        )
+        .json(&marked_body(issue, key, &label));
         let marker = MarkerRef::label(label);
         let cause = match self.run(OpClass::MarkedWrite, &request).await {
             Ok(Ended::Reply(reply)) => match decode::<CreatedIssue>(Op::CreateIssue, &reply.body) {
@@ -168,7 +172,9 @@ impl JiraClient {
                 "jira: more than one issue has the idempotency marker; the lowest id wins"
             );
         }
-        Ok(hits.into_iter().min_by(|a, b| id_order(a).cmp(&id_order(b))))
+        Ok(hits
+            .into_iter()
+            .min_by(|a, b| id_order(a).cmp(&id_order(b))))
     }
 
     /// Adds a comment at most once for a key. The last paragraph of the
@@ -185,7 +191,10 @@ impl JiraClient {
         key: &IdempotencyKey,
     ) -> Result<CommentOutcome> {
         let issue = issue.into();
-        if let Some(found) = self.find_comment_by_idempotency_key(issue.clone(), key).await? {
+        if let Some(found) = self
+            .find_comment_by_idempotency_key(issue.clone(), key)
+            .await?
+        {
             return Ok(CommentOutcome::Found(found));
         }
         let marker = key.comment_marker();

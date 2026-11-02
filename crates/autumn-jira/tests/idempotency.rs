@@ -1,6 +1,8 @@
 //! Idempotent create, idempotent comment and the checked transition
 //! (AC16, AC17).
 
+#![allow(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
+
 mod common;
 
 use std::sync::Arc;
@@ -73,8 +75,14 @@ async fn prelookup_hit_sends_no_post() {
     let fake = FakeJira::new();
     let client = api_token_client(&fake);
     let k = key(2);
-    let first = client.create_issue_idempotent(&task("a"), &k).await.unwrap();
-    let second = client.create_issue_idempotent(&task("a"), &k).await.unwrap();
+    let first = client
+        .create_issue_idempotent(&task("a"), &k)
+        .await
+        .unwrap();
+    let second = client
+        .create_issue_idempotent(&task("a"), &k)
+        .await
+        .unwrap();
     let (CreateOutcome::Created(c), CreateOutcome::Found(f)) = (first, second) else {
         panic!("wrong outcomes");
     };
@@ -95,7 +103,10 @@ async fn lost_reply_is_found() {
     let client = api_token_client(&fake);
     let k = key(3);
     fake.fault(FakeOp::CreateIssue, Fault::StatusAfterCommit(503));
-    let outcome = client.create_issue_idempotent(&task("lost"), &k).await.unwrap();
+    let outcome = client
+        .create_issue_idempotent(&task("lost"), &k)
+        .await
+        .unwrap();
     assert!(matches!(outcome, CreateOutcome::Found(ref r) if r.key.as_str() == "OPS-1"));
     assert_eq!(fake.count(FakeOp::CreateIssue), 1);
     assert_eq!(marked(&fake, &k).len(), 1);
@@ -103,18 +114,27 @@ async fn lost_reply_is_found() {
     // A 2xx that does not decode also goes to the lookup.
     fake.fault(FakeOp::CreateIssue, Fault::BadJson);
     let k2 = key(30);
-    let outcome = client.create_issue_idempotent(&task("bad json"), &k2).await.unwrap();
+    let outcome = client
+        .create_issue_idempotent(&task("bad json"), &k2)
+        .await
+        .unwrap();
     assert!(matches!(outcome, CreateOutcome::Found(_)));
     // A reset after the commit too.
     fake.fault(FakeOp::CreateIssue, Fault::NetworkAfterCommit);
     let k3 = key(31);
-    let outcome = client.create_issue_idempotent(&task("reset"), &k3).await.unwrap();
+    let outcome = client
+        .create_issue_idempotent(&task("reset"), &k3)
+        .await
+        .unwrap();
     assert!(matches!(outcome, CreateOutcome::Found(_)));
     assert_eq!(fake.count(FakeOp::CreateIssue), 3);
     // A 429 on a marked write is retried: the marker makes it safe (A1).
     fake.rate_limit(FakeOp::CreateIssue, 1, 1);
     let k4 = key(32);
-    let outcome = client.create_issue_idempotent(&task("429"), &k4).await.unwrap();
+    let outcome = client
+        .create_issue_idempotent(&task("429"), &k4)
+        .await
+        .unwrap();
     assert!(matches!(outcome, CreateOutcome::Created(_)));
     assert_eq!(fake.count(FakeOp::CreateIssue), 5);
 }
@@ -126,7 +146,10 @@ async fn lag_beyond_lookups_is_outcome_unknown() {
     let k = key(4);
     fake.index_lag(Duration::from_secs(60));
     fake.fault(FakeOp::CreateIssue, Fault::StatusAfterCommit(503));
-    let err = client.create_issue_idempotent(&task("lag"), &k).await.unwrap_err();
+    let err = client
+        .create_issue_idempotent(&task("lag"), &k)
+        .await
+        .unwrap_err();
     assert_eq!(
         err,
         JiraError::OutcomeUnknown {
@@ -155,8 +178,14 @@ async fn label_only_hit_is_skipped() {
     // A person copied the marker label to another issue: no property.
     let copy = task("copy").labels([k.marker_label(PREFIX)]);
     client.create_issue(&copy).await.unwrap();
-    assert_eq!(client.find_by_idempotency_key(&ops(), &k).await.unwrap(), None);
-    let outcome = client.create_issue_idempotent(&task("real"), &k).await.unwrap();
+    assert_eq!(
+        client.find_by_idempotency_key(&ops(), &k).await.unwrap(),
+        None
+    );
+    let outcome = client
+        .create_issue_idempotent(&task("real"), &k)
+        .await
+        .unwrap();
     let CreateOutcome::Created(created) = outcome else {
         panic!("{outcome:?}");
     };
@@ -177,7 +206,11 @@ async fn two_hits_pick_the_lowest_id() {
     };
     let first = client.create_issue(&marked_issue("one")).await.unwrap();
     client.create_issue(&marked_issue("two")).await.unwrap();
-    let found = client.find_by_idempotency_key(&ops(), &k).await.unwrap().unwrap();
+    let found = client
+        .find_by_idempotency_key(&ops(), &k)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(found.id, first.id);
 }
 
@@ -197,17 +230,33 @@ async fn failed_lookup_is_not_not_found() {
     let client = JiraClient::new(backend.clone()).with_settings(fast_settings());
     let k = key(7);
     fake.fault(FakeOp::CreateIssue, Fault::StatusAfterCommit(503));
-    let err = client.create_issue_idempotent(&task("x"), &k).await.unwrap_err();
+    let err = client
+        .create_issue_idempotent(&task("x"), &k)
+        .await
+        .unwrap_err();
     assert!(
         matches!(&err, JiraError::OutcomeUnknown { marker: Some(m), .. } if m.label.is_some()),
         "{err:?}"
     );
     assert_eq!(fake.count(FakeOp::CreateIssue), 1);
     // A failed search is an error, never "not found".
-    let lookup = client.find_by_idempotency_key(&ops(), &k).await.unwrap_err();
-    assert!(matches!(lookup, JiraError::Upstream { op: Op::Search, status: 500 }));
+    let lookup = client
+        .find_by_idempotency_key(&ops(), &k)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        lookup,
+        JiraError::Upstream {
+            op: Op::Search,
+            status: 500
+        }
+    ));
     assert_eq!(
-        backend.requests().iter().filter(|r| r.op == Op::CreateIssue).count(),
+        backend
+            .requests()
+            .iter()
+            .filter(|r| r.op == Op::CreateIssue)
+            .count(),
         1
     );
 }
@@ -217,7 +266,10 @@ async fn labels_not_on_screen_has_a_fix() {
     let fake = FakeJira::new();
     fake.labels_not_on_screen("OPS");
     let client = api_token_client(&fake);
-    let err = client.create_issue_idempotent(&task("x"), &key(8)).await.unwrap_err();
+    let err = client
+        .create_issue_idempotent(&task("x"), &key(8))
+        .await
+        .unwrap_err();
     assert_eq!(err, JiraError::LabelsNotOnScreen { project: ops() });
     assert!(err.to_string().contains("add the Labels field"));
     assert_eq!(fake.count(FakeOp::CreateIssue), 1);
@@ -248,7 +300,11 @@ async fn lost_comment_reply_is_found() {
         .into_iter()
         .rfind(|r| r.method == "GET" && r.path.ends_with("/comment"))
         .unwrap();
-    assert!(lookup.query.contains("orderBy=-created"), "{}", lookup.query);
+    assert!(
+        lookup.query.contains("orderBy=-created"),
+        "{}",
+        lookup.query
+    );
     assert_eq!(client.all_comments(&issue).await.unwrap().len(), 1);
 
     // A lookup that finds nothing: outcome unknown, with the marker.
@@ -286,7 +342,7 @@ async fn transition_after_lost_reply_is_already_there() {
 }
 
 /// One fault of the create POST.
-fn create_fault(n: u8) -> Fault {
+const fn create_fault(n: u8) -> Fault {
     match n {
         0 => Fault::Status(500),
         1 => Fault::StatusAfterCommit(503),
@@ -299,7 +355,7 @@ fn create_fault(n: u8) -> Fault {
 }
 
 /// One fault of the search.
-fn search_fault(n: u8) -> Fault {
+const fn search_fault(n: u8) -> Fault {
     match n {
         0 => Fault::Status(500),
         1 => Fault::Network,

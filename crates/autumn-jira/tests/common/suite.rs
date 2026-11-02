@@ -79,21 +79,24 @@ async fn myself_and_server_info(_fake: &FakeJira, client: &JiraClient) {
     assert_eq!(me.account_id.as_str(), BOT);
     assert_eq!(client.account_id().await.unwrap().as_str(), BOT);
     let info = client.server_info().await.unwrap();
-    assert_eq!(
-        info.base_url.as_deref(),
-        Some("https://acme.atlassian.net")
-    );
+    assert_eq!(info.base_url.as_deref(), Some("https://acme.atlassian.net"));
     assert!(!format!("{client:?}").contains("fake-api-token"));
 }
 
 async fn projects_and_one_project(_fake: &FakeJira, client: &JiraClient) {
     let project = client.get_project(&ops()).await.unwrap();
-    assert_eq!((project.key.as_str(), project.name.as_str()), ("OPS", "Operations"));
+    assert_eq!(
+        (project.key.as_str(), project.name.as_str()),
+        ("OPS", "Operations")
+    );
     let missing = client
         .get_project(&ProjectKey::parse("NOPE").unwrap())
         .await
         .unwrap_err();
-    assert!(matches!(missing, JiraError::NotFoundOrForbidden { op: Op::GetProject }));
+    assert!(matches!(
+        missing,
+        JiraError::NotFoundOrForbidden { op: Op::GetProject }
+    ));
     let page = client.projects(0, 10).await.unwrap();
     assert_eq!(page.values.len(), 1);
     assert!(page.is_last);
@@ -122,14 +125,21 @@ async fn create_get_edit_delete(fake: &FakeJira, client: &JiraClient) {
     // The default field set does not ask for the custom field.
     assert_eq!(got.field(&custom), None);
     let explicit = client
-        .get_issue_with(&created.id, &FieldSet::new([FieldId::parse("summary").unwrap()]).with(custom.clone()))
+        .get_issue_with(
+            &created.id,
+            &FieldSet::new([FieldId::parse("summary").unwrap()]).with(custom.clone()),
+        )
         .await
         .unwrap();
     assert_eq!(explicit.fields.summary.as_deref(), Some("Disk full"));
     assert_eq!(explicit.fields.status, None);
     assert_eq!(explicit.field(&custom), Some(&json!({"value": "High"})));
     let last = fake.requests().pop().unwrap();
-    assert!(last.query.contains("fields=summary%2Ccustomfield_10010"), "{}", last.query);
+    assert!(
+        last.query.contains("fields=summary%2Ccustomfield_10010"),
+        "{}",
+        last.query
+    );
 
     let edit = IssueEdit::new()
         .set_summary("Disk full on db-1")
@@ -148,24 +158,37 @@ async fn create_get_edit_delete(fake: &FakeJira, client: &JiraClient) {
         .edit_issue(&created.key, &bad, EditOptions::default())
         .await
         .unwrap_err();
-    assert!(matches!(&err, JiraError::Validation { status: 400, fields, .. } if fields == &["nonsense"]));
+    assert!(
+        matches!(&err, JiraError::Validation { status: 400, fields, .. } if fields == &["nonsense"])
+    );
 
     assert_eq!(
         client.delete_issue(&created.key, false).await.unwrap(),
         DeleteOutcome::Deleted
     );
     let last = fake.requests().pop().unwrap();
-    assert_eq!((last.method.as_str(), last.query.as_str()), ("DELETE", "deleteSubtasks=false"));
+    assert_eq!(
+        (last.method.as_str(), last.query.as_str()),
+        ("DELETE", "deleteSubtasks=false")
+    );
     // A 404 on the first attempt is not "gone after retry".
     let again = client.delete_issue(&created.key, true).await.unwrap_err();
-    assert!(matches!(again, JiraError::NotFoundOrForbidden { op: Op::DeleteIssue }));
+    assert!(matches!(
+        again,
+        JiraError::NotFoundOrForbidden {
+            op: Op::DeleteIssue
+        }
+    ));
     assert!(fake.issue("OPS-1").is_none());
 }
 
 async fn notify_users_only_when_set(fake: &FakeJira, client: &JiraClient) {
     let key = new_issue(client, "n").await;
     let edit = IssueEdit::new().set_summary("n2");
-    client.edit_issue(&key, &edit, EditOptions::default()).await.unwrap();
+    client
+        .edit_issue(&key, &edit, EditOptions::default())
+        .await
+        .unwrap();
     assert_eq!(fake.requests().pop().unwrap().query, "");
     client
         .edit_issue(&key, &edit, EditOptions::notify_users(false))
@@ -187,13 +210,28 @@ async fn delete_gone_after_retry(fake: &FakeJira, client: &JiraClient) {
 
 async fn properties_round_trip(_fake: &FakeJira, client: &JiraClient) {
     let key = new_issue(client, "p").await;
-    assert_eq!(client.get_issue_property(&key, "app.route").await.unwrap(), None);
+    assert_eq!(
+        client.get_issue_property(&key, "app.route").await.unwrap(),
+        None
+    );
     let value = json!({"workflow": "w1", "tags": [1, 2]});
-    client.set_issue_property(&key, "app.route", &value).await.unwrap();
+    client
+        .set_issue_property(&key, "app.route", &value)
+        .await
+        .unwrap();
     // A second PUT replaces the value (200 in place of 201).
-    client.set_issue_property(&key, "app.route", &value).await.unwrap();
-    assert_eq!(client.get_issue_property(&key, "app.route").await.unwrap(), Some(value));
-    let empty = client.set_issue_property(&key, "", &json!(1)).await.unwrap_err();
+    client
+        .set_issue_property(&key, "app.route", &value)
+        .await
+        .unwrap();
+    assert_eq!(
+        client.get_issue_property(&key, "app.route").await.unwrap(),
+        Some(value)
+    );
+    let empty = client
+        .set_issue_property(&key, "", &json!(1))
+        .await
+        .unwrap_err();
     assert!(matches!(empty, JiraError::InvalidInput { .. }));
 }
 
@@ -213,11 +251,12 @@ async fn search_pages_to_the_end(fake: &FakeJira, client: &JiraClient) {
     assert_eq!(pager.pages(), 3);
     assert_eq!(pager.next_page().await.unwrap(), None);
     // Each search is a POST to /search/jql.
-    assert!(fake
-        .requests()
-        .iter()
-        .filter(|r| r.path.ends_with("/search/jql"))
-        .all(|r| r.method == "POST"));
+    assert!(
+        fake.requests()
+            .iter()
+            .filter(|r| r.path.ends_with("/search/jql"))
+            .all(|r| r.method == "POST")
+    );
     let some = client.search_all(request.clone(), 3).await.unwrap();
     assert_eq!(some.len(), 3);
     assert_eq!(client.search_all(request, 100).await.unwrap().len(), 5);
@@ -231,7 +270,13 @@ async fn search_stalls_on_a_repeated_token(fake: &FakeJira, client: &JiraClient)
     assert_eq!(pager.next_page().await.unwrap().unwrap().len(), 2);
     fake.fault(FakeOp::Search, Fault::RepeatToken);
     let err = pager.next_page().await.unwrap_err();
-    assert_eq!(err, JiraError::PaginationStalled { op: Op::Search, pages: 2 });
+    assert_eq!(
+        err,
+        JiraError::PaginationStalled {
+            op: Op::Search,
+            pages: 2
+        }
+    );
     assert_eq!(pager.next_page().await.unwrap(), None);
 }
 
@@ -243,14 +288,21 @@ async fn search_page_limit(_fake: &FakeJira, client: &JiraClient) {
     let mut pager = small.search(SearchRequest::new(Jql::project(&ops())).max_results(2));
     assert!(pager.next_page().await.unwrap().is_some());
     let err = pager.next_page().await.unwrap_err();
-    assert_eq!(err, JiraError::PageLimit { op: Op::Search, max: 2 });
+    assert_eq!(
+        err,
+        JiraError::PageLimit {
+            op: Op::Search,
+            max: 2
+        }
+    );
     assert_eq!(pager.pages(), 2);
 }
 
 async fn comments_offset_pages(fake: &FakeJira, client: &JiraClient) {
     let key = new_issue(client, "c").await;
     for n in 0..3 {
-        fake.human_comment(key.as_str(), &format!("note {n}"), ANN).unwrap();
+        fake.human_comment(key.as_str(), &format!("note {n}"), ANN)
+            .unwrap();
     }
     let page = client.comments(&key, 1, 1).await.unwrap();
     assert_eq!((page.start_at, page.total, page.comments.len()), (1, 3, 1));
@@ -278,7 +330,13 @@ async fn projects_list_all_pages(fake: &FakeJira, client: &JiraClient) {
     assert_eq!(fake.count(FakeOp::ProjectSearch), 2);
     let one_page = with(client, |s| s.max_pages = 1);
     let err = one_page.all_projects().await.unwrap_err();
-    assert_eq!(err, JiraError::PageLimit { op: Op::ListProjects, max: 1 });
+    assert_eq!(
+        err,
+        JiraError::PageLimit {
+            op: Op::ListProjects,
+            max: 1
+        }
+    );
 }
 
 async fn issue_types_of_a_project(_fake: &FakeJira, client: &JiraClient) {
@@ -296,7 +354,13 @@ async fn approximate_count(_fake: &FakeJira, client: &JiraClient) {
     for n in 0..3 {
         new_issue(client, &format!("a{n}")).await;
     }
-    assert_eq!(client.approximate_count(&Jql::project(&ops())).await.unwrap(), 3);
+    assert_eq!(
+        client
+            .approximate_count(&Jql::project(&ops()))
+            .await
+            .unwrap(),
+        3
+    );
     let none = Jql::project(&ops()).and(Jql::field(JqlField::Labels).eq("none").unwrap());
     assert_eq!(client.approximate_count(&none).await.unwrap(), 0);
 }
@@ -330,10 +394,17 @@ async fn transition_by_category(fake: &FakeJira, client: &JiraClient) {
     assert_eq!(fake.count(FakeOp::DoTransition), 3);
     // A plain transition by id.
     client
-        .transition(&key, &TransitionId::parse("21").unwrap(), &TransitionFields::default())
+        .transition(
+            &key,
+            &TransitionId::parse("21").unwrap(),
+            &TransitionFields::default(),
+        )
         .await
         .unwrap();
-    assert_eq!(client.get_issue(&key).await.unwrap().status().unwrap().name, "In Progress");
+    assert_eq!(
+        client.get_issue(&key).await.unwrap().status().unwrap().name,
+        "In Progress"
+    );
 }
 
 async fn already_there_sends_no_post(fake: &FakeJira, client: &JiraClient) {
@@ -378,7 +449,16 @@ async fn done_needs_resolution_fields(fake: &FakeJira, client: &JiraClient) {
         .transition_to_status(&key, &StatusTarget::done())
         .await
         .unwrap_err();
-    assert!(matches!(missing, JiraError::Validation { op: Op::DoTransition, .. }), "{missing:?}");
+    assert!(
+        matches!(
+            missing,
+            JiraError::Validation {
+                op: Op::DoTransition,
+                ..
+            }
+        ),
+        "{missing:?}"
+    );
     let fields = TransitionFields::default().resolution("Done");
     client
         .transition_to_status_with(&key, &StatusTarget::done(), &fields)
@@ -407,21 +487,34 @@ async fn add_and_list_comments(_fake: &FakeJira, client: &JiraClient) {
 async fn all_comments_is_bounded(fake: &FakeJira, client: &JiraClient) {
     let key = new_issue(client, "many").await;
     for n in 0..101 {
-        fake.human_comment(key.as_str(), &format!("c{n}"), ANN).unwrap();
+        fake.human_comment(key.as_str(), &format!("c{n}"), ANN)
+            .unwrap();
     }
     assert_eq!(client.all_comments(&key).await.unwrap().len(), 101);
     let one_page = with(client, |s| s.max_pages = 1);
     let err = one_page.all_comments(&key).await.unwrap_err();
-    assert_eq!(err, JiraError::PageLimit { op: Op::ListComments, max: 1 });
+    assert_eq!(
+        err,
+        JiraError::PageLimit {
+            op: Op::ListComments,
+            max: 1
+        }
+    );
 }
 
 async fn idempotent_writes_round_trip(fake: &FakeJira, client: &JiraClient) {
     let key = IdempotencyKey::derive(&["suite", "1"]);
-    let first = client.create_issue_idempotent(&task("idem"), &key).await.unwrap();
+    let first = client
+        .create_issue_idempotent(&task("idem"), &key)
+        .await
+        .unwrap();
     let CreateOutcome::Created(created) = first else {
         panic!("{first:?}");
     };
-    let again = client.create_issue_idempotent(&task("idem"), &key).await.unwrap();
+    let again = client
+        .create_issue_idempotent(&task("idem"), &key)
+        .await
+        .unwrap();
     assert!(matches!(again, CreateOutcome::Found(r) if r.key == created.key));
     assert_eq!(fake.count(FakeOp::CreateIssue), 1);
     let found = client.find_by_idempotency_key(&ops(), &key).await.unwrap();

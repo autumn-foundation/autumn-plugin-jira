@@ -15,8 +15,8 @@ use crate::error::{JiraError, Op, Result};
 use crate::ids::CloudId;
 use crate::model::AccessibleResource;
 
-pub use direct::DirectBackend;
 pub use self::san_mateo::{SanMateoBackend, SanMateoTarget};
+pub use direct::DirectBackend;
 
 /// The characters that stay as they are in a path segment or a query
 /// value: the RFC 3986 unreserved set.
@@ -272,18 +272,36 @@ mod tests {
     #[test]
     fn resolve_cloud_id_picks_jira() {
         let list = [
-            resource(WIKI, "https://acme.atlassian.net", &["read:confluence-content.all"]),
+            resource(
+                WIKI,
+                "https://acme.atlassian.net",
+                &["read:confluence-content.all"],
+            ),
             resource(JIRA_A, "https://acme.atlassian.net", &["read:jira-work"]),
         ];
         assert_eq!(resolve_cloud_id(&list, None).unwrap().as_str(), JIRA_A);
-        let write_only = [resource(JIRA_B, "https://b.atlassian.net", &["write:jira-work"])];
-        assert_eq!(resolve_cloud_id(&write_only, None).unwrap().as_str(), JIRA_B);
-        let wiki_only = [resource(WIKI, "https://acme.atlassian.net", &["write:confluence-content"])];
+        let write_only = [resource(
+            JIRA_B,
+            "https://b.atlassian.net",
+            &["write:jira-work"],
+        )];
+        assert_eq!(
+            resolve_cloud_id(&write_only, None).unwrap().as_str(),
+            JIRA_B
+        );
+        let wiki_only = [resource(
+            WIKI,
+            "https://acme.atlassian.net",
+            &["write:confluence-content"],
+        )];
         assert!(matches!(
             resolve_cloud_id(&wiki_only, None),
             Err(JiraError::CloudId(_))
         ));
-        assert!(matches!(resolve_cloud_id(&[], None), Err(JiraError::CloudId(_))));
+        assert!(matches!(
+            resolve_cloud_id(&[], None),
+            Err(JiraError::CloudId(_))
+        ));
     }
 
     #[test]

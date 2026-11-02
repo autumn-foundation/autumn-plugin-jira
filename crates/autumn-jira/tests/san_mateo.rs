@@ -1,5 +1,7 @@
 //! `SanMateoBackend` over a san-mateo facade (AC4, spike S5).
 
+#![allow(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
+
 mod common;
 
 use std::sync::Arc;
@@ -37,7 +39,11 @@ async fn one_send_for_a_503_and_for_a_429() {
 
     // The spike: the san-mateo proxy itself.
     let get = san
-        .proxy(ENV, &key, ProxyRequest::get("/rest/api/3/myself").retries(0))
+        .proxy(
+            ENV,
+            &key,
+            ProxyRequest::get("/rest/api/3/myself").retries(0),
+        )
         .await
         .unwrap();
     assert_eq!(get.status, 503);
@@ -68,7 +74,11 @@ async fn one_send_for_a_503_and_for_a_429() {
     let sent = &transport.requests_to(CREATE)[1];
     assert_eq!(sent.header_value("content-type"), Some("application/json"));
     assert_eq!(sent.header_value("accept"), Some("application/json"));
-    assert!(sent.header_value("authorization").unwrap().starts_with("Basic "));
+    assert!(
+        sent.header_value("authorization")
+            .unwrap()
+            .starts_with("Basic ")
+    );
     assert_eq!(
         backend.info(),
         BackendInfo {

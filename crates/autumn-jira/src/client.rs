@@ -229,7 +229,11 @@ impl JiraClient {
     /// The typed errors of the call.
     pub async fn myself(&self) -> Result<User> {
         let user: User = self
-            .read(&ApiRequest::new(Op::Myself, Method::Get, format!("{API}/myself")))
+            .read(&ApiRequest::new(
+                Op::Myself,
+                Method::Get,
+                format!("{API}/myself"),
+            ))
             .await?;
         let _ = self.myself.set(user.account_id.clone());
         Ok(user)
@@ -245,7 +249,11 @@ impl JiraClient {
         self.myself
             .get_or_try_init(|| async {
                 let user: User = self
-                    .read(&ApiRequest::new(Op::Myself, Method::Get, format!("{API}/myself")))
+                    .read(&ApiRequest::new(
+                        Op::Myself,
+                        Method::Get,
+                        format!("{API}/myself"),
+                    ))
                     .await?;
                 Ok::<_, JiraError>(user.account_id)
             })
@@ -284,9 +292,13 @@ impl JiraClient {
     ///
     /// The typed errors of the call.
     pub async fn projects(&self, start_at: u64, max_results: u32) -> Result<Page<Project>> {
-        let request = ApiRequest::new(Op::ListProjects, Method::Get, format!("{API}/project/search"))
-            .query("startAt", start_at.to_string())
-            .query("maxResults", max_results.to_string());
+        let request = ApiRequest::new(
+            Op::ListProjects,
+            Method::Get,
+            format!("{API}/project/search"),
+        )
+        .query("startAt", start_at.to_string())
+        .query("maxResults", max_results.to_string());
         self.read(&request).await
     }
 
@@ -506,7 +518,11 @@ impl JiraClient {
     ///
     /// `OutcomeUnknown` with no marker after a lost reply. The typed errors
     /// of the call.
-    pub async fn add_comment(&self, issue: impl Into<IssueRef> + Send, body: &Adf) -> Result<Comment> {
+    pub async fn add_comment(
+        &self,
+        issue: impl Into<IssueRef> + Send,
+        body: &Adf,
+    ) -> Result<Comment> {
         let request = comment_request(&issue.into(), body);
         let reply = self.send_ok(OpClass::UnsafeWrite, &request).await?;
         decode(Op::AddComment, &reply.body)
@@ -557,7 +573,11 @@ impl JiraClient {
     /// # Errors
     ///
     /// The errors of [`SearchPager::next_page`].
-    pub async fn search_all(&self, request: SearchRequest, max_issues: usize) -> Result<Vec<Issue>> {
+    pub async fn search_all(
+        &self,
+        request: SearchRequest,
+        max_issues: usize,
+    ) -> Result<Vec<Issue>> {
         let mut pager = self.search(request);
         let mut out = Vec::new();
         while out.len() < max_issues {
@@ -633,7 +653,11 @@ impl JiraClient {
 }
 
 /// Returns the request of a transition.
-fn transition_request(issue: &IssueRef, id: &TransitionId, fields: &TransitionFields) -> ApiRequest {
+fn transition_request(
+    issue: &IssueRef,
+    id: &TransitionId,
+    fields: &TransitionFields,
+) -> ApiRequest {
     let path = format!("{}/transitions", issue_path(issue));
     ApiRequest::new(Op::DoTransition, Method::Post, path).json(&fields.to_body(id))
 }

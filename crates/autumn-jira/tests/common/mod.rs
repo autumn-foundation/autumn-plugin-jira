@@ -174,10 +174,8 @@ pub fn with_oauth(fake: FakeJira) -> FakeJira {
 
 /// A hook of a [`Scripted`] backend: it gets the request and the number
 /// of earlier requests. `Some` answers in place of the inner backend.
-pub type Hook = dyn Fn(&ApiRequest, usize) -> Option<Result<ApiResponse, BackendError>>
-    + Send
-    + Sync
-    + 'static;
+pub type Hook =
+    dyn Fn(&ApiRequest, usize) -> Option<Result<ApiResponse, BackendError>> + Send + Sync + 'static;
 
 /// A backend that answers some requests itself and sends the others to an
 /// inner backend. It records each request.

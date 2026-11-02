@@ -149,8 +149,7 @@ impl JiraClient {
     /// Returns the wait before the next attempt, or `None` when a
     /// `Retry-After` asks for more than `max_backoff_ms`.
     fn wait(&self, attempt: u32, retry_after: Option<Duration>) -> Option<Duration> {
-        let after_ms =
-            retry_after.map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        let after_ms = retry_after.map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
         let cap = self.settings.max_backoff_ms;
         let wait = policy::retry_wait_ms(attempt, self.settings.base_backoff_ms, cap, after_ms)?;
         let wait = if self.settings.jitter {
@@ -189,7 +188,10 @@ impl JiraClient {
             }
             Decision::Confirm => Next::Confirm(unknown_cause(&sent)),
             Decision::Unknown => {
-                tracing::warn!(op = op.name(), "jira: the outcome of a write is unknown; not sent again");
+                tracing::warn!(
+                    op = op.name(),
+                    "jira: the outcome of a write is unknown; not sent again"
+                );
                 Next::Fail(JiraError::OutcomeUnknown {
                     op,
                     cause: unknown_cause(&sent),
@@ -231,7 +233,11 @@ impl JiraClient {
 
     /// Runs one call and returns the reply. A `Confirm` (marked writes
     /// only) gives `OutcomeUnknown` with no marker.
-    pub(crate) async fn send_ok(&self, class: OpClass, request: &ApiRequest) -> Result<ApiResponse> {
+    pub(crate) async fn send_ok(
+        &self,
+        class: OpClass,
+        request: &ApiRequest,
+    ) -> Result<ApiResponse> {
         match self.run(class, request).await {
             Ok(Ended::Reply(reply)) => Ok(reply),
             Ok(Ended::Confirm(cause)) => Err(JiraError::OutcomeUnknown {

@@ -1,6 +1,8 @@
 //! Protocol cases of the client over `MemoryTransport` and `FakeJira`
 //! (AC2, AC3, AC6 decode cases).
 
+#![allow(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
+
 mod common;
 
 use std::sync::Arc;
@@ -18,7 +20,8 @@ use serde_json::json;
 const BASE: &str = "https://acme.atlassian.net/rest/api/3";
 
 fn memory_client(transport: &MemoryTransport) -> JiraClient {
-    JiraClient::api_token(site(), auth(), Arc::new(transport.clone())).with_settings(fast_settings())
+    JiraClient::api_token(site(), auth(), Arc::new(transport.clone()))
+        .with_settings(fast_settings())
 }
 
 fn key(text: &str) -> IssueKey {
@@ -43,7 +46,13 @@ async fn a_redirect_is_not_followed() {
     );
     let client = memory_client(&transport);
     let err = client.myself().await.unwrap_err();
-    assert_eq!(err, JiraError::Redirect { op: Op::Myself, status: 302 });
+    assert_eq!(
+        err,
+        JiraError::Redirect {
+            op: Op::Myself,
+            status: 302
+        }
+    );
     let sent = transport.requests();
     assert_eq!(sent.len(), 1);
     assert!(sent.iter().all(|r| !r.url.contains("evil.example")));
@@ -51,10 +60,19 @@ async fn a_redirect_is_not_followed() {
     // The fake: a redirect on a write is never sent again.
     let fake = FakeJira::new();
     fake.fault(FakeOp::CreateIssue, Fault::Redirect);
-    let err = api_token_client(&fake).create_issue(&task()).await.unwrap_err();
-    assert!(matches!(err, JiraError::Redirect { op: Op::CreateIssue, .. }));
+    let err = api_token_client(&fake)
+        .create_issue(&task())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        JiraError::Redirect {
+            op: Op::CreateIssue,
+            ..
+        }
+    ));
     assert_eq!(fake.count(FakeOp::CreateIssue), 1);
-    assert!(fake.issues().is_empty());
+    assert_eq!(fake.issues().len(), 0);
 }
 
 #[tokio::test]
@@ -62,20 +80,30 @@ async fn path_segments_are_encoded() {
     let transport = MemoryTransport::new();
     let url = format!("{BASE}/issue/OPS-1/properties/a%20b%2Fc%3Fd%23e");
     transport.reply("PUT", &url, HttpResponse::new(200, ""));
-    transport.reply("GET", &url, HttpResponse::json(200, &json!({"key": "a b/c?d#e", "value": 7})));
+    transport.reply(
+        "GET",
+        &url,
+        HttpResponse::json(200, &json!({"key": "a b/c?d#e", "value": 7})),
+    );
     let client = memory_client(&transport);
     client
         .set_issue_property(&key("OPS-1"), "a b/c?d#e", &json!(7))
         .await
         .unwrap();
-    let value = client.get_issue_property(&key("OPS-1"), "a b/c?d#e").await.unwrap();
+    let value = client
+        .get_issue_property(&key("OPS-1"), "a b/c?d#e")
+        .await
+        .unwrap();
     assert_eq!(value, Some(json!(7)));
     let sent = transport.requests();
     assert_eq!(sent.len(), 2);
     assert_eq!(sent[0].url, url);
     assert_eq!(sent[0].body, b"7");
     // Every URL starts with the one base URL.
-    assert!(sent.iter().all(|r| r.url.starts_with("https://acme.atlassian.net/rest/api/3/")));
+    assert!(
+        sent.iter()
+            .all(|r| r.url.starts_with("https://acme.atlassian.net/rest/api/3/"))
+    );
 }
 
 #[tokio::test]
@@ -92,7 +120,10 @@ async fn basic_header_is_sent() {
         data_encoding::BASE64.encode(format!("{DEFAULT_EMAIL}:{DEFAULT_API_TOKEN}").as_bytes())
     );
     let sent = transport.requests();
-    assert_eq!(sent[0].header_value("authorization"), Some(expected.as_str()));
+    assert_eq!(
+        sent[0].header_value("authorization"),
+        Some(expected.as_str())
+    );
     // The fake checks the same header.
     let fake = FakeJira::new();
     let me = api_token_client(&fake).myself().await.unwrap();
@@ -108,14 +139,22 @@ async fn unauthorized_is_not_retried() {
     let err = client.myself().await.unwrap_err();
     assert_eq!(
         err,
-        JiraError::Unauthorized { op: Op::Myself, status: 401, hint: SCOPE_HINT }
+        JiraError::Unauthorized {
+            op: Op::Myself,
+            status: 401,
+            hint: SCOPE_HINT
+        }
     );
     assert_eq!(fake.count(FakeOp::Myself), 1);
     assert!(err.to_string().contains("read:jira-work"));
     assert!(!err.to_string().contains("wrong-token"));
 
     let transport = MemoryTransport::new();
-    transport.reply("GET", &format!("{BASE}/myself"), HttpResponse::new(403, "no"));
+    transport.reply(
+        "GET",
+        &format!("{BASE}/myself"),
+        HttpResponse::new(403, "no"),
+    );
     let err = memory_client(&transport).myself().await.unwrap_err();
     assert!(matches!(err, JiraError::Unauthorized { status: 403, .. }));
     assert_eq!(transport.requests().len(), 1);
@@ -145,7 +184,10 @@ async fn moved_issue_key_is_kept() {
             &json!({"id": "10001", "key": "NEW-7", "fields": {"summary": "moved"}}),
         ),
     );
-    let issue = memory_client(&transport).get_issue(&key("OLD-1")).await.unwrap();
+    let issue = memory_client(&transport)
+        .get_issue(&key("OLD-1"))
+        .await
+        .unwrap();
     assert_eq!(issue.key.as_str(), "NEW-7");
     assert_eq!(issue.id.as_str(), "10001");
     assert!(transport.requests()[0].url.ends_with(
@@ -156,7 +198,8 @@ async fn moved_issue_key_is_kept() {
 #[tokio::test]
 async fn short_non_last_comment_page() {
     let url = format!("{BASE}/issue/OPS-1/comment");
-    let comment = |id: &str| json!({"id": id, "body": {"type": "doc", "version": 1, "content": []}});
+    let comment =
+        |id: &str| json!({"id": id, "body": {"type": "doc", "version": 1, "content": []}});
     // The first page is short but not the last: `total` says 3.
     let transport = MemoryTransport::new();
     let pages = [
@@ -166,7 +209,10 @@ async fn short_non_last_comment_page() {
     for page in &pages {
         transport.reply("GET", &url, HttpResponse::json(200, page));
     }
-    let comments = memory_client(&transport).all_comments(&key("OPS-1")).await.unwrap();
+    let comments = memory_client(&transport)
+        .all_comments(&key("OPS-1"))
+        .await
+        .unwrap();
     let ids: Vec<&str> = comments.iter().map(|c| c.id.as_str()).collect();
     assert_eq!(ids, ["1", "2", "3"]);
     let sent = transport.requests();
@@ -180,15 +226,30 @@ async fn short_non_last_comment_page() {
         &url,
         HttpResponse::json(200, &json!({"startAt": 0, "total": 9, "comments": []})),
     );
-    assert!(memory_client(&empty).all_comments(&key("OPS-1")).await.unwrap().is_empty());
+    assert_eq!(
+        memory_client(&empty)
+            .all_comments(&key("OPS-1"))
+            .await
+            .unwrap()
+            .len(),
+        0
+    );
     assert_eq!(empty.requests().len(), 1);
 }
 
 #[tokio::test]
 async fn empty_204_is_not_parsed_and_statuses_are_checked() {
     let transport = MemoryTransport::new();
-    transport.reply("PUT", &format!("{BASE}/issue/OPS-1"), HttpResponse::new(204, ""));
-    transport.reply("DELETE", &format!("{BASE}/issue/OPS-1"), HttpResponse::new(204, ""));
+    transport.reply(
+        "PUT",
+        &format!("{BASE}/issue/OPS-1"),
+        HttpResponse::new(204, ""),
+    );
+    transport.reply(
+        "DELETE",
+        &format!("{BASE}/issue/OPS-1"),
+        HttpResponse::new(204, ""),
+    );
     transport.reply(
         "POST",
         &format!("{BASE}/issue"),
@@ -196,7 +257,11 @@ async fn empty_204_is_not_parsed_and_statuses_are_checked() {
     );
     let client = memory_client(&transport);
     client
-        .edit_issue(&key("OPS-1"), &IssueEdit::new().set_summary("x"), EditOptions::default())
+        .edit_issue(
+            &key("OPS-1"),
+            &IssueEdit::new().set_summary("x"),
+            EditOptions::default(),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -205,8 +270,18 @@ async fn empty_204_is_not_parsed_and_statuses_are_checked() {
     );
     // Create expects 201. A 200 is not a success.
     let err = client.create_issue(&task()).await.unwrap_err();
-    assert_eq!(err, JiraError::UnexpectedStatus { op: Op::CreateIssue, status: 200 });
-    assert!(transport.requests()[1].url.ends_with("?deleteSubtasks=true"));
+    assert_eq!(
+        err,
+        JiraError::UnexpectedStatus {
+            op: Op::CreateIssue,
+            status: 200
+        }
+    );
+    assert!(
+        transport.requests()[1]
+            .url
+            .ends_with("?deleteSubtasks=true")
+    );
 }
 
 #[test]
@@ -214,7 +289,10 @@ fn debug_has_no_token() {
     let client = JiraClient::api_token(site(), auth(), Arc::new(MemoryTransport::new()));
     let text = format!("{client:?}");
     assert!(text.contains("acme.atlassian.net"), "{text}");
-    assert!(!text.contains(DEFAULT_API_TOKEN) && !text.contains(DEFAULT_EMAIL), "{text}");
+    assert!(
+        !text.contains(DEFAULT_API_TOKEN) && !text.contains(DEFAULT_EMAIL),
+        "{text}"
+    );
     assert_eq!(client.settings(), &ClientSettings::default());
     assert_eq!(client.info().site, "acme.atlassian.net");
 }

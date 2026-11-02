@@ -331,7 +331,10 @@ mod tests {
             message: s(),
         };
         let cases = [
-            (Error::Upstream(s()), BackendError::MaybeSent { code: "upstream" }),
+            (
+                Error::Upstream(s()),
+                BackendError::MaybeSent { code: "upstream" },
+            ),
             (
                 Error::UpstreamTooLarge,
                 BackendError::MaybeSent {
@@ -339,7 +342,10 @@ mod tests {
                 },
             ),
             (Error::Store(s()), not_sent(true, "store_error")),
-            (Error::RefreshCooldown, not_sent(true, "connection_refresh_backoff")),
+            (
+                Error::RefreshCooldown,
+                not_sent(true, "connection_refresh_backoff"),
+            ),
             (provider(None), not_sent(true, "provider")),
             (provider(Some(500)), not_sent(true, "provider")),
             (provider(Some(429)), not_sent(true, "provider")),
@@ -347,7 +353,12 @@ mod tests {
             (provider(Some(425)), not_sent(true, "provider")),
             (provider(Some(400)), not_sent(false, "provider")),
             (provider(Some(401)), not_sent(false, "provider")),
-            (Error::RefreshExhausted, BackendError::Auth { code: Error::RefreshExhausted.code() }),
+            (
+                Error::RefreshExhausted,
+                BackendError::Auth {
+                    code: Error::RefreshExhausted.code(),
+                },
+            ),
             (
                 Error::Unauthorized(s()),
                 BackendError::Auth {
@@ -377,7 +388,11 @@ mod tests {
             Error::Function(s()),
         ];
         for error in config {
-            assert_eq!(map_error(&error), not_sent(false, error.code()), "{error:?}");
+            assert_eq!(
+                map_error(&error),
+                not_sent(false, error.code()),
+                "{error:?}"
+            );
         }
     }
 
@@ -385,7 +400,10 @@ mod tests {
     fn prefix_by_provider() {
         let id = CloudId::parse("11111111-2222-4333-8444-555555555555").unwrap();
         assert_eq!(prefix_for(JIRA_BASIC, None).unwrap(), Some(String::new()));
-        assert_eq!(prefix_for(JIRA_BASIC, Some(&id)).unwrap(), Some(String::new()));
+        assert_eq!(
+            prefix_for(JIRA_BASIC, Some(&id)).unwrap(),
+            Some(String::new())
+        );
         assert_eq!(
             prefix_for(ATLASSIAN, Some(&id)).unwrap(),
             Some("/ex/jira/11111111-2222-4333-8444-555555555555".to_owned())

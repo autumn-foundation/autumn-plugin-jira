@@ -105,9 +105,9 @@ impl JiraBackend for DirectBackend {
 #[allow(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
 mod tests {
     use super::*;
+    use crate::backend::Method;
     use crate::error::Op;
     use crate::ids::SiteName;
-    use crate::backend::Method;
     use san_mateo::transport::HttpResponse;
     use san_mateo::{MemoryTransport, Secret};
 
@@ -129,7 +129,10 @@ mod tests {
                 TransportError::Connect("reset".to_owned()),
                 BackendError::MaybeSent { code: "connect" },
             ),
-            (TransportError::Timeout, BackendError::MaybeSent { code: "timeout" }),
+            (
+                TransportError::Timeout,
+                BackendError::MaybeSent { code: "timeout" },
+            ),
             (
                 TransportError::BodyTooLarge,
                 BackendError::MaybeSent {
@@ -170,7 +173,10 @@ mod tests {
         let get = ApiRequest::new(Op::GetIssue, Method::Get, "/rest/api/3/issue/OPS-1")
             .query("fields", "summary,status");
         let reply = b.send(get).await.unwrap();
-        assert_eq!((reply.status, reply.body.as_slice()), (503, b"busy".as_slice()));
+        assert_eq!(
+            (reply.status, reply.body.as_slice()),
+            (503, b"busy".as_slice())
+        );
         let post = ApiRequest::new(Op::CreateIssue, Method::Post, "/rest/api/3/issue")
             .json(&serde_json::json!({"fields": {}}));
         assert_eq!(
@@ -187,8 +193,16 @@ mod tests {
         assert_eq!(sent[0].header_value("authorization"), Some(basic.as_str()));
         assert_eq!(sent[0].header_value("accept"), Some("application/json"));
         assert_eq!(sent[0].header_value("content-type"), None);
-        assert!(sent[0].header_value("user-agent").unwrap().starts_with("autumn-jira/"));
-        assert_eq!(sent[1].header_value("content-type"), Some("application/json"));
+        assert!(
+            sent[0]
+                .header_value("user-agent")
+                .unwrap()
+                .starts_with("autumn-jira/")
+        );
+        assert_eq!(
+            sent[1].header_value("content-type"),
+            Some("application/json")
+        );
         assert_eq!(sent[1].body, br#"{"fields":{}}"#);
         assert_eq!(
             b.info(),

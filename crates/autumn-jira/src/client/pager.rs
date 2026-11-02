@@ -83,7 +83,10 @@ impl SearchPager {
             }
             PageStep::Limit => {
                 self.done = true;
-                Err(JiraError::PageLimit { op: Op::Search, max })
+                Err(JiraError::PageLimit {
+                    op: Op::Search,
+                    max,
+                })
             }
         }
     }

@@ -1,6 +1,8 @@
 //! Retry policy and unsafe writes (AC14, AC15). Every case runs on a
 //! paused tokio clock: no wall-clock sleep (F37).
 
+#![allow(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
+
 mod common;
 
 use std::sync::Arc;
@@ -10,9 +12,9 @@ use autumn_jira::backend::BackendError;
 use autumn_jira::error::{Op, UnknownCause};
 use autumn_jira::ids::TransitionId;
 use autumn_jira::request::{IssueTypeRef, TransitionFields};
+use autumn_jira::san_mateo::MemoryTransport;
 use autumn_jira::san_mateo::clock::Entropy;
 use autumn_jira::san_mateo::transport::HttpResponse;
-use autumn_jira::san_mateo::MemoryTransport;
 use autumn_jira::{Adf, IssueKey, JiraClient, JiraError, NewIssue, ProjectKey};
 use autumn_jira_fake::{FakeJira, FakeOp, Fault};
 use common::{Scripted, api_token_client, auth, direct, fast_settings, site};
@@ -44,7 +46,11 @@ impl Entropy for Fixed {
 }
 
 async fn issue(fake: &FakeJira) -> IssueKey {
-    api_token_client(fake).create_issue(&task("x")).await.unwrap().key
+    api_token_client(fake)
+        .create_issue(&task("x"))
+        .await
+        .unwrap()
+        .key
 }
 
 #[tokio::test(start_paused = true)]
@@ -82,7 +88,13 @@ async fn reads_retry_server_errors() {
         fake.fault(FakeOp::GetIssue, Fault::Status(502));
     }
     let err = client.get_issue(&key).await.unwrap_err();
-    assert_eq!(err, JiraError::Upstream { op: Op::GetIssue, status: 502 });
+    assert_eq!(
+        err,
+        JiraError::Upstream {
+            op: Op::GetIssue,
+            status: 502
+        }
+    );
     assert_eq!(fake.count(FakeOp::GetIssue), 13);
 }
 
@@ -126,8 +138,8 @@ async fn beta_retry_after_is_ignored() {
         MYSELF,
         HttpResponse::json(200, &serde_json::json!({"accountId": "a"})),
     );
-    let client =
-        JiraClient::api_token(site(), auth(), Arc::new(transport.clone())).with_settings(fast_settings());
+    let client = JiraClient::api_token(site(), auth(), Arc::new(transport.clone()))
+        .with_settings(fast_settings());
     let start = Instant::now();
     client.myself().await.unwrap();
     assert_eq!(ms(start), 50);
@@ -197,26 +209,38 @@ async fn not_sent_transient_is_retried() {
     let client = JiraClient::new(config.clone()).with_settings(fast_settings());
     assert_eq!(
         client.myself().await.unwrap_err(),
-        JiraError::Config { code: "unknown_connection" }
+        JiraError::Config {
+            code: "unknown_connection"
+        }
     );
     assert_eq!(config.requests().len(), 1);
     let auth = Scripted::new(Arc::new(direct(Arc::new(fake.clone()))), |_, _| {
-        Some(Err(BackendError::Auth { code: "connection_refresh_exhausted" }))
+        Some(Err(BackendError::Auth {
+            code: "connection_refresh_exhausted",
+        }))
     });
     let client = JiraClient::new(auth.clone()).with_settings(fast_settings());
     assert_eq!(
         client.myself().await.unwrap_err(),
-        JiraError::Auth { code: "connection_refresh_exhausted" }
+        JiraError::Auth {
+            code: "connection_refresh_exhausted"
+        }
     );
     assert_eq!(auth.requests().len(), 1);
     // Out of attempts after "not sent": a network error.
     let always = Scripted::new(Arc::new(direct(Arc::new(fake))), |_, _| {
-        Some(Err(BackendError::NotSent { transient: true, code: "store_error" }))
+        Some(Err(BackendError::NotSent {
+            transient: true,
+            code: "store_error",
+        }))
     });
     let client = JiraClient::new(always.clone()).with_settings(fast_settings());
     assert_eq!(
         client.myself().await.unwrap_err(),
-        JiraError::Network { op: Op::Myself, code: "store_error" }
+        JiraError::Network {
+            op: Op::Myself,
+            code: "store_error"
+        }
     );
     assert_eq!(always.requests().len(), 5);
 }
@@ -225,7 +249,10 @@ async fn not_sent_transient_is_retried() {
 async fn plain_create_is_sent_once_after_503() {
     let fake = FakeJira::new();
     fake.fault(FakeOp::CreateIssue, Fault::StatusAfterCommit(503));
-    let err = api_token_client(&fake).create_issue(&task("a")).await.unwrap_err();
+    let err = api_token_client(&fake)
+        .create_issue(&task("a"))
+        .await
+        .unwrap_err();
     assert_eq!(
         err,
         JiraError::OutcomeUnknown {
@@ -244,16 +271,30 @@ async fn plain_create_is_sent_once_after_503() {
 async fn plain_create_is_sent_once_after_a_reset() {
     let fake = FakeJira::new();
     fake.fault(FakeOp::CreateIssue, Fault::NetworkAfterCommit);
-    let err = api_token_client(&fake).create_issue(&task("a")).await.unwrap_err();
+    let err = api_token_client(&fake)
+        .create_issue(&task("a"))
+        .await
+        .unwrap_err();
     assert!(matches!(
         err,
-        JiraError::OutcomeUnknown { cause: UnknownCause::Network, marker: None, .. }
+        JiraError::OutcomeUnknown {
+            cause: UnknownCause::Network,
+            marker: None,
+            ..
+        }
     ));
     fake.fault(FakeOp::CreateIssue, Fault::Timeout);
-    let err = api_token_client(&fake).create_issue(&task("b")).await.unwrap_err();
+    let err = api_token_client(&fake)
+        .create_issue(&task("b"))
+        .await
+        .unwrap_err();
     assert!(matches!(
         err,
-        JiraError::OutcomeUnknown { cause: UnknownCause::Timeout, marker: None, .. }
+        JiraError::OutcomeUnknown {
+            cause: UnknownCause::Timeout,
+            marker: None,
+            ..
+        }
     ));
     assert_eq!(fake.count(FakeOp::CreateIssue), 2);
     assert_eq!(fake.issues().len(), 1);
@@ -263,10 +304,19 @@ async fn plain_create_is_sent_once_after_a_reset() {
 async fn plain_create_is_not_retried_after_429() {
     let fake = FakeJira::new();
     fake.rate_limit(FakeOp::CreateIssue, 1, 1);
-    let err = api_token_client(&fake).create_issue(&task("a")).await.unwrap_err();
-    assert!(matches!(err, JiraError::RateLimited { op: Op::CreateIssue, .. }));
+    let err = api_token_client(&fake)
+        .create_issue(&task("a"))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        JiraError::RateLimited {
+            op: Op::CreateIssue,
+            ..
+        }
+    ));
     assert_eq!(fake.count(FakeOp::CreateIssue), 1);
-    assert!(fake.issues().is_empty());
+    assert_eq!(fake.issues().len(), 0);
 }
 
 #[tokio::test(start_paused = true)]
@@ -276,21 +326,42 @@ async fn plain_transition_is_sent_once() {
     let client = api_token_client(&fake);
     fake.fault(FakeOp::DoTransition, Fault::StatusAfterCommit(503));
     let err = client
-        .transition(&key, &TransitionId::parse("21").unwrap(), &TransitionFields::default())
+        .transition(
+            &key,
+            &TransitionId::parse("21").unwrap(),
+            &TransitionFields::default(),
+        )
         .await
         .unwrap_err();
     assert!(matches!(
         err,
-        JiraError::OutcomeUnknown { op: Op::DoTransition, marker: None, .. }
+        JiraError::OutcomeUnknown {
+            op: Op::DoTransition,
+            marker: None,
+            ..
+        }
     ));
     assert_eq!(fake.count(FakeOp::DoTransition), 1);
     // A plain comment: the same rule.
     fake.fault(FakeOp::AddComment, Fault::StatusAfterCommit(502));
-    let err = client.add_comment(&key, &Adf::text("hi")).await.unwrap_err();
+    let err = client
+        .add_comment(&key, &Adf::text("hi"))
+        .await
+        .unwrap_err();
     assert!(matches!(
         err,
-        JiraError::OutcomeUnknown { op: Op::AddComment, marker: None, .. }
+        JiraError::OutcomeUnknown {
+            op: Op::AddComment,
+            marker: None,
+            ..
+        }
     ));
     assert_eq!(fake.count(FakeOp::AddComment), 1);
-    assert_eq!(fake.snapshot()["issues"][0]["comments"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        fake.snapshot()["issues"][0]["comments"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
 }
