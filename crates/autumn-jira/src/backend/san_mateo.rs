@@ -323,6 +323,44 @@ mod tests {
     }
 
     #[test]
+    fn a_send_error_of_the_transport_is_maybe_sent() {
+        // san-mateo wraps a transport `Invalid` in this text. A reqwest
+        // send error ("error sending request") can come after Jira has the
+        // whole request.
+        let wrap = |m: &str| Error::Invalid(format!("the upstream request is not valid: {m}"));
+        for sent in [
+            "error sending request",
+            "request or response body error",
+            "",
+        ] {
+            assert_eq!(
+                map_error(&wrap(sent)),
+                BackendError::MaybeSent { code: "send_error" },
+                "{sent}"
+            );
+        }
+        // The checks before the send stay "not sent".
+        for local in [
+            "bad HTTP method",
+            "bad URL",
+            "bad header name",
+            "bad header value",
+            "builder error",
+        ] {
+            assert_eq!(
+                map_error(&wrap(local)),
+                not_sent(false, "invalid_body"),
+                "{local}"
+            );
+        }
+        // Another `Invalid` of san-mateo is a check before the send.
+        assert_eq!(
+            map_error(&Error::Invalid("the path is not valid".to_owned())),
+            not_sent(false, "invalid_body")
+        );
+    }
+
+    #[test]
     fn error_map_covers_every_variant() {
         let s = || "x".to_owned();
         let provider = |status: Option<u16>| Error::Provider {

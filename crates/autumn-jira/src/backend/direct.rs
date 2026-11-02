@@ -153,6 +153,35 @@ mod tests {
     }
 
     #[test]
+    fn only_a_check_before_the_send_is_not_sent() {
+        // `ReqwestTransport` gives these texts before the request leaves.
+        for local in [
+            "bad HTTP method",
+            "bad URL",
+            "bad header name",
+            "bad header value",
+            "builder error",
+        ] {
+            assert_eq!(
+                map_transport_error(&TransportError::Invalid(local.to_owned())),
+                BackendError::NotSent {
+                    transient: false,
+                    code: "invalid_request",
+                },
+                "{local}"
+            );
+        }
+        // A reqwest send error can come after Jira has the request.
+        for sent in ["error sending request", "request or response body error"] {
+            assert_eq!(
+                map_transport_error(&TransportError::Invalid(sent.to_owned())),
+                BackendError::MaybeSent { code: "send_error" },
+                "{sent}"
+            );
+        }
+    }
+
+    #[test]
     fn debug_hides_the_token() {
         let text = format!("{:?}", backend(&MemoryTransport::new()));
         assert!(text.contains("acme.atlassian.net"), "{text}");

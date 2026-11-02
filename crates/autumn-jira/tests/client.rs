@@ -351,3 +351,98 @@ fn debug_has_no_token() {
     assert_eq!(client.settings(), &ClientSettings::default());
     assert_eq!(client.info().site, "acme.atlassian.net");
 }
+
+/// Starts a server on 127.0.0.1 that reads each request in full. It gives
+/// an empty search page, and it drops the socket after a create POST, with
+/// no reply. Returns `http://127.0.0.1:<port>`.
+fn reset_after_write_server() -> String {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { return };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut head = String::new();
+            let mut length = 0_usize;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                    break;
+                }
+                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = v.trim().parse().unwrap_or(0);
+                }
+                head.push_str(&line);
+            }
+            let mut body = vec![0_u8; length];
+            let _ = reader.read_exact(&mut body);
+            if head.starts_with("POST /rest/api/3/issue ") {
+                // Jira has the whole request. The reply is lost.
+                drop(stream);
+                continue;
+            }
+            let page = br#"{"issues":[],"isLast":true}"#;
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                page.len()
+            );
+            let _ = stream.write_all(reply.as_bytes());
+            let _ = stream.write_all(page);
+        }
+    });
+    base
+}
+
+/// `ReqwestTransport` with the Jira host replaced by a local server.
+struct ToLocal {
+    inner: autumn_jira::san_mateo::ReqwestTransport,
+    base: String,
+}
+
+#[async_trait::async_trait]
+impl autumn_jira::san_mateo::transport::HttpTransport for ToLocal {
+    async fn send(
+        &self,
+        mut request: autumn_jira::san_mateo::transport::HttpRequest,
+    ) -> Result<HttpResponse, autumn_jira::san_mateo::transport::TransportError> {
+        request.url = request
+            .url
+            .replace("https://acme.atlassian.net", &self.base);
+        self.inner.send(request).await
+    }
+}
+
+#[tokio::test]
+async fn reset_after_write_is_maybe_sent() {
+    use autumn_jira::backend::{ApiRequest, BackendError, JiraBackend, Method};
+    use autumn_jira::san_mateo::transport::TransportConfig;
+    let inner = autumn_jira::san_mateo::ReqwestTransport::new(TransportConfig::default()).unwrap();
+    let local = Arc::new(ToLocal {
+        inner,
+        base: reset_after_write_server(),
+    });
+    let backend = common::direct(local.clone());
+    let post = ApiRequest::new(Op::CreateIssue, Method::Post, "/rest/api/3/issue")
+        .json(&json!({"fields": {}}));
+    let err = backend.send(post).await.unwrap_err();
+    assert!(matches!(err, BackendError::MaybeSent { .. }), "{err:?}");
+    // The idempotent create looks up the marker and does not say "not sent".
+    let client = JiraClient::new(Arc::new(backend)).with_settings(fast_settings());
+    let k = autumn_jira::IdempotencyKey::derive(&["reset"]);
+    let err = client
+        .create_issue_idempotent(&task(), &k)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            JiraError::OutcomeUnknown {
+                marker: Some(_),
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    assert!(err.may_have_run());
+}
