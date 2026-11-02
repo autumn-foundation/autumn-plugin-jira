@@ -19,6 +19,7 @@ use autumn_harvest::migrate;
 use autumn_harvest::pool::{DbRole, EngineDbTimeouts, engine_pool};
 use autumn_harvest::prelude::{ExecutionId, WorkflowHandleClient};
 use autumn_harvest::worker::DbPool;
+use autumn_jira::client::ClientSettings;
 use autumn_jira::ids::{SiteName, WebhookDeliveryId};
 use autumn_jira::request::IssueTypeRef;
 use autumn_jira::san_mateo::Secret;
@@ -156,7 +157,12 @@ async fn start_run(
 }
 
 fn bridge(pool: DbPool, fake: &FakeJira) -> HarvestSignalBridge {
-    HarvestSignalBridge::new(pool, client(fake), route_key()).allow_workflow(WORKFLOW)
+    // Short retry waits: a test must not wait for the default backoff.
+    let mut settings = ClientSettings::default();
+    settings.base_backoff_ms = 50;
+    settings.jitter = false;
+    let client = client(fake).with_settings(settings);
+    HarvestSignalBridge::new(pool, client, route_key()).allow_workflow(WORKFLOW)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

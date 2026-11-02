@@ -580,6 +580,8 @@ async fn maybe_sent_attempt_looks_up_only() {
 
     // The same rule for a comment.
     let key = human_issue(&fake, "Printer").await;
+    // The person's issue is one create POST.
+    let posts = fake.count(FakeOp::CreateIssue);
     let comment = AddCommentInput::new(key_ref(&key), "Fixed it");
     let ctx = retry_of(&first, 2, Some(pending.clone()));
     let failure = comment.run(&client, &ctx).await.unwrap_err();
@@ -599,7 +601,7 @@ async fn maybe_sent_attempt_looks_up_only() {
         autumn_jira_harvest::previous_attempt(&next),
         autumn_jira::policy::Previous::MaybeSent
     );
-    assert_eq!(fake.count(FakeOp::CreateIssue), 0);
+    assert_eq!(fake.count(FakeOp::CreateIssue), posts);
 
     // A found write needs no POST.
     let made = input.run(&client, &first).await.unwrap();
@@ -608,7 +610,7 @@ async fn maybe_sent_attempt_looks_up_only() {
     let found = input.run(&client, &ctx).await.unwrap();
     assert_eq!(found.outcome, CreateKind::Found);
     assert_eq!(found.id, made.id);
-    assert_eq!(fake.count(FakeOp::CreateIssue), 1);
+    assert_eq!(fake.count(FakeOp::CreateIssue), posts + 1);
 }
 
 #[tokio::test(start_paused = true)]

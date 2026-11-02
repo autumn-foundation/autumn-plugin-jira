@@ -466,17 +466,22 @@ async fn run(url: &str, fake: FakeJira) -> Result<Value, BoxError> {
     let h = Harness::start(url, fake).await?;
     let result = async {
         let first = lifecycle(&h).await?;
+        // The counts of run 1, before run 2 makes its own issue.
+        let counts = json!({
+            "create_posts": h.fake.count(FakeOp::CreateIssue),
+            "comment_posts": h.fake.count(FakeOp::AddComment),
+        });
         let second = watch(&h).await?;
-        Ok::<_, BoxError>((first, second))
+        Ok::<_, BoxError>((first, counts, second))
     }
     .await;
-    let summary = result.map(|(first, second)| summarize(&first, &second, &h));
+    let summary = result.map(|(first, counts, second)| summarize(&first, &counts, &second, &h));
     h.stop().await?;
     summary
 }
 
 /// The values that `check` compares.
-fn summarize(first: &Value, second: &Value, h: &Harness) -> Value {
+fn summarize(first: &Value, counts: &Value, second: &Value, h: &Harness) -> Value {
     let wait = |w: &Value| match w.get("Reached") {
         Some(r) => json!({"status": r["status"]["name"], "source": r["source"]}),
         None => json!({"timed_out": w}),
@@ -490,10 +495,10 @@ fn summarize(first: &Value, second: &Value, h: &Harness) -> Value {
             "wait": wait(&first["wait"]),
             "comment": first["comment"]["outcome"],
         },
-        "create_posts": h.fake.count(FakeOp::CreateIssue),
+        "create_posts": counts["create_posts"],
         "issues_with_the_summary": h.fake.issues().iter()
             .filter(|i| i["fields"]["summary"] == "Disk full on db-1").count(),
-        "comment_posts": h.fake.count(FakeOp::AddComment),
+        "comment_posts": counts["comment_posts"],
         "bridge_signalled": counters.signalled > 0,
         "bridge_bad_tags": counters.bad_tag,
         "watch": wait(&second["wait"]),

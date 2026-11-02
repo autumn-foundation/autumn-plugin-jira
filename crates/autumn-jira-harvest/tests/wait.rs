@@ -576,6 +576,7 @@ mod human {
         })
         .unwrap();
         let env = WorkflowTestEnv::new()
+            .with_workflow_id("watch:OPS-1")
             .mock_activity("jira_watch_issue", watch)
             .mock_activity(GET_ISSUE, read);
         let handler = watch_and_wait_info().handler;
@@ -600,7 +601,14 @@ mod human {
             matches!(report.status, ReplayStatus::ReplaySucceeded),
             "{report}"
         );
-        assert_replays_with_the_clock_off_as("watch_and_wait", handler, outcome.events().to_vec())
+        let report = WorkflowReplayer::new()
+            .with_workflow_id("watch:OPS-1")
+            .register_fn("watch_and_wait", handler)
+            .replay_from_events(outcome.events().to_vec())
             .await;
+        assert!(
+            matches!(report.status, ReplayStatus::ReplaySucceeded),
+            "{report}"
+        );
     }
 }

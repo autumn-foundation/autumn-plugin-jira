@@ -54,48 +54,13 @@ const RATE_LIMITED_ERROR: &str = "jira.rate_limited";
 /// The `jira.<code>` of a network error.
 const NETWORK_ERROR: &str = "jira.network";
 
-/// The codes of a `JiraError::Network` that did not leave this process.
-///
-/// The client gives `Network` after the last attempt of a
-/// `BackendError::NotSent { transient: true }` or a `MaybeSent`. Only these
-/// codes come from `NotSent` (plan 4.4: the san-mateo `Store`,
-/// `RefreshCooldown` and `Provider` errors). Any other code, also a new one,
-/// counts as "maybe sent". That is the safe side for a write.
-const NOT_SENT_NETWORK_CODES: [&str; 3] = ["store_error", "connection_refresh_backoff", "provider"];
-
-/// Returns `false` only when the request cannot have run in Jira.
-///
-/// Nothing is sent for an input, a config, an auth or a cloud id error. A
-/// 4xx reply and a 429 reply say that Jira did not do the write. A
-/// `Network` error with a code of [`NOT_SENT_NETWORK_CODES`] did not leave
-/// this process. Every other error, also a future variant, gives `true`.
-fn was_sent(err: &JiraError) -> bool {
-    match err {
-        JiraError::InvalidInput { .. }
-        | JiraError::Config { .. }
-        | JiraError::Auth { .. }
-        | JiraError::CloudId(_)
-        | JiraError::NotFoundOrForbidden { .. }
-        | JiraError::Unauthorized { .. }
-        | JiraError::CaptchaRequired { .. }
-        | JiraError::Validation { .. }
-        | JiraError::Conflict { .. }
-        | JiraError::Gone { .. }
-        | JiraError::PayloadTooLarge { .. }
-        | JiraError::RateLimited { .. }
-        | JiraError::TransitionNotAvailable { .. }
-        | JiraError::LabelsNotOnScreen { .. } => false,
-        JiraError::Network { code, .. } => !NOT_SENT_NETWORK_CODES.contains(code),
-        _ => true,
-    }
-}
-
 /// "jira.<code>"; retryable iff err.is_retryable(); RateLimited -> with_retry_after;
 /// OutcomeUnknown with marker -> with_retry_after(SETTLE_SECS); details {code, status, sent}.
 ///
 /// The message is the `Display` text of the error. It has no body, no Jira
-/// message and no secret (plan 4.6). `sent` is `false` only when the request
-/// cannot have run in Jira; [`previous_attempt`] reads it.
+/// message and no secret (plan 4.6). `sent` is
+/// [`JiraError::may_have_run`]: `false` only when the request cannot have
+/// run in Jira. [`previous_attempt`] reads it.
 #[must_use]
 pub fn failure_for(err: &JiraError) -> ActivityFailure {
     let code = err.code();
@@ -106,7 +71,7 @@ pub fn failure_for(err: &JiraError) -> ActivityFailure {
     } else {
         ActivityFailure::non_retryable(error_type, message)
     }
-    .with_details(json!({"code": code, "status": err.status(), "sent": was_sent(err)}));
+    .with_details(json!({"code": code, "status": err.status(), "sent": err.may_have_run()}));
     match err {
         JiraError::RateLimited {
             retry_after: Some(wait),

@@ -15,13 +15,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use autumn_harvest::HarvestError;
+use autumn_harvest::erase::is_terminal_state;
+use autumn_harvest::resolve_execution_id_by_workflow_id;
+use autumn_harvest::signal::send_signal_idempotent;
 use autumn_harvest::worker::DbPool;
 use autumn_jira::{Delivery, EventSink, HandlerError, JiraClient, JiraEvent};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::route::{RouteKey, SignalRoute};
-use crate::wait::SIGNAL;
+use crate::route::{ROUTES_PROPERTY, RouteKey, SignalRoute, TRACKED_LABEL};
+use crate::wait::{IssueSignal, SIGNAL};
 
 /// The result of one route of one delivery.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -156,17 +159,147 @@ impl HarvestSignalBridge {
     /// retryable Jira error. `HandlerError::Permanent` for another Jira
     /// error of the property read.
     pub async fn route(&self, delivery: &Delivery) -> Result<Vec<RouteOutcome>, HandlerError> {
-        let _ = (delivery, SIGNAL, &self.pool);
-        Ok(Vec::new())
+        bump(&self.counters.deliveries);
+        let result = self.route_inner(delivery).await;
+        match &result {
+            Ok(outcomes) if outcomes.is_empty() => bump(&self.counters.skipped),
+            Ok(outcomes) => {
+                for outcome in outcomes {
+                    bump(self.counter(*outcome));
+                }
+            }
+            Err(HandlerError::Transient(_)) => bump(&self.counters.transient),
+            Err(_) => {}
+        }
+        result
     }
+
+    /// The counter of one route outcome.
+    fn counter(&self, outcome: RouteOutcome) -> &AtomicU64 {
+        let c = &self.counters;
+        match outcome {
+            RouteOutcome::Signalled => &c.signalled,
+            RouteOutcome::Duplicate => &c.duplicate,
+            RouteOutcome::NoRun => &c.no_run,
+            RouteOutcome::Finished => &c.finished,
+            RouteOutcome::NotAllowed => &c.not_allowed,
+            RouteOutcome::BadTag => &c.bad_tag,
+        }
+    }
+
+    /// Steps 1 to 6 of plan 9.4.
+    async fn route_inner(&self, delivery: &Delivery) -> Result<Vec<RouteOutcome>, HandlerError> {
+        let event = &delivery.event;
+        let Some(issue) = event.issue().filter(|_| wants(event)) else {
+            return Ok(Vec::new());
+        };
+        // A payload with labels and no tracked label: nothing to read.
+        if issue
+            .fields
+            .labels
+            .as_ref()
+            .is_some_and(|labels| !labels.iter().any(|l| l == TRACKED_LABEL))
+        {
+            return Ok(Vec::new());
+        }
+        let Some(property) = self
+            .client
+            .get_issue_property(issue.id.clone(), ROUTES_PROPERTY)
+            .await?
+        else {
+            return Ok(Vec::new());
+        };
+        let signal = IssueSignal {
+            delivery_id: delivery.meta.id.clone(),
+            event: event.name().to_owned(),
+            issue_id: issue.id.clone(),
+            issue_key: issue.key.clone(),
+            status: issue.fields.status.clone(),
+            timestamp_ms: delivery.timestamp.map(|t| t.epoch_ms()),
+        };
+        let payload = serde_json::to_value(&signal)
+            .map_err(|_| HandlerError::permanent("the signal payload does not encode"))?;
+        let mut outcomes = Vec::new();
+        for (route, checked) in routes_from_property(&property, &self.key, &self.allowed) {
+            let outcome = match checked {
+                RouteOutcome::Signalled => self.signal(&route, &payload, &signal).await?,
+                RouteOutcome::BadTag => {
+                    tracing::warn!(
+                        issue_id = %issue.id,
+                        "jira bridge: a route tag does not verify; no signal"
+                    );
+                    RouteOutcome::BadTag
+                }
+                other => other,
+            };
+            outcomes.push(outcome);
+        }
+        Ok(outcomes)
+    }
+
+    /// Steps 5 and 6: resolve the run and send the signal once for the
+    /// delivery id.
+    async fn signal(
+        &self,
+        route: &SignalRoute,
+        payload: &Value,
+        signal: &IssueSignal,
+    ) -> Result<RouteOutcome, HandlerError> {
+        let mut conn = self.pool.get().await.map_err(|_| {
+            HandlerError::transient("jira bridge: the harvest database pool has no connection")
+        })?;
+        let run = match resolve_execution_id_by_workflow_id(
+            &mut conn,
+            &route.workflow_name,
+            &route.workflow_id,
+        )
+        .await
+        {
+            Ok(Some(run)) => run,
+            Ok(None) => return Ok(RouteOutcome::NoRun),
+            Err(error) => return error_outcome(&error),
+        };
+        if is_terminal_state(&run.state) {
+            return Ok(RouteOutcome::Finished);
+        }
+        match send_signal_idempotent(
+            &mut conn,
+            run.exec_id,
+            SIGNAL,
+            payload.clone(),
+            Some(signal.delivery_id.as_str()),
+        )
+        .await
+        {
+            Ok(true) => Ok(RouteOutcome::Signalled),
+            Ok(false) => Ok(RouteOutcome::Duplicate),
+            Err(error) => error_outcome(&error),
+        }
+    }
+}
+
+/// Adds one to a counter.
+fn bump(counter: &AtomicU64) {
+    counter.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Maps a harvest error of one route to its outcome (plan 9.4 step 7, W19,
 /// B4). A run that cannot take a signal is finished: 200. A database, pool
 /// or shard error is transient: 503, so Jira sends the delivery again.
 fn error_outcome(error: &HarvestError) -> Result<RouteOutcome, HandlerError> {
-    let _ = error;
-    Ok(RouteOutcome::Finished)
+    match error {
+        HarvestError::Config(_) | HarvestError::Cancelled(_) | HarvestError::NotFound(_) => {
+            Ok(RouteOutcome::Finished)
+        }
+        // The message names the class only: a database error can hold a
+        // host name or SQL text.
+        HarvestError::ShardUnavailable { .. } => Err(HandlerError::transient(
+            "jira bridge: the harvest shard is not available",
+        )),
+        _ => Err(HandlerError::transient(
+            "jira bridge: the harvest database call failed",
+        )),
+    }
 }
 
 #[async_trait]

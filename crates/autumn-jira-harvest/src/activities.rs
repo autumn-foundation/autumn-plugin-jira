@@ -19,16 +19,27 @@ use autumn_harvest::failure::ActivityFailure;
 use autumn_harvest::info::ActivityInfo;
 use autumn_harvest::policy::RetryPolicy;
 use autumn_harvest::prelude::activity;
-use autumn_jira::ids::{CommentId, FieldId, TransitionId};
-use autumn_jira::model::{IssueSummary, StatusSummary};
-use autumn_jira::request::IssueTypeRef;
-use autumn_jira::{AccountId, IssueId, IssueKey, IssueRef, JiraClient, ProjectKey, StatusTarget};
+use autumn_jira::client::{CommentOutcome, CreateOutcome, DeleteOutcome, TransitionOutcome};
+use autumn_jira::error::Op;
+use autumn_jira::ids::{CommentId, FieldId, PageToken, TransitionId};
+use autumn_jira::model::{IssueRefs, IssueSummary, StatusSummary};
+use autumn_jira::policy::{Previous, host_may_send};
+use autumn_jira::request::{
+    EditOptions, FieldSet, IssueEdit, IssueTypeRef, SearchRequest, TransitionFields,
+};
+use autumn_jira::{
+    AccountId, Adf, IdempotencyKey, IssueId, IssueKey, IssueRef, JiraClient, JiraError, Jql,
+    NewIssue, ProjectKey, StatusTarget,
+};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::clients::{ClientRef, client_for};
-use crate::failure::config_failure;
-use crate::route::SignalRoute;
+use crate::failure::{
+    OUTCOME_PENDING_ERROR, OUTCOME_UNKNOWN_ERROR, SETTLE_SECS, config_failure, failure_for,
+    previous_attempt,
+};
+use crate::route::{ROUTES_PROPERTY, RouteKey, SignalRoute, TRACKED_LABEL};
 
 /// The name of the activity that reads one issue.
 pub const GET_ISSUE: &str = "jira_get_issue";
@@ -48,6 +59,114 @@ pub const LONG_WRITE_START_TO_CLOSE: Duration = Duration::from_secs(720);
 #[must_use]
 pub fn get_issue_retry() -> RetryPolicy {
     RetryPolicy::exponential(5, Duration::from_secs(1))
+}
+
+/// The fields that `jira_watch_issue` reads.
+const WATCH_FIELDS: [&str; 4] = ["summary", "status", "labels", "updated"];
+
+/// The Jira idempotency key of this activity. It is the same for each
+/// attempt [V].
+fn activity_key(ctx: &ActivityContext) -> Result<IdempotencyKey, ActivityFailure> {
+    let key = ctx
+        .idempotency_key()
+        .map_err(|_| config_failure("the activity context has no idempotency key"))?;
+    Ok(IdempotencyKey::parse(key.as_str())
+        .unwrap_or_else(|_| IdempotencyKey::derive(&[key.as_str()])))
+}
+
+/// The route key of the worker state.
+fn route_key(ctx: &ActivityContext) -> Result<&RouteKey, ActivityFailure> {
+    ctx.state::<RouteKey>()
+        .ok_or_else(|| config_failure("the harvest state has no RouteKey for a route"))
+}
+
+/// The settle delay: `settle_secs`, else [`SETTLE_SECS`].
+fn settle(settle_secs: Option<u64>) -> Duration {
+    Duration::from_secs(settle_secs.unwrap_or(SETTLE_SECS))
+}
+
+/// The details of a failure after an attempt that can have sent a write.
+fn maybe_sent_details(code: &str, status: Option<u16>) -> Value {
+    json!({"code": code, "status": status, "sent": true})
+}
+
+/// The failure of a negative lookup after an attempt that can have sent
+/// the write. It is not retryable: a resend can make a duplicate.
+fn negative_lookup() -> ActivityFailure {
+    ActivityFailure::non_retryable(
+        OUTCOME_UNKNOWN_ERROR,
+        "the write can have run, and the marker lookup found nothing; set \
+         resend_after_negative_lookup to send it again (ADR 0003)",
+    )
+    .with_details(maybe_sent_details("outcome_unknown", None))
+}
+
+/// The failure of a lookup that failed after an attempt that can have sent
+/// the write. A retryable failure stays `jira.outcome_pending`, so the next
+/// attempt also looks up only.
+fn lookup_failure(error: &JiraError, settle: Duration) -> ActivityFailure {
+    if !error.is_retryable() {
+        return failure_for(error);
+    }
+    ActivityFailure::retryable(
+        OUTCOME_PENDING_ERROR,
+        format!("the write can have run, and the marker lookup failed: {error}"),
+    )
+    .with_details(maybe_sent_details(error.code(), error.status()))
+    .with_retry_after(settle)
+}
+
+/// The failure of a marked write. `jira.outcome_pending` gets the settle
+/// delay of the input.
+fn send_failure(error: &JiraError, settle: Duration) -> ActivityFailure {
+    let failure = failure_for(error);
+    if failure.error_type == OUTCOME_PENDING_ERROR {
+        failure.with_retry_after(settle)
+    } else {
+        failure
+    }
+}
+
+/// The field set of an input: the default set for `None`.
+fn field_set(fields: Option<&[FieldId]>) -> FieldSet {
+    fields.map_or_else(FieldSet::default, |list| {
+        FieldSet::new(list.iter().cloned())
+    })
+}
+
+/// Merges `route` into the route property. `None` when the property has
+/// the entry already, so no PUT is needed. An entry of the same run with
+/// another tag is replaced. Other entries stay.
+fn merge_route(current: Option<&Value>, route: &SignalRoute, key: &RouteKey) -> Option<Value> {
+    let entry = route.property_entry(key);
+    let mut entries: Vec<Value> = current
+        .and_then(|value| value.get("routes"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if entries.contains(&entry) {
+        return None;
+    }
+    let same_run = |e: &Value| {
+        e.get("wf").and_then(Value::as_str) == Some(route.workflow_name.as_str())
+            && e.get("id").and_then(Value::as_str) == Some(route.workflow_id.as_str())
+    };
+    let mut replaced = false;
+    entries.retain_mut(|e| {
+        if !same_run(e) {
+            return true;
+        }
+        if replaced {
+            return false;
+        }
+        e.clone_from(&entry);
+        replaced = true;
+        true
+    });
+    if !replaced {
+        entries.push(entry);
+    }
+    Some(json!({"routes": entries}))
 }
 
 /// Which way a marked write ended.
@@ -146,8 +265,63 @@ impl CreateIssueInput {
         client: &JiraClient,
         ctx: &ActivityContext,
     ) -> Result<CreateIssueOutput, ActivityFailure> {
-        let _ = (client, ctx);
-        Err(config_failure("not yet"))
+        let key = activity_key(ctx)?;
+        let issue = self.new_issue(ctx)?;
+        let settle = settle(self.settle_secs);
+        if !host_may_send(previous_attempt(ctx), self.resend_after_negative_lookup) {
+            return match client.find_by_idempotency_key(&self.project, &key).await {
+                Ok(Some(found)) => Ok(CreateIssueOutput::found(found)),
+                Ok(None) => Err(negative_lookup()),
+                Err(e) => Err(lookup_failure(&e, settle)),
+            };
+        }
+        match client.create_issue_idempotent(&issue, &key).await {
+            Ok(CreateOutcome::Created(created)) => Ok(CreateIssueOutput {
+                id: created.id,
+                key: created.key,
+                outcome: CreateKind::Created,
+            }),
+            Ok(CreateOutcome::Found(found)) => Ok(CreateIssueOutput::found(found)),
+            Err(e) => Err(send_failure(&e, settle)),
+        }
+    }
+
+    /// Builds the create body, with the route when there is one.
+    fn new_issue(&self, ctx: &ActivityContext) -> Result<NewIssue, ActivityFailure> {
+        let mut issue = NewIssue::new(
+            self.project.clone(),
+            self.issue_type.clone(),
+            self.summary.as_str(),
+        )
+        .labels(self.labels.iter().map(String::as_str));
+        if let Some(text) = &self.description_text {
+            issue = issue.description(Adf::text(text));
+        }
+        if let Some(account) = &self.assignee {
+            issue = issue.assignee(account.clone());
+        }
+        for (id, value) in &self.fields {
+            issue = issue.field(id.clone(), value.clone());
+        }
+        if let Some(route) = &self.route {
+            let key = route_key(ctx)?;
+            issue = issue.labels([TRACKED_LABEL]).property(
+                ROUTES_PROPERTY,
+                json!({"routes": [route.property_entry(key)]}),
+            );
+        }
+        Ok(issue)
+    }
+}
+
+impl CreateIssueOutput {
+    /// The output of a found issue.
+    fn found(refs: IssueRefs) -> Self {
+        Self {
+            id: refs.id,
+            key: refs.key,
+            outcome: CreateKind::Found,
+        }
     }
 }
 
@@ -203,8 +377,12 @@ impl GetIssueInput {
         client: &JiraClient,
         ctx: &ActivityContext,
     ) -> Result<IssueSummary, ActivityFailure> {
-        let _ = (client, ctx);
-        Err(config_failure("not yet"))
+        let _ = ctx;
+        let issue = client
+            .get_issue_with(self.issue.clone(), &field_set(self.fields.as_deref()))
+            .await
+            .map_err(|e| failure_for(&e))?;
+        Ok(IssueSummary::from(&issue))
     }
 }
 
@@ -251,8 +429,29 @@ impl SearchPageInput {
         client: &JiraClient,
         ctx: &ActivityContext,
     ) -> Result<SearchPageOutput, ActivityFailure> {
-        let _ = (client, ctx);
-        Err(config_failure("not yet"))
+        let _ = ctx;
+        let token = match self.token.as_deref() {
+            Some(text) => Some(PageToken::parse(text).map_err(|e| failure_for(&e))?),
+            None => None,
+        };
+        let request = SearchRequest::new(Jql::raw(self.jql.as_str()))
+            .fields(field_set(self.fields.as_deref()))
+            .max_results(self.max_results);
+        let page = client
+            .search_page_at(&request, token.as_ref())
+            .await
+            .map_err(|e| failure_for(&e))?;
+        let next_token = page.next_token.map(|t| t.as_str().to_owned());
+        if next_token.is_some() && next_token == self.token {
+            return Err(failure_for(&JiraError::PaginationStalled {
+                op: Op::Search,
+                pages: 1,
+            }));
+        }
+        Ok(SearchPageOutput {
+            issues: page.issues.iter().map(IssueSummary::from).collect(),
+            next_token,
+        })
     }
 }
 
@@ -315,8 +514,28 @@ impl EditIssueInput {
         client: &JiraClient,
         ctx: &ActivityContext,
     ) -> Result<EditIssueOutput, ActivityFailure> {
-        let _ = (client, ctx);
-        Err(config_failure("not yet"))
+        let _ = ctx;
+        let mut edit = IssueEdit::new();
+        if let Some(summary) = &self.set_summary {
+            edit = edit.set_summary(summary.as_str());
+        }
+        for label in &self.add_labels {
+            edit = edit.add_label(label.as_str());
+        }
+        for label in &self.remove_labels {
+            edit = edit.remove_label(label.as_str());
+        }
+        for (id, value) in &self.fields {
+            edit = edit.set_field(id.clone(), value.clone());
+        }
+        let options = self
+            .notify_users
+            .map_or_else(EditOptions::default, EditOptions::notify_users);
+        client
+            .edit_issue(self.issue.clone(), &edit, options)
+            .await
+            .map_err(|e| failure_for(&e))?;
+        Ok(EditIssueOutput {})
     }
 }
 
@@ -363,8 +582,25 @@ impl TransitionInput {
         client: &JiraClient,
         ctx: &ActivityContext,
     ) -> Result<TransitionOutput, ActivityFailure> {
-        let _ = (client, ctx);
-        Err(config_failure("not yet"))
+        let _ = ctx;
+        let mut fields = TransitionFields::default();
+        fields.fields.clone_from(&self.fields);
+        let outcome = client
+            .transition_to_status_with(self.issue.clone(), &self.target, &fields)
+            .await
+            .map_err(|e| failure_for(&e))?;
+        Ok(match outcome {
+            TransitionOutcome::AlreadyThere(status) => TransitionOutput {
+                outcome: TransitionKind::AlreadyThere,
+                status,
+                via: None,
+            },
+            TransitionOutcome::Moved { via, to } => TransitionOutput {
+                outcome: TransitionKind::Moved,
+                status: to,
+                via: Some(via),
+            },
+        })
     }
 }
 
@@ -420,8 +656,35 @@ impl AddCommentInput {
         client: &JiraClient,
         ctx: &ActivityContext,
     ) -> Result<CommentOutput, ActivityFailure> {
-        let _ = (client, ctx);
-        Err(config_failure("not yet"))
+        let key = activity_key(ctx)?;
+        let settle = settle(self.settle_secs);
+        if !host_may_send(previous_attempt(ctx), self.resend_after_negative_lookup) {
+            return match client
+                .find_comment_by_idempotency_key(self.issue.clone(), &key)
+                .await
+            {
+                Ok(Some(found)) => Ok(CommentOutput {
+                    id: found.id,
+                    outcome: CreateKind::Found,
+                }),
+                Ok(None) => Err(negative_lookup()),
+                Err(e) => Err(lookup_failure(&e, settle)),
+            };
+        }
+        match client
+            .add_comment_idempotent(self.issue.clone(), &Adf::text(&self.text), &key)
+            .await
+        {
+            Ok(CommentOutcome::Created(comment)) => Ok(CommentOutput {
+                id: comment.id,
+                outcome: CreateKind::Created,
+            }),
+            Ok(CommentOutcome::Found(comment)) => Ok(CommentOutput {
+                id: comment.id,
+                outcome: CreateKind::Found,
+            }),
+            Err(e) => Err(send_failure(&e, settle)),
+        }
     }
 }
 
@@ -469,8 +732,25 @@ impl DeleteIssueInput {
         client: &JiraClient,
         ctx: &ActivityContext,
     ) -> Result<DeleteOutput, ActivityFailure> {
-        let _ = (client, ctx);
-        Err(config_failure("not yet"))
+        let outcome = match client
+            .delete_issue(self.issue.clone(), self.delete_subtasks)
+            .await
+        {
+            Ok(DeleteOutcome::Deleted) => DeleteKind::Deleted,
+            Ok(DeleteOutcome::GoneAfterRetry) => DeleteKind::GoneAfterRetry,
+            // An earlier attempt can have deleted the issue (plan 7.1 for
+            // one call, here for the attempts of the host).
+            Err(JiraError::NotFoundOrForbidden { .. })
+                if matches!(
+                    previous_attempt(ctx),
+                    Previous::MaybeSent | Previous::Unknown
+                ) =>
+            {
+                DeleteKind::GoneAfterRetry
+            }
+            Err(e) => return Err(failure_for(&e)),
+        };
+        Ok(DeleteOutput { outcome })
     }
 }
 
@@ -516,8 +796,32 @@ impl WatchIssueInput {
         client: &JiraClient,
         ctx: &ActivityContext,
     ) -> Result<WatchOutput, ActivityFailure> {
-        let _ = (client, ctx);
-        Err(config_failure("not yet"))
+        let key = route_key(ctx)?;
+        let read = FieldSet::new(WATCH_FIELDS.iter().filter_map(|f| FieldId::parse(f).ok()));
+        let issue = client
+            .get_issue_with(self.issue.clone(), &read)
+            .await
+            .map_err(|e| failure_for(&e))?;
+        let current = client
+            .get_issue_property(self.issue.clone(), ROUTES_PROPERTY)
+            .await
+            .map_err(|e| failure_for(&e))?;
+        if let Some(merged) = merge_route(current.as_ref(), &self.route, key) {
+            client
+                .set_issue_property(self.issue.clone(), ROUTES_PROPERTY, &merged)
+                .await
+                .map_err(|e| failure_for(&e))?;
+        }
+        let mut summary = IssueSummary::from(&issue);
+        if !summary.labels.iter().any(|l| l == TRACKED_LABEL) {
+            let edit = IssueEdit::new().add_label(TRACKED_LABEL);
+            client
+                .edit_issue(self.issue.clone(), &edit, EditOptions::default())
+                .await
+                .map_err(|e| failure_for(&e))?;
+            summary.labels.push(TRACKED_LABEL.to_owned());
+        }
+        Ok(WatchOutput { issue: summary })
     }
 }
 
@@ -624,7 +928,16 @@ pub async fn jira_watch_issue(
 /// The eight activities, in the order of plan 9.2.
 #[must_use]
 pub fn activities() -> Vec<ActivityInfo> {
-    Vec::new()
+    vec![
+        jira_create_issue_info(),
+        jira_get_issue_info(),
+        jira_search_page_info(),
+        jira_edit_issue_info(),
+        jira_transition_to_status_info(),
+        jira_add_comment_info(),
+        jira_delete_issue_info(),
+        jira_watch_issue_info(),
+    ]
 }
 
 #[cfg(test)]

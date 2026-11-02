@@ -10,7 +10,7 @@ use autumn_jira::model::{IssueSummary, StatusSummary};
 use autumn_jira::{IssueId, IssueKey, StatusTarget};
 use serde::{Deserialize, Serialize};
 
-use crate::activities::{GET_ISSUE, GetIssueInput, READ_START_TO_CLOSE, get_issue_retry};
+use crate::activities::{GetIssueInput, jira_get_issue_info};
 use crate::clients::ClientRef;
 use crate::failure::{INVALID_INPUT_ERROR, WORKFLOW_ERROR};
 
@@ -255,22 +255,18 @@ async fn read_status(
     ctx: &WorkflowContext,
     read: &GetIssueInput,
 ) -> Result<Option<StatusSummary>, WorkflowFailure> {
-    let input = serde_json::to_value(read).map_err(|e| {
-        WorkflowFailure::new(WORKFLOW_ERROR, format!("jira wait: bad read input: {e}"))
-    })?;
-    let output = ctx
-        .execute_activity_raw_with_opts(
-            GET_ISSUE,
-            input,
-            ctx.queue_name(),
-            Some(get_issue_retry()),
-            Some(READ_START_TO_CLOSE),
+    // The retry and the timeout come from the activity info: the same
+    // history as an explicit `exponential(5, 1s)` and `3m`.
+    let issue: IssueSummary = ctx
+        .execute_activity_with_opts(
+            &jira_get_issue_info(),
+            read,
+            Some(ctx.queue_name()),
+            None,
+            None,
         )
         .await
         .map_err(|e| harvest_failure(&e))?;
-    let issue: IssueSummary = serde_json::from_value(output).map_err(|e| {
-        WorkflowFailure::new(WORKFLOW_ERROR, format!("jira wait: bad read output: {e}"))
-    })?;
     Ok(issue.status)
 }
 
