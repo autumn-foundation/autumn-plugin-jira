@@ -2,9 +2,16 @@
 //!
 //! [`HarvestSignalBridge`] is an [`EventSink`]. For a delivery that needs
 //! routing, it reads the route property of the issue, checks the tag and
-//! the allowlist of each route, and sends the signal [`SIGNAL`] to the run
-//! with `send_signal_idempotent`. The delivery id is the idempotency key,
-//! so a repeated delivery gives one signal. Webhooks are at least once.
+//! the allowlist of each route, reads the status of the issue, and sends the
+//! signal [`SIGNAL`] to the run with `send_signal_idempotent`. The delivery
+//! id is the idempotency key, so a repeated delivery gives one signal.
+//! Webhooks are at least once.
+//!
+//! A delivery does not name its Jira site, and two sites can have the same
+//! issue id. So the bridge does not trust the payload for the issue: it
+//! reads the status and the key from the site of its own client
+//! (R2-webhook-security-1). One bridge serves one site. Give each site its
+//! own webhook endpoint, its own webhook secret and its own bridge.
 //!
 //! [`wants`] and [`routes_from_property`] are pure. They do no I/O.
 
@@ -19,7 +26,9 @@ use autumn_harvest::erase::is_terminal_state;
 use autumn_harvest::resolve_execution_id_by_workflow_id;
 use autumn_harvest::signal::send_signal_idempotent;
 use autumn_harvest::worker::DbPool;
-use autumn_jira::{Delivery, EventSink, HandlerError, JiraClient, JiraEvent};
+use autumn_jira::ids::FieldId;
+use autumn_jira::request::FieldSet;
+use autumn_jira::{Delivery, EventSink, HandlerError, IssueId, JiraClient, JiraEvent};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -103,7 +112,10 @@ impl Counters {
 ///
 /// Limits (ADR 0006): the bridge uses one shard. A multi-shard engine needs
 /// a fan-out lookup. The workflow checks the issue id of each signal, so a
-/// route on another issue cannot move a workflow.
+/// route on another issue cannot move a workflow. The bridge serves the
+/// site of its client only. The status in a signal comes from a read on
+/// that site, not from the payload, so a delivery of another site with the
+/// same issue id cannot give a false status.
 #[derive(Clone)]
 pub struct HarvestSignalBridge {
     pool: DbPool,
@@ -187,7 +199,8 @@ impl HarvestSignalBridge {
         }
     }
 
-    /// Steps 1 to 6 of plan 9.4.
+    /// Steps 1 to 6 of plan 9.4. The issue read comes only after a route
+    /// passes its checks, so a forged route makes no extra call.
     async fn route_inner(&self, delivery: &Delivery) -> Result<Vec<RouteOutcome>, HandlerError> {
         let event = &delivery.event;
         let Some(issue) = event.issue().filter(|_| wants(event)) else {
@@ -209,32 +222,60 @@ impl HarvestSignalBridge {
         else {
             return Ok(Vec::new());
         };
-        let signal = IssueSignal {
-            delivery_id: delivery.meta.id.clone(),
-            event: event.name().to_owned(),
-            issue_id: issue.id.clone(),
-            issue_key: issue.key.clone(),
-            status: issue.fields.status.clone(),
-            timestamp_ms: delivery.timestamp.map(|t| t.epoch_ms()),
+        let routes = routes_from_property(&property, &self.key, &self.allowed);
+        let signal = if routes
+            .iter()
+            .any(|(_, checked)| *checked == RouteOutcome::Signalled)
+        {
+            Some(self.read_signal(delivery, &issue.id).await?)
+        } else {
+            None
         };
-        let payload = serde_json::to_value(&signal)
+        let payload = signal
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
             .map_err(|_| HandlerError::permanent("the signal payload does not encode"))?;
         let mut outcomes = Vec::new();
-        for (route, checked) in routes_from_property(&property, &self.key, &self.allowed) {
-            let outcome = match checked {
-                RouteOutcome::Signalled => self.signal(&route, &payload, &signal).await?,
-                RouteOutcome::BadTag => {
+        for (route, checked) in routes {
+            let outcome = match (checked, &signal, &payload) {
+                (RouteOutcome::Signalled, Some(signal), Some(payload)) => {
+                    self.signal(&route, payload, signal).await?
+                }
+                (RouteOutcome::BadTag, _, _) => {
                     tracing::warn!(
                         issue_id = %issue.id,
                         "jira bridge: a route tag does not verify; no signal"
                     );
                     RouteOutcome::BadTag
                 }
-                other => other,
+                (other, _, _) => other,
             };
             outcomes.push(outcome);
         }
         Ok(outcomes)
+    }
+
+    /// Makes the signal of a delivery. The status and the key come from a
+    /// read of the issue on the site of the client, not from the payload.
+    async fn read_signal(
+        &self,
+        delivery: &Delivery,
+        issue_id: &IssueId,
+    ) -> Result<IssueSignal, HandlerError> {
+        let fields = FieldSet::new(FieldId::parse("status").ok());
+        let current = self
+            .client
+            .get_issue_with(issue_id.clone(), &fields)
+            .await?;
+        Ok(IssueSignal {
+            delivery_id: delivery.meta.id.clone(),
+            event: delivery.event.name().to_owned(),
+            issue_id: current.id.clone(),
+            issue_key: Some(current.key.clone()),
+            status: current.status(),
+            timestamp_ms: delivery.timestamp.map(|t| t.epoch_ms()),
+        })
     }
 
     /// Steps 5 and 6: resolve the run and send the signal once for the

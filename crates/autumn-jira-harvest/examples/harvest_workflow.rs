@@ -389,9 +389,13 @@ async fn lifecycle(h: &Harness) -> Result<Value, BoxError> {
             let mut resolved = false;
             while !stop.load(Ordering::SeqCst) {
                 feed(&fake, &bridge).await?;
-                // One read by the transition and one by the wait.
-                let waiting =
-                    fake.count(FakeOp::DoTransition) >= 1 && fake.count(FakeOp::GetIssue) >= 2;
+                // One read by the transition and one by the wait. The
+                // bridge reads the issue too, once for each delivery with
+                // a route that passes the checks.
+                let c = bridge.counters();
+                let bridge_reads = c.signalled + c.duplicate + c.no_run + c.finished;
+                let reads = u64::try_from(fake.count(FakeOp::GetIssue)).unwrap_or(u64::MAX);
+                let waiting = fake.count(FakeOp::DoTransition) >= 1 && reads >= 2 + bridge_reads;
                 if waiting
                     && !resolved
                     && let Some(key) = lone_key(&fake)
