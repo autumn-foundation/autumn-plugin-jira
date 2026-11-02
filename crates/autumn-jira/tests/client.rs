@@ -76,6 +76,32 @@ async fn a_redirect_is_not_followed() {
 }
 
 #[tokio::test]
+async fn dot_segment_property_keys_are_rejected() {
+    // A URL parser drops `.` and `..` segments: `..` would edit the issue.
+    let transport = MemoryTransport::new();
+    let client = memory_client(&transport);
+    for bad in [".", ".."] {
+        let set = client
+            .set_issue_property(&key("OPS-1"), bad, &json!({"fields": {"summary": "x"}}))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(set, JiraError::InvalidInput { .. }),
+            "{bad}: {set:?}"
+        );
+        let get = client
+            .get_issue_property(&key("OPS-1"), bad)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(get, JiraError::InvalidInput { .. }),
+            "{bad}: {get:?}"
+        );
+    }
+    assert!(transport.requests().is_empty(), "no request");
+}
+
+#[tokio::test]
 async fn path_segments_are_encoded() {
     let transport = MemoryTransport::new();
     let url = format!("{BASE}/issue/OPS-1/properties/a%20b%2Fc%3Fd%23e");
