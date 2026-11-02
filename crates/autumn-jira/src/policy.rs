@@ -673,6 +673,21 @@ mod tests {
             proof_escapes("// we do not assume(x) here\n"),
             Vec::<String>::new()
         );
+        // Verus tokens can have spaces between them.
+        for spaced in [
+            "proof { assume (false); }",
+            "proof { admit (); }",
+            "# [verifier(external)]\npub fn f() {}",
+            "#[verifier :: external_body]",
+            "let t = Tracked::assume_new();",
+            "proof { assume\n(false); }",
+        ] {
+            assert_ne!(proof_escapes(spaced), Vec::<String>::new(), "{spaced}");
+        }
+        let spaced = spec.replacen("{\n", "{\n    proof { assume (false); }\n", 1);
+        assert_ne!(proof_escapes(&spaced), Vec::<String>::new());
+        // A longer name that ends in an escape word is no escape.
+        assert_eq!(proof_escapes("my_assume(x);"), Vec::<String>::new());
     }
 
     #[test]
@@ -727,6 +742,14 @@ mod tests {
         let exec = "pub const fn k(x: u64) -> u64 {\n    if x > 0 {\n        x\n    } else {\n        x\n    }\n}\n";
         assert_eq!(body(proof, "k", true), body(exec, "k", false));
         assert_eq!(strip_proof_blocks("a proof { b { c } } d"), "a  d");
+        // A `proof {` or a brace in a line comment hides no code.
+        let spec = "pub fn k(x: u64) -> (r: u64)\n{\n    // proof {\n    if x > 1 { x } else { 0 }\n}\n}\n";
+        let exec = "pub const fn k(x: u64) -> u64 {\n    // proof {\n    if x >= 1 { x } else { 0 }\n}\n}\n";
+        assert_ne!(body(spec, "k", true), body(exec, "k", false));
+        assert_eq!(body(spec, "k", true).as_deref(), Some("ifx>1{x}else{0}"));
+        // A name in a doc comment is not the function.
+        let doc = "/// pub fn g(x: u64) -> u64 {\n///     0\n/// }\npub const fn g(x: u64) -> u64 {\n    x\n}\n";
+        assert_eq!(body(doc, "g", false).as_deref(), Some("x"));
     }
 
     #[test]
