@@ -4,6 +4,8 @@
 //!   status. It races a webhook signal against a poll timer under one
 //!   deadline. The deadline comes from `ctx.system_now()`, which the history
 //!   records. Webhooks make the wait faster. The wait does not need them.
+//!   A workflow that does work after the wait calls [`drain_jira_signals`]
+//!   before it returns, so that a late webhook leaves no unread signal.
 //! - **Failures:** [`failure_for`] maps each [`autumn_jira::JiraError`] to a
 //!   typed `ActivityFailure` with the error type `jira.<code>`.
 //!   [`previous_attempt`] reads the failure of the previous attempt for the
