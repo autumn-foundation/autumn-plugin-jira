@@ -5,9 +5,9 @@
 
 ## Context
 
-The user standard asks for three items, as san-mateo has them: a Verus spec
-of the critical pure invariants, a small verified core in `src`, and a
-body-match test. Verus is not installable on the development machine. It can
+The user standard asks for three items, as san-mateo has them. The items
+are a Verus spec of the critical pure invariants, a small verified core in
+`src`, and a body-match test. Verus is not installable on the development machine. It can
 run in CI. A loop with proof code does not body-match.
 
 ## Decision

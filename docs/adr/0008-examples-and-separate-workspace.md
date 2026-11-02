@@ -22,9 +22,9 @@ test of the real boot must run in a child process.
   `camel_route`. CI runs each with `cargo run`.
 - `examples/ecosystem` is its own cargo workspace with its own lock and CI
   job. It runs the alert-to-resolution flow with every crate of the
-  ecosystem. Each tool has one job: camel at the edges, harvest for the
-  durable flow, the Jira activities for every write, san-mateo for
-  credentials, autumn for the webhook door and one route.
+  ecosystem. Each tool has one job. Camel is at the edges, and harvest
+  runs the durable flow. The Jira activities do every write. San-mateo
+  keeps the credentials. Autumn is the webhook door and serves one route.
 - Each example checks exact values. A wrong value gives an error that starts
   with `check failed:`. Failure tests change one fake reply or fault.
 - `FakeJira` is the provider. The examples need no port for it and no

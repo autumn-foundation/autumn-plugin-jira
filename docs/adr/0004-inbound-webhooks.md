@@ -30,13 +30,19 @@ cap is 1 MiB, and an over-cap body gets 400. A duplicate id gets 409.
 - After verification the plugin answers 200 for accepted and ignored
   deliveries, and 503 for a handler fault or a timeout (`webhook_status`,
   verified). It never answers a 4xx, because Jira does not retry it.
-- Ignored with 200: no timestamp, stale (older than `max_age_secs`, default
-  2 h, at most the replay window), too far in the future (300 s), an actor in
-  `ignore_actor_account_ids`, an unknown event, a body that does not parse.
-  Each has a counter in the health details.
+- The plugin answers 200 and ignores a delivery for each of these reasons.
+  Each reason has a counter in the health details.
+  - It has no timestamp.
+  - It is stale: older than `max_age_secs` (default 2 h, at most the replay
+    window).
+  - It is too far in the future (300 s).
+  - Its actor is in `ignore_actor_account_ids`.
+  - Its event is unknown.
+  - Its body does not parse.
 - The plugin keeps autumn's 409 for a duplicate. A 200 is wrong when
   the first copy is still in flight and then fails: Jira does not send it
-  again. Jira retries the 409 a few times; that is noise, not loss.
+  again. Jira sends a delivery that got 409 again, up to 5 times. Each copy
+  gets 409. The first copy carries the event.
 - Each sink runs in a spawned task under `handler_timeout_ms`. On a timeout
   the route answers 503 and the task runs to its end.
 - Dedup layers: the autumn replay store, then `send_signal_idempotent` per
@@ -58,8 +64,9 @@ cap is 1 MiB, and an over-cap body gets 400. A duplicate id gets 409.
   keys with the process, so a retry to a new process gets through.
 - Mitigation: the sinks dedup on their own (`send_signal_idempotent`). A
   wait with a poll ends within one poll period (ADR 0006). An upstream
-  autumn change can close the gap: a short key while the handler runs,
-  and the full window only after a reply that is not a 5xx.
+  autumn change can close the gap. The key gets a short life while the
+  handler runs. It gets the full window only after a reply that is not a
+  5xx.
 - Bad: a duplicate shows as a failed delivery in the Jira webhook log.
 - Bad: a memory replay store is per process and empty after a restart. In
   production autumn requires an explicit opt-in for it, or Redis.

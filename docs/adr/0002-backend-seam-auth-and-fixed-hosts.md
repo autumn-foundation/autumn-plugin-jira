@@ -38,7 +38,8 @@ A free-form base URL or a followed redirect is an SSRF path.
   A new, unknown variant maps to `MaybeSent`, the safe side for writes. A
   `TransportError::Connect` is `MaybeSent`, because `ReqwestTransport` also
   maps a reset during the reply read to `Connect`.
-- Ids in paths are validated newtypes and are percent-encoded.
+- Each id in a path is a validated newtype. The client percent-encodes
+  each path segment.
 - The plugin never holds OAuth tokens. The Basic header in API token mode is
   an explicit app choice.
 

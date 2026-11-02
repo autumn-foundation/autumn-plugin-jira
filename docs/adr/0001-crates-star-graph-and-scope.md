@@ -12,8 +12,8 @@ version for all hosts, so each host bump forces a release of everything. A
 crate that depends on another adapter crate couples two hosts. The draft had
 the harvest crate depend on the plugin crate for the event handler trait.
 
-The test fake is large. When the fake lives in the client crate and shares
-its models, a wrong reading of the Jira spec is in both places, and all
+The test fake is large. The fake can live in the client crate and share
+its models. Then a wrong reading of the Jira spec is in both places, and all
 tests pass.
 
 ## Decision
@@ -45,5 +45,6 @@ tests pass.
 - Good: app developers can use the fake as a dev-dependency.
 - Bad: five crates to publish and version.
 - Out of scope: Data Center, `/rest/api/2`, Agile, Service Management, Forge
-  and Connect, dynamic webhooks (JWT, 30-day expiry), attachments, worklogs,
-  links, bulk create, OpenAPI code generation (huge models, poor names).
+  and Connect. Also out of scope: dynamic webhooks (JWT, 30-day expiry),
+  attachments, worklogs, links, bulk create, and OpenAPI code generation
+  (huge models, poor names).

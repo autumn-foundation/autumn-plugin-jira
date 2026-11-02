@@ -69,9 +69,10 @@ layers multiply the sends and break the activity timeout.
   attempts.
 - Activity budgets (design v3): each `start_to_close` is larger than the
   durable worst case of its client calls at 60 s for each request. A
-  durable read or idempotent write takes up to 130 s, a marked write up to
-  390 s (pre-lookup, write, one lookup), and a checked write up to 650 s
-  (each of two attempts reads the status and the transitions, then sends).
+  durable read or idempotent write takes up to 130 s. A marked write takes
+  up to 390 s: a pre-lookup, the write and one lookup. A checked write takes
+  up to 650 s. Each of its two attempts reads the status and the
+  transitions, and then sends.
   So `jira_get_issue` and `jira_search_page` get 3m, `jira_edit_issue` and
   `jira_delete_issue` get 5m, and `jira_create_issue`, `jira_add_comment`,
   `jira_transition_to_status` and `jira_watch_issue` (four idempotent

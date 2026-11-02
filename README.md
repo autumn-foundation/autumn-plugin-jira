@@ -1,8 +1,8 @@
 # autumn-plugin-jira
 
-Jira Cloud for the autumn ecosystem. You get a typed, safe Jira client, an
-autumn-web plugin with a signed webhook route, durable harvest activities,
-a camel `jira:` component, and an in-memory Jira for your tests.
+Jira Cloud for the autumn ecosystem. You get five parts: a typed Jira
+client, an autumn-web plugin, harvest activities, a camel `jira:` component
+and an in-memory Jira for tests. The plugin has a signed webhook route.
 
 In one afternoon, you can:
 
@@ -428,10 +428,14 @@ the create gives the issue, so the step needs `allowHeaderOverrides=true`.
 
 ## The ecosystem example
 
-`examples/ecosystem` runs the full loop: an alert comes in through camel,
-a harvest workflow opens a ticket through San Mateo OAuth, a person
-resolves it in Jira, the webhook reaches autumn, the bridge signals the
-run, and camel posts a chat message.
+`examples/ecosystem` runs the full loop:
+
+1. An alert comes in through camel.
+2. A harvest workflow opens a ticket through San Mateo OAuth.
+3. A person resolves the ticket in Jira.
+4. The webhook reaches autumn.
+5. The bridge signals the run.
+6. Camel posts a chat message.
 
 ```mermaid
 flowchart LR

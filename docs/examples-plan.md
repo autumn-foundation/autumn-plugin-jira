@@ -10,8 +10,8 @@
 ## 1. Problem
 
 Users need code that they can run and copy for each way to use the Jira
-crates: the client alone, the autumn-web plugin, the harvest activities,
-the camel component, and all of them together. The README has short
+crates. There are five ways: the client alone, the autumn-web plugin, the
+harvest activities, the camel component, and all of them together. The README has short
 snippets. They compile as doc tests, but a doc test does not show a full
 flow. The task: four runnable examples in the main workspace, one example
 of the whole ecosystem in its own workspace, and CI runs each one.
@@ -32,29 +32,42 @@ of the whole ecosystem in its own workspace, and CI runs each one.
 
 Ideas for each example. The chosen ideas are in bold.
 
-- embedded: **each client area in one run (projects, issue types, CRUD,
-  search pages, transition with a resolution, comment, delete)**; **an
-  idempotent create after a 503 after the commit**; **a 400 on a bad field
-  gives `Validation`**; a live mode against a real site (left out: no test
-  calls a real Jira).
-- autumn_app: **one `.plugin(..)` call**; **a route with the `JiraService`
-  extractor and `.http()?`**; **a log sink on the webhook route**; **config
-  in `autumn.toml` with env var names only**; **a boot of the real binary
-  in the dev and prod profiles**; **a signed POST with an openssl HMAC**;
-  **SIGTERM stop**; **a real path when `JIRA_SITE` is set**.
-- harvest_workflow: **the recipe `jira_ticket_lifecycle`**; **a lost create
-  that the next attempt finds by its marker**; **a webhook delivery into
-  `HarvestSignalBridge`**; **`jira_watch_issue` on an issue that a person
-  made, done by poll only**; **two runs at the same time on one database**.
-- camel_route: **`jira:createIssue` then `jira:transitionToStatus`**;
-  **the `HarvestIdempotencyKey` header and a second attempt that sends no
-  second write**; **the out headers**; **an unknown option fails at route
-  add**; a consumer route (left out: the component is producer only).
-- ecosystem: **the full loop from an alert to a chat message (plan 11.3)**;
-  **an expired OAuth token and a cloud id discovery**; **a worker restart
-  during the wait**; **two tenants on two fake sites**; **the real
-  harvest-camel `is_retryable` against the pinned copy**; **a boot of three
-  plugins over real HTTP**.
+- embedded:
+  - **each client area in one run (projects, issue types, CRUD, search
+    pages, transition with a resolution, comment, delete)**
+  - **an idempotent create after a 503 after the commit**
+  - **a 400 on a bad field gives `Validation`**
+  - a live mode against a real site (left out: no test calls a real Jira)
+- autumn_app:
+  - **one `.plugin(..)` call**
+  - **a route with the `JiraService` extractor and `.http()?`**
+  - **a log sink on the webhook route**
+  - **config in `autumn.toml` with env var names only**
+  - **a boot of the real binary in the dev and prod profiles**
+  - **a signed POST with an openssl HMAC**
+  - **SIGTERM stop**
+  - **a real path when `JIRA_SITE` is set**
+- harvest_workflow:
+  - **the recipe `jira_ticket_lifecycle`**
+  - **a lost create that the next attempt finds by its marker**
+  - **a webhook delivery into `HarvestSignalBridge`**
+  - **`jira_watch_issue` on an issue that a person made, done by poll
+    only**
+  - **two runs at the same time on one database**
+- camel_route:
+  - **`jira:createIssue` then `jira:transitionToStatus`**
+  - **the `HarvestIdempotencyKey` header and a second attempt that sends
+    no second write**
+  - **the out headers**
+  - **an unknown option fails at route add**
+  - a consumer route (left out: the component is producer only)
+- ecosystem:
+  - **the full loop from an alert to a chat message (plan 11.3)**
+  - **an expired OAuth token and a cloud id discovery**
+  - **a worker restart during the wait**
+  - **two tenants on two fake sites**
+  - **the real harvest-camel `is_retryable` against the pinned copy**
+  - **a boot of three plugins over real HTTP**
 
 ## 4. Reverse brainstorming (how to make the examples fail)
 
@@ -123,10 +136,10 @@ Rules for each example (EX8 checks them by text):
 
 - **Goal:** show the client alone, with no framework.
 - **What it shows:** `JiraClient::api_token` on `FakeJira`. It lists
-  projects and issue types, creates, reads and edits an issue, reads search
-  pages, moves the issue to Done with a resolution, adds a comment, does an
-  idempotent create after a 503 after the commit (one POST, outcome
-  `Found`), and deletes an issue.
+  projects and issue types. It creates, reads and edits an issue, and reads
+  search pages. It moves the issue to Done with a resolution and adds a
+  comment. It does an idempotent create after a 503 after the commit (one
+  POST, outcome `Found`). Then it deletes an issue.
 - **How it runs in CI:** the `examples` job runs `cargo run --locked -p
   autumn-jira --example embedded`. The run prints the summary and `check:
   ok`. `RUN_TIMEOUT` is 30 s.
@@ -149,9 +162,9 @@ Rules for each example (EX8 checks them by text):
 - **How it runs in CI:** the `examples` job runs `bash
   scripts/smoke-autumn-example.sh`. The script builds the binary and boots
   it in the dev and prod profiles. It checks `GET /issues/OPS-1` (200), an
-  unknown issue (404), a bad key (400), a signed POST with an openssl HMAC
-  (200), the same POST again (409), a bad signature (401), and `jira` in
-  `/actuator/health`. It stops the app with SIGTERM (exit code 0). It finds
+  unknown issue (404) and a bad key (400). It sends a signed POST with an
+  openssl HMAC (200), the same POST again (409) and a bad signature (401).
+  It finds `jira` in `/actuator/health`. It stops the app with SIGTERM (exit code 0). It finds
   no secret in the log. The real path with no `JIRA_API_TOKEN` must exit
   non-zero and name the variable.
 - **Check and failure tests:** ex:
@@ -167,12 +180,13 @@ Rules for each example (EX8 checks them by text):
 
 - **Goal:** show the Jira activities in a durable harvest workflow.
 - **What it shows:** a real harvest worker on Postgres. Run 1 is the recipe
-  workflow `jira_ticket_lifecycle`: `jira_create_issue` with a route (503
-  after the commit: attempt 1 gives `jira.outcome_pending`, attempt 2 finds
-  the issue by its marker, so one POST), `jira_transition_to_status` to In
-  Progress, `await_issue_status` for Done (a person resolves the issue, and
-  the `FakeJira` delivery goes into `HarvestSignalBridge::deliver`), and
-  `jira_add_comment`. Run 2 is `jira_watch_lifecycle`: `jira_watch_issue` on
+  workflow `jira_ticket_lifecycle`. First, `jira_create_issue` with a route
+  gets a 503 after the commit. Attempt 1 gives `jira.outcome_pending`.
+  Attempt 2 finds the issue by its marker, so there is one POST. Then
+  `jira_transition_to_status` moves the issue to In Progress.
+  `await_issue_status` waits for Done. A person resolves the issue, and the
+  `FakeJira` delivery goes into `HarvestSignalBridge::deliver`. Last,
+  `jira_add_comment` adds a comment. Run 2 is `jira_watch_lifecycle`: `jira_watch_issue` on
   an issue that a person made, and a wait that ends by poll only. All texts
   are input fields (R16). The workflows live in the example, not in `src`.
 - **How it runs in CI:** the `examples` job runs `cargo run --locked -p
@@ -197,7 +211,7 @@ Rules for each example (EX8 checks them by text):
   `JiraIssueKey` out header of the first. The exchange has the
   `HarvestIdempotencyKey` header, as harvest-camel sends it. Attempt 1
   creates and moves the issue. Attempt 2 (a harvest retry, same key) finds
-  the issue by its marker and sends no second write: one create POST, one
+  the issue by its marker. It sends no second write: one create POST, one
   transition, outcome `moved` then `already_there`. The component has a
   durable client (`ClientSettings::for_durable_host()`).
 - **How it runs in CI:** the `examples` job runs `cargo run --locked -p
@@ -220,10 +234,11 @@ Rules for each example (EX8 checks them by text):
   key. autumn is the webhook door (`JiraPlugin` in san_mateo mode, sink
   `HarvestSignalBridge`) and one route `GET /incidents/{key}`. The run
   prints the nine timeline lines of plan 11.3 and `check: ok`.
-- **How it runs in CI:** the `example-ecosystem` job (Postgres 16,
-  toolchains 1.89.0 and the pinned one): the lock check with the fix
-  command, fmt, clippy `-D warnings`, `cargo test --locked`, `cargo run
-  --locked`, and `cargo +1.89.0 check --locked --all-targets`.
+- **How it runs in CI:** the `example-ecosystem` job, with Postgres 16
+  and the toolchains 1.89.0 and the pinned one. Its steps: the lock check
+  with the fix command, the one-version check, fmt, clippy `-D warnings`,
+  `cargo test --locked`, `cargo run --locked`, and `cargo +1.89.0 check
+  --locked --all-targets`.
   `timeout-minutes: 45`. Locally: `bash scripts/run-ecosystem.sh` starts
   Postgres with `compose.yaml` when needed.
 - **Check and failure tests:** `#[cfg(test)]` modules in

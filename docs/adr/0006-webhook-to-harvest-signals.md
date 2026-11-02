@@ -29,8 +29,8 @@ records the wall clock in history.
   `jira_watch_issue` adds them to an issue that a person made.
 - `HarvestSignalBridge` is an `EventSink`. It acts on `jira:issue_created`
   and on `jira:issue_updated` with a status change. It reads the property
-  with a GET, checks each tag in constant time, keeps allowlisted workflow
-  names, resolves the run by workflow id, and calls
+  with a GET and checks each tag in constant time. It keeps the allowlisted
+  workflow names and resolves the run by workflow id. Then it calls
   `send_signal_idempotent` with the delivery id as the key. The key is kept
   for the life of the run.
 - Errors: no run, a finished run, `Config`, `Cancelled`, `NotFound` give 200

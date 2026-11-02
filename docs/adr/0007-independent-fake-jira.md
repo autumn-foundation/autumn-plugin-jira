@@ -6,10 +6,10 @@
 ## Context
 
 No test may call a real Jira. A scripted transport cannot model state:
-create, then search, then transition, then a webhook. An outbound fake
-server on a port cannot work with fixed hosts: `ReqwestTransport` builds its
-own client and has no resolver override, so the only way is plain HTTP and
-private hosts, which breaks the SSRF design. A fake that shares models with
+create, then search, then transition, then a webhook. A fake server on a
+port cannot work with fixed hosts. `ReqwestTransport` builds its own client
+and has no resolver override. A port fake then needs plain HTTP and private
+hosts, and these break the SSRF design. A fake that shares models with
 the client agrees with the client on every wrong assumption.
 
 ## Decision
@@ -22,9 +22,9 @@ the client agrees with the client on every wrong assumption.
   host (refresh with rotation) and accessible-resources. Other hosts go to an
   optional fallback transport.
 - It models projects, issue types, a workflow graph (Done needs a
-  resolution), labels, properties, comments, a JQL subset, token pages,
-  faults (including "the write happens, the reply is lost"), index lag in
-  tokio time and signed webhook deliveries.
+  resolution), labels, properties and comments. It also models a JQL
+  subset, token pages, faults, index lag in tokio time and signed webhook
+  deliveries. One fault is "the write happens, the reply is lost".
 - It has its own HMAC and JQL code. A test checks its signature against the
   Atlassian test vector.
 - A test checks each reply against the key names and JSON types of the spec
