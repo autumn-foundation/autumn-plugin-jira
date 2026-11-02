@@ -9,7 +9,7 @@
 //!   [`previous_attempt`] reads the failure of the previous attempt for the
 //!   safe-write rule of a durable host.
 //! - **Activities:** eight `#[activity]` functions for create, get, search,
-//!   edit, transition, comment, delete and watch. [`activities`] returns
+//!   edit, transition, comment, delete and watch. [`activities()`] returns
 //!   them for `HarvestBuilder::activities`.
 //! - **Signal bridge:** [`HarvestSignalBridge`] turns a verified Jira
 //!   delivery into a harvest signal for the run that waits on the issue.

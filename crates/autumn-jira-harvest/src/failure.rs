@@ -54,7 +54,7 @@ const RATE_LIMITED_ERROR: &str = "jira.rate_limited";
 /// The `jira.<code>` of a network error.
 const NETWORK_ERROR: &str = "jira.network";
 
-/// "jira.<code>"; retryable iff err.is_retryable(); RateLimited -> with_retry_after;
+/// `"jira.<code>"`; retryable iff `err.is_retryable()`; `RateLimited` -> `with_retry_after`;
 /// OutcomeUnknown with marker -> with_retry_after(SETTLE_SECS); details {code, status, sent}.
 ///
 /// The message is the `Display` text of the error. It has no body, no Jira
