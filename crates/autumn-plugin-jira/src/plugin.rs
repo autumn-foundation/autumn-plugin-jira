@@ -442,7 +442,9 @@ impl JiraPlugin {
     }
 
     /// The startup check. It runs the webhook boot check when this process
-    /// serves HTTP and the route is mounted. It returns the warnings.
+    /// serves HTTP and the route is mounted. It returns the warnings, also
+    /// the warning when the handlers can run past the autumn request
+    /// timeout.
     fn startup_check(
         &self,
         state: &AppState,
@@ -452,12 +454,19 @@ impl JiraPlugin {
         if !(self.mounts_route() && role.serves_http()) {
             return Ok(Vec::new());
         }
-        check_webhook_endpoint(
-            &state.config_arc().security.webhooks.endpoints,
+        let config = state.config_arc();
+        let mut warnings = check_webhook_endpoint(
+            &config.security.webhooks.endpoints,
             &self.webhook_path(),
             settings,
             self.allow_without_replay_protection,
-        )
+        )?;
+        warnings.extend(handler_budget_warning(
+            self.handlers.len(),
+            settings.handler_timeout_ms,
+            config.server.timeouts.request_timeout_ms,
+        ));
+        Ok(warnings)
     }
 }
 
@@ -483,8 +492,15 @@ fn handler_budget_warning(
     handler_timeout_ms: u64,
     request_timeout_ms: Option<u64>,
 ) -> Option<String> {
-    let _ = (handlers, handler_timeout_ms, request_timeout_ms);
-    None
+    let request_ms = request_timeout_ms.filter(|ms| *ms > 0)?;
+    let count = u64::try_from(handlers).unwrap_or(u64::MAX);
+    let total = count.saturating_mul(handler_timeout_ms);
+    (handlers > 0 && total >= request_ms).then(|| {
+        format!(
+            "the {handlers} jira webhook handlers can take {total} ms ({handlers} x [jira.webhook] handler_timeout_ms = {handler_timeout_ms}), and server.timeouts.request_timeout_ms is {request_ms}; autumn then stops the request with 503, the later handlers do not run, and Jira sends the delivery again; set handler_timeout_ms below {}",
+            request_ms / count
+        )
+    })
 }
 
 /// The client settings of `[jira.http]`.

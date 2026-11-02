@@ -25,6 +25,7 @@
 //! handler fails.
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::time::{Duration, UNIX_EPOCH};
 
 use autumn_jira::ids::WebhookDeliveryId;
@@ -91,6 +92,22 @@ fn epoch_ms(time: std::time::SystemTime) -> u64 {
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
+/// Adds one to `timed_out` when autumn drops the route future before the
+/// handlers end, for example at `server.timeouts.request_timeout_ms`. So
+/// each delivery still adds one to exactly one counter.
+struct Cancelled<'a>(Option<&'a AtomicU64>);
+
+impl Drop for Cancelled<'_> {
+    fn drop(&mut self) {
+        if let Some(counter) = self.0 {
+            Counters::add(counter);
+            tracing::warn!(
+                "jira webhook request stopped before the handlers ended; Jira sends the delivery again"
+            );
+        }
+    }
+}
+
 impl Runtime {
     /// Runs the pipeline on one verified delivery. It logs ids and names,
     /// never the body.
@@ -153,7 +170,11 @@ impl Runtime {
             );
         }
         let delivery = Arc::new(Delivery::new(DeliveryMeta::new(id, retry, flow), parsed));
+        // autumn can drop this future at its request timeout. The guard
+        // then counts the delivery as timed out.
+        let mut cancelled = Cancelled(Some(&c.timed_out));
         let verdict = self.dispatch(state, &delivery).await;
+        cancelled.0 = None;
         let counter = match verdict {
             Verdict::Accepted | Verdict::Ignored => &c.accepted,
             Verdict::HandlerFailed => &c.handler_failed,

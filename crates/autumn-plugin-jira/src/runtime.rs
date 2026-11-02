@@ -79,9 +79,9 @@ pub struct WebhookCounters {
     pub permanent: u64,
     /// Deliveries with a transient handler error. The route answers 503.
     pub handler_failed: u64,
-    /// Deliveries with a handler that did not finish in time, or that
-    /// found no free handler slot (`max_handler_tasks`). The route answers
-    /// 503.
+    /// Deliveries with a handler that did not finish in time, that found
+    /// no free handler slot (`max_handler_tasks`), or that autumn stopped
+    /// at its request timeout. The route answers 503.
     pub timed_out: u64,
 }
 
