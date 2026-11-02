@@ -713,7 +713,7 @@ async fn retry_attempt_looks_up_only() {
     .await
     .unwrap_err();
     assert!(matches!(err, CamelError::Io(_)), "{err:?}");
-    assert!(err.to_string().contains("outcome_unknown"), "{err}");
+    assert!(err.to_string().contains("jira outcome_pending"), "{err}");
     fake.fault(FakeOp::CreateIssue, Fault::StatusAfterCommit(503));
     let err = send(&camel, "direct:create", json(body.clone()))
         .await

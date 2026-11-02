@@ -6,11 +6,11 @@
 
 use std::sync::Arc;
 
-use autumn_jira::client::{IssuePage, TransitionOutcome};
+use autumn_jira::client::{CommentOutcome, CreateOutcome, IssuePage, TransitionOutcome};
 use autumn_jira::ids::{IssueRef, PageToken};
-use autumn_jira::policy::{self, PageStep};
+use autumn_jira::policy::{self, PageStep, Previous, host_may_send};
 use autumn_jira::request::{EditOptions, NewIssue, SearchRequest};
-use autumn_jira::{JiraClient, JiraError, Jql};
+use autumn_jira::{Adf, IdempotencyKey, JiraClient, JiraError, Jql};
 use camel_api::{Body, CamelError, Exchange, Message, Value};
 use serde_json::json;
 
@@ -18,6 +18,17 @@ use crate::error::to_camel_error;
 use crate::input;
 use crate::options::{EndpointOptions, Operation};
 use crate::{HEADER_ISSUE_ID, HEADER_ISSUE_KEY, HEADER_NEXT_TOKEN, HEADER_OUTCOME};
+
+/// The harvest-camel header with the activity idempotency key. It is the
+/// same for each attempt of one activity.
+pub(crate) const HEADER_HARVEST_KEY: &str = "HarvestIdempotencyKey";
+/// The harvest-camel header with the 1-based activity attempt.
+pub(crate) const HEADER_HARVEST_ATTEMPT: &str = "HarvestActivityAttempt";
+
+/// The outcome of a write that made the issue or the comment.
+const CREATED: &str = "created";
+/// The outcome of a write that a marker lookup found.
+const FOUND: &str = "found";
 
 /// Sends the exchanges of one endpoint to Jira.
 #[derive(Debug, Clone)]
@@ -97,7 +108,8 @@ impl Producer {
         match op {
             Operation::CreateIssue => {
                 let body = input::create(input::read(body, op, max).await?)?;
-                self.create(body).await
+                let marked = marked(message, options)?;
+                self.create(body, marked).await
             }
             Operation::GetIssue => self.get(&self.issue(message)?).await,
             Operation::EditIssue => {
@@ -141,8 +153,13 @@ impl Producer {
             Operation::AddComment => {
                 let text = input::comment(input::read(body, op, max).await?)?;
                 let issue = self.issue(message)?;
-                let comment = self.client.add_comment(issue.clone(), &text).await?;
-                Ok(comment_reply(&issue, comment.id.as_str(), "created"))
+                match marked(message, options)? {
+                    None => {
+                        let comment = self.client.add_comment(issue.clone(), &text).await?;
+                        Ok(comment_reply(&issue, comment.id.as_str(), CREATED))
+                    }
+                    Some(marked) => self.comment_marked(&issue, &text, &marked).await,
+                }
             }
             Operation::Search => self.search().await,
         }
@@ -157,7 +174,11 @@ impl Producer {
     }
 
     /// `createIssue`.
-    async fn create(&self, body: input::CreateBody) -> Result<Reply, Failure> {
+    async fn create(
+        &self,
+        body: input::CreateBody,
+        marked: Option<Marked>,
+    ) -> Result<Reply, Failure> {
         let options = &self.options;
         let op = options.operation;
         let project = options
@@ -175,12 +196,69 @@ impl Producer {
         for (id, value) in body.fields {
             issue = issue.field(id, value);
         }
-        let created = self.client.create_issue(&issue).await?;
-        Ok(issue_reply(
-            created.id.as_str(),
-            created.key.as_str(),
-            "created",
-        ))
+        let Some(marked) = marked else {
+            let created = self.client.create_issue(&issue).await?;
+            return Ok(issue_reply(
+                created.id.as_str(),
+                created.key.as_str(),
+                CREATED,
+            ));
+        };
+        if !host_may_send(marked.previous, options.resend_after_negative_lookup) {
+            let project = issue.project_key();
+            return match self
+                .client
+                .find_by_idempotency_key(project, &marked.key)
+                .await?
+            {
+                Some(found) => Ok(issue_reply(found.id.as_str(), found.key.as_str(), FOUND)),
+                None => Err(outcome_unknown(op)),
+            };
+        }
+        Ok(
+            match self
+                .client
+                .create_issue_idempotent(&issue, &marked.key)
+                .await?
+            {
+                CreateOutcome::Created(created) => {
+                    issue_reply(created.id.as_str(), created.key.as_str(), CREATED)
+                }
+                CreateOutcome::Found(found) => {
+                    issue_reply(found.id.as_str(), found.key.as_str(), FOUND)
+                }
+            },
+        )
+    }
+
+    /// `addComment` with an idempotency key.
+    async fn comment_marked(
+        &self,
+        issue: &IssueRef,
+        text: &Adf,
+        marked: &Marked,
+    ) -> Result<Reply, Failure> {
+        let client = &self.client;
+        if !host_may_send(marked.previous, self.options.resend_after_negative_lookup) {
+            return match client
+                .find_comment_by_idempotency_key(issue.clone(), &marked.key)
+                .await?
+            {
+                Some(found) => Ok(comment_reply(issue, found.id.as_str(), FOUND)),
+                None => Err(outcome_unknown(Operation::AddComment)),
+            };
+        }
+        Ok(
+            match client
+                .add_comment_idempotent(issue.clone(), text, &marked.key)
+                .await?
+            {
+                CommentOutcome::Created(comment) => {
+                    comment_reply(issue, comment.id.as_str(), CREATED)
+                }
+                CommentOutcome::Found(comment) => comment_reply(issue, comment.id.as_str(), FOUND),
+            },
+        )
     }
 
     /// `getIssue`.
@@ -256,6 +334,73 @@ impl Producer {
             ..Reply::default()
         })
     }
+}
+
+/// The key and the previous attempt of a marked write.
+#[derive(Debug)]
+struct Marked {
+    key: IdempotencyKey,
+    previous: Previous,
+}
+
+/// Returns a header value. The match is exact first and then with no
+/// regard to case. A null value counts as no value.
+fn header<'a>(message: &'a Message, name: &str) -> Option<&'a Value> {
+    message
+        .header(name)
+        .or_else(|| message.header_ic(name))
+        .filter(|v| !v.is_null())
+}
+
+/// A `ValidationError` for a bad header.
+fn bad_header(name: &str, rule: &str) -> CamelError {
+    CamelError::ValidationError(format!("the {name} header {rule}"))
+}
+
+/// Reads the harvest-camel headers of a marked write (plan D7).
+///
+/// `HarvestIdempotencyKey` is the only source of the key (W12). An attempt
+/// above 1 gives `Previous::Unknown`: the camel route cannot see the
+/// failure of the previous attempt, so it must assume that the write can
+/// have run. No key header gives `None`: the write is sent at most once.
+fn marked(message: &Message, options: &EndpointOptions) -> Result<Option<Marked>, CamelError> {
+    let op = options.operation;
+    let key = match header(message, HEADER_HARVEST_KEY) {
+        None if options.require_idempotency_key => {
+            return Err(CamelError::ValidationError(format!(
+                "{op} needs the {HEADER_HARVEST_KEY} header: the route sets \
+                 requireIdempotencyKey=true"
+            )));
+        }
+        None => return Ok(None),
+        Some(Value::String(text)) if !text.trim().is_empty() => {
+            IdempotencyKey::parse(text).unwrap_or_else(|_| IdempotencyKey::derive(&[text.as_str()]))
+        }
+        Some(_) => return Err(bad_header(HEADER_HARVEST_KEY, "must be a non-empty string")),
+    };
+    let attempt = match header(message, HEADER_HARVEST_ATTEMPT) {
+        None => Some(1),
+        Some(Value::Number(n)) => n.as_u64(),
+        Some(Value::String(text)) => text.trim().parse::<u64>().ok(),
+        Some(_) => None,
+    }
+    .filter(|n| *n >= 1)
+    .ok_or_else(|| bad_header(HEADER_HARVEST_ATTEMPT, "must be a whole number from 1"))?;
+    let previous = if attempt > 1 {
+        Previous::Unknown
+    } else {
+        Previous::First
+    };
+    Ok(Some(Marked { key, previous }))
+}
+
+/// The failure of a negative lookup on a retry attempt. It is not
+/// retryable: a resend can make a duplicate (ADR 0003).
+fn outcome_unknown(op: Operation) -> Failure {
+    Failure::Camel(CamelError::ValidationError(format!(
+        "jira outcome_unknown: an earlier attempt of {op} can have run, and the marker \
+         lookup found nothing; set resendAfterNegativeLookup=true to send it again (ADR 0003)"
+    )))
 }
 
 /// A failure of one exchange: a Jira error, or a camel error before the
