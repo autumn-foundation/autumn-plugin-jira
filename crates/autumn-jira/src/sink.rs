@@ -23,22 +23,23 @@ pub enum HandlerError {
 impl HandlerError {
     /// A transient error. Jira sends the delivery again.
     pub fn transient(error: impl Display) -> Self {
-        let _ = error.to_string();
-        Self::Permanent(String::new())
+        Self::Transient(error.to_string())
     }
 
     /// A permanent error. Jira does not send the delivery again.
     pub fn permanent(error: impl Display) -> Self {
-        let _ = error.to_string();
-        Self::Transient(String::new())
+        Self::Permanent(error.to_string())
     }
 }
 
 impl From<JiraError> for HandlerError {
     /// `JiraError::is_retryable` picks the variant (R3).
     fn from(error: JiraError) -> Self {
-        let _ = error;
-        Self::Permanent(String::new())
+        if error.is_retryable() {
+            Self::Transient(error.to_string())
+        } else {
+            Self::Permanent(error.to_string())
+        }
     }
 }
 
@@ -47,7 +48,7 @@ impl From<JiraError> for HandlerError {
 pub trait EventSink: Send + Sync + 'static {
     /// A name for logs and health details.
     fn name(&self) -> &str {
-        ""
+        std::any::type_name::<Self>()
     }
 
     /// Takes one delivery. Deliveries are at least once: the same delivery
@@ -122,6 +123,10 @@ mod tests {
 
     #[async_trait]
     impl EventSink for Named {
+        #[allow(
+            clippy::unnecessary_literal_bound,
+            reason = "the trait gives the signature"
+        )]
         fn name(&self) -> &str {
             "named"
         }

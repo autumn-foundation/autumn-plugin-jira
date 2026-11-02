@@ -28,7 +28,33 @@ pub struct JiraWrite {
 }
 
 /// Each thing that the client and its adapters write to Jira.
-pub const WRITES: &[JiraWrite] = &[];
+pub const WRITES: &[JiraWrite] = &[
+    JiraWrite {
+        what: "autumn-idem-<26 chars>",
+        kind: WriteKind::Label,
+        when: "create_issue_idempotent",
+    },
+    JiraWrite {
+        what: "autumn-jira",
+        kind: WriteKind::IssueProperty,
+        when: "create_issue_idempotent",
+    },
+    JiraWrite {
+        what: "autumn-ref: <26 chars>",
+        kind: WriteKind::CommentText,
+        when: "add_comment_idempotent",
+    },
+    JiraWrite {
+        what: "autumn-tracked",
+        kind: WriteKind::Label,
+        when: "harvest route or watch",
+    },
+    JiraWrite {
+        what: "autumn-jira-routes",
+        kind: WriteKind::IssueProperty,
+        when: "harvest route or watch",
+    },
+];
 
 #[cfg(test)]
 mod tests {

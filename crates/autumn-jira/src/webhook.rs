@@ -17,6 +17,8 @@ use crate::ids::{
     AccountId, CommentId, IssueId, IssueKey, ProjectKey, StatusId, WebhookDeliveryId,
 };
 use crate::model::StatusSummary;
+use crate::model::wire::StatusWire;
+use crate::policy;
 use crate::time::JiraTimestamp;
 
 /// The signature header: `sha256=<64 lower hex>`.
@@ -30,6 +32,17 @@ pub const FLOW_HEADER: &str = "X-Atlassian-Webhook-Flow";
 
 /// The text that marks a comment of this client (the loop guard).
 const COMMENT_MARKER: &str = "autumn-ref: ";
+/// The method part of the signature header.
+const SIGNATURE_PREFIX: &str = "sha256=";
+
+const ISSUE_CREATED: &str = "jira:issue_created";
+const ISSUE_UPDATED: &str = "jira:issue_updated";
+const ISSUE_DELETED: &str = "jira:issue_deleted";
+const COMMENT_CREATED: &str = "comment_created";
+const COMMENT_UPDATED: &str = "comment_updated";
+const COMMENT_DELETED: &str = "comment_deleted";
+
+type HmacSha256 = Hmac<Sha256>;
 
 /// One verified delivery.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,9 +106,14 @@ pub enum Flow {
 impl Flow {
     /// Parses the flow header. The match ignores ASCII case.
     #[must_use]
-    pub fn parse(value: &str) -> Self {
-        let _ = value;
-        Self::Unknown
+    pub const fn parse(value: &str) -> Self {
+        if value.eq_ignore_ascii_case("primary") {
+            Self::Primary
+        } else if value.eq_ignore_ascii_case("secondary") {
+            Self::Secondary
+        } else {
+            Self::Unknown
+        }
     }
 }
 
@@ -225,28 +243,58 @@ impl JiraEvent {
     /// Returns the `webhookEvent` name, for example `jira:issue_updated`.
     #[must_use]
     pub fn name(&self) -> &str {
-        ""
+        match self {
+            Self::IssueCreated(_) => ISSUE_CREATED,
+            Self::IssueUpdated(_) => ISSUE_UPDATED,
+            Self::IssueDeleted(_) => ISSUE_DELETED,
+            Self::CommentCreated(_) => COMMENT_CREATED,
+            Self::CommentUpdated(_) => COMMENT_UPDATED,
+            Self::CommentDeleted(_) => COMMENT_DELETED,
+            Self::Other { name } => name,
+        }
     }
 
     /// Returns the issue of the event.
     #[must_use]
     pub const fn issue(&self) -> Option<&WebhookIssue> {
-        None
+        match self {
+            Self::IssueCreated(e) | Self::IssueUpdated(e) | Self::IssueDeleted(e) => Some(&e.issue),
+            Self::CommentCreated(e) | Self::CommentUpdated(e) | Self::CommentDeleted(e) => {
+                Some(&e.issue)
+            }
+            Self::Other { .. } => None,
+        }
     }
 
     /// Returns the status change of an issue event, from the changelog item
     /// with field `status`.
     #[must_use]
     pub fn status_change(&self) -> Option<StatusChange> {
-        None
+        let (Self::IssueCreated(e) | Self::IssueUpdated(e) | Self::IssueDeleted(e)) = self else {
+            return None;
+        };
+        let item = e
+            .changelog
+            .iter()
+            .find(|i| i.field.eq_ignore_ascii_case("status"))?;
+        Some(StatusChange {
+            from: status_ref(item.from.as_deref(), item.from_string.as_ref()),
+            to: status_ref(item.to.as_deref(), item.to_string.as_ref()),
+        })
     }
 
     /// Returns `true` when the comment holds `autumn-ref: `: the client
     /// wrote it (loop guard, B9).
     #[must_use]
     pub fn has_comment_marker(&self) -> bool {
-        let _ = COMMENT_MARKER;
-        false
+        match self {
+            Self::CommentCreated(e) | Self::CommentUpdated(e) | Self::CommentDeleted(e) => e
+                .comment
+                .body
+                .as_ref()
+                .is_some_and(|b| b.contains_text(COMMENT_MARKER)),
+            _ => false,
+        }
     }
 }
 
@@ -277,8 +325,143 @@ pub struct ParsedEvent {
 /// `webhookEvent`, or has no issue id on an issue or comment event. The
 /// error never holds a value from the body.
 pub fn parse_event(body: &[u8]) -> Result<ParsedEvent> {
-    let _ = (body, PayloadWire::default());
-    Err(JiraError::invalid("webhook body", "not ready"))
+    let payload: PayloadWire = serde_json::from_slice(body)
+        .map_err(|_| bad_body("must be a JSON object with a webhookEvent string"))?;
+    let name = payload
+        .webhook_event
+        .ok_or_else(|| bad_body("must have a webhookEvent string"))?;
+    let timestamp = payload.timestamp.as_ref().and_then(|t| match t {
+        Value::Number(n) => n.as_i64().and_then(JiraTimestamp::from_epoch_ms),
+        Value::String(text) => JiraTimestamp::parse(text).ok(),
+        _ => None,
+    });
+    let actor = account(payload.user.as_ref());
+    let event = match name.as_str() {
+        ISSUE_CREATED | ISSUE_UPDATED | ISSUE_DELETED => {
+            let event = IssueEvent {
+                issue: webhook_issue(payload.issue.as_ref())?,
+                changelog: changelog(payload.changelog.as_ref()),
+                type_name: payload.issue_event_type_name,
+            };
+            match name.as_str() {
+                ISSUE_CREATED => JiraEvent::IssueCreated(event),
+                ISSUE_UPDATED => JiraEvent::IssueUpdated(event),
+                _ => JiraEvent::IssueDeleted(event),
+            }
+        }
+        COMMENT_CREATED | COMMENT_UPDATED | COMMENT_DELETED => {
+            let event = CommentEvent {
+                issue: webhook_issue(payload.issue.as_ref())?,
+                comment: webhook_comment(payload.comment.as_ref())?,
+            };
+            match name.as_str() {
+                COMMENT_CREATED => JiraEvent::CommentCreated(event),
+                COMMENT_UPDATED => JiraEvent::CommentUpdated(event),
+                _ => JiraEvent::CommentDeleted(event),
+            }
+        }
+        _ => JiraEvent::Other { name },
+    };
+    Ok(ParsedEvent {
+        event,
+        timestamp,
+        actor,
+    })
+}
+
+/// A parse error. It never holds a value from the body.
+fn bad_body(reason: &'static str) -> JiraError {
+    JiraError::invalid("webhook body", reason)
+}
+
+/// One side of a status change.
+fn status_ref(id: Option<&str>, name: Option<&String>) -> StatusRef {
+    StatusRef {
+        id: id.and_then(|t| StatusId::parse(t).ok()),
+        name: name.cloned(),
+    }
+}
+
+/// Returns a non-empty string, or a number as text. Other values give `None`.
+fn text(value: Option<&Value>) -> Option<String> {
+    match value? {
+        Value::String(s) if !s.is_empty() => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+/// Returns `accountId` of a user object.
+fn account(user: Option<&Value>) -> Option<AccountId> {
+    text(user?.get("accountId")).map(AccountId::from_response)
+}
+
+/// Reads the payload issue. Only a numeric `id` is required.
+fn webhook_issue(issue: Option<&Value>) -> Result<WebhookIssue> {
+    let issue = issue.ok_or_else(|| bad_body("an issue event needs an issue"))?;
+    let id = text(issue.get("id"))
+        .and_then(|id| IssueId::parse(&id).ok())
+        .ok_or_else(|| bad_body("the issue needs a numeric id"))?;
+    let fields = issue.get("fields");
+    let field = |name: &str| fields.and_then(|f| f.get(name));
+    let status = field("status")
+        .and_then(|s| StatusWire::deserialize(s).ok())
+        .and_then(StatusWire::into_summary);
+    let labels = field("labels").and_then(Value::as_array).map(|items| {
+        items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect()
+    });
+    Ok(WebhookIssue {
+        id,
+        key: text(issue.get("key")).map(IssueKey::from_response),
+        fields: WebhookFields {
+            summary: field("summary").and_then(Value::as_str).map(str::to_owned),
+            status,
+            labels,
+            project: text(field("project").and_then(|p| p.get("key")))
+                .map(ProjectKey::from_response),
+            issue_type: text(field("issuetype").and_then(|t| t.get("name"))),
+        },
+    })
+}
+
+/// Reads the payload comment. A numeric `id` is required.
+fn webhook_comment(comment: Option<&Value>) -> Result<WebhookComment> {
+    let comment = comment.ok_or_else(|| bad_body("a comment event needs a comment"))?;
+    let id = text(comment.get("id"))
+        .and_then(|id| CommentId::parse(&id).ok())
+        .ok_or_else(|| bad_body("the comment needs a numeric id"))?;
+    Ok(WebhookComment {
+        id,
+        body: comment
+            .get("body")
+            .and_then(|b| Adf::from_value(b.clone()).ok()),
+        author: account(comment.get("author")),
+    })
+}
+
+/// Reads `changelog.items`. The `changelog.id` can be a string or a number.
+/// The parser does not read it (F40).
+fn changelog(changelog: Option<&Value>) -> Vec<ChangeItem> {
+    let Some(items) = changelog
+        .and_then(|c| c.get("items"))
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .map(|item| ChangeItem {
+            field: text(item.get("field")).unwrap_or_default(),
+            from: text(item.get("from")),
+            to: text(item.get("to")),
+            from_string: text(item.get("fromString")),
+            to_string: text(item.get("toString")),
+        })
+        .collect()
 }
 
 /// Checks `X-Hub-Signature` in constant time (`Mac::verify_slice`).
@@ -287,23 +470,42 @@ pub fn parse_event(body: &[u8]) -> Result<ParsedEvent> {
 /// apps that do not use autumn.
 #[must_use]
 pub fn verify_signature(secret: &[u8], body: &[u8], header: &str) -> bool {
-    let _ = (secret, body, header);
-    false
+    if !policy::signature_shape_ok(header.as_bytes()) {
+        return false;
+    }
+    let Some(Ok(expected)) = header
+        .as_bytes()
+        .get(SIGNATURE_PREFIX.len()..)
+        .map(|hex| data_encoding::HEXLOWER.decode(hex))
+    else {
+        return false;
+    };
+    let Ok(mut mac) = HmacSha256::new_from_slice(secret) else {
+        return false;
+    };
+    mac.update(body);
+    // `verify_slice` compares in constant time. Never compare MAC bytes with `==`.
+    mac.verify_slice(&expected).is_ok()
 }
 
 /// Returns the signature header value: `sha256=<lower hex>`.
 #[must_use]
 pub fn sign(secret: &[u8], body: &[u8]) -> String {
-    let _ = (
-        secret,
-        body,
-        Hmac::<Sha256>::new_from_slice(secret).map(|m| m.finalize()),
-    );
-    String::new()
+    // HMAC takes a key of any length, so `new_from_slice` does not fail.
+    HmacSha256::new_from_slice(secret).map_or_else(
+        |_| String::new(),
+        |mut mac| {
+            mac.update(body);
+            format!(
+                "{SIGNATURE_PREFIX}{}",
+                data_encoding::HEXLOWER.encode(&mac.finalize().into_bytes())
+            )
+        },
+    )
 }
 
 /// The payload format.
-#[derive(Default, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PayloadWire {
     #[serde(default)]
@@ -504,10 +706,11 @@ mod tests {
         assert_eq!(issue.fields, WebhookFields::default());
         let odd = parse(&json!({
             "webhookEvent": "jira:issue_created",
-            "issue": {"id": "5", "key": "odd key", "fields": {"status": {"name": "no id"}, "project": {"name": "x"}}}
+            "issue": {"id": "5", "key": "lower-7", "fields": {"status": {"name": "no id"}, "project": {"name": "x"}}}
         }));
         let issue = odd.event.issue().unwrap();
-        assert_eq!(issue.key, None, "a bad key is dropped");
+        // A key from Jira is kept as given (lenient, F42).
+        assert_eq!(issue.key.as_ref().map(IssueKey::as_str), Some("lower-7"));
         assert_eq!(issue.fields.status, None);
         assert_eq!(issue.fields.project, None);
         for bad in [
@@ -541,7 +744,7 @@ mod tests {
         let JiraEvent::IssueUpdated(e) = parsed.event else {
             panic!("not updated");
         };
-        assert!(e.changelog.is_empty());
+        assert_eq!(e.changelog, []);
         // Item values that are numbers are read as text.
         let mut numbers = issue_payload("jira:issue_updated");
         numbers["changelog"]["items"] = json!([{"field": "status", "from": 1, "to": 3}]);
