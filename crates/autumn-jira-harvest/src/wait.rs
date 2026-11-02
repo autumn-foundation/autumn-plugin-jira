@@ -10,6 +10,7 @@ use autumn_harvest::failure::WorkflowFailure;
 use autumn_jira::ids::WebhookDeliveryId;
 use autumn_jira::model::{IssueSummary, StatusSummary};
 use autumn_jira::{IssueId, IssueKey, StatusTarget};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -36,6 +37,15 @@ pub const DEFAULT_POLL_EVERY: Duration = Duration::from_secs(15 * 60);
 /// rounds use less than half of that cap, so the rest of the workflow has
 /// room. The default poll over [`MAX_WAIT`] is 2 784 rounds.
 pub const MAX_POLL_ROUNDS: u64 = 3_000;
+
+/// The time that a wait keeps free before the execution deadline of the
+/// run: 46 minutes.
+///
+/// The last read needs it: five attempts of `READ_START_TO_CLOSE` and the
+/// backoff between them. A run with an `execution_timeout` that ends before
+/// the wait ends gets `TimedOut` at the start of this margin, so the
+/// workflow can still act on the timeout (R4-harvest-determinism-5).
+pub const LAST_READ_MARGIN: Duration = Duration::from_secs(46 * 60);
 
 /// The most signal rounds of one wait that do not end it.
 ///
@@ -131,7 +141,9 @@ pub enum StatusWait {
 /// 3. `deadline = ctx.system_now() + timeout`. The history records each
 ///    `system_now()`, so a replay sees the same times. The workflow clock
 ///    `now` of the context stays at the start time in production, so the
-///    wait never reads it (W2, B1).
+///    wait never reads it (W2, B1). When the run has an execution deadline
+///    (`ctx.deadline()`, the same on each replay), the wait deadline is at
+///    most [`LAST_READ_MARGIN`] before it.
 /// 4. Each round races the signal [`SIGNAL`] against a fresh timer of
 ///    `min(remaining, poll_every)`. A signal of another issue, or with a
 ///    timestamp older than the newest time seen, is skipped. The newest time
@@ -229,7 +241,7 @@ async fn wait_loop(
     }
     let mut newest_ms = first.updated.map(|t| t.epoch_ms());
     let timeout = chrono::Duration::from_std(options.timeout).map_err(|_| invalid_timeout())?;
-    let deadline = ctx.system_now() + timeout;
+    let deadline = wait_deadline(ctx.system_now(), timeout, ctx.deadline());
     let mut signal_rounds: u32 = 0;
     loop {
         let remaining = (deadline - ctx.system_now())
@@ -391,6 +403,26 @@ fn is_missed_poll(error: &HarvestError) -> bool {
         .and_then(|details| details.get("retryable"))
         .and_then(Value::as_bool)
         == Some(true)
+}
+
+/// The deadline of a wait that starts at `now`: `now + timeout`, but at
+/// most [`LAST_READ_MARGIN`] before the execution deadline of the run, and
+/// never before `now`.
+fn wait_deadline(
+    now: DateTime<Utc>,
+    timeout: chrono::Duration,
+    run_deadline: Option<DateTime<Utc>>,
+) -> DateTime<Utc> {
+    let wanted = now + timeout;
+    let Some(run_deadline) = run_deadline else {
+        return wanted;
+    };
+    let margin = chrono::Duration::from_std(LAST_READ_MARGIN).unwrap_or(chrono::Duration::MAX);
+    let latest = run_deadline
+        .checked_sub_signed(margin)
+        .unwrap_or(now)
+        .max(now);
+    wanted.min(latest)
 }
 
 /// The label of the signal branch of a race.
