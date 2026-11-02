@@ -155,8 +155,10 @@ async fn display_has_no_secret_or_query() {
         ] {
             assert!(!display.contains(needle), "{needle} in {display}");
         }
+        // AC13: `Debug` holds no body text, also for `Validation` and
+        // `RateLimited`. It gives the number of messages only.
         let debug = format!("{err:?}");
-        for needle in [DEFAULT_API_TOKEN, "fields=", "Basic "] {
+        for needle in ["sk-live", "hunter2", DEFAULT_API_TOKEN, "fields=", "Basic "] {
             assert!(!debug.contains(needle), "{needle} in {debug}");
         }
     }

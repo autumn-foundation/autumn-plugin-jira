@@ -111,6 +111,14 @@ async fn create_get_edit_delete(fake: &FakeJira, client: &JiraClient) {
         .property("app-data", json!({"alert": 42}));
     let created = client.create_issue(&issue).await.unwrap();
     assert_eq!(created.key.as_str(), "OPS-1");
+    // AC6: the create body sets the user property.
+    assert_eq!(
+        client
+            .get_issue_property(&created.key, "app-data")
+            .await
+            .unwrap(),
+        Some(json!({"alert": 42}))
+    );
 
     let got = client.get_issue(&created.key).await.unwrap();
     assert_eq!((&got.id, &got.key), (&created.id, &created.key));
@@ -339,7 +347,8 @@ async fn projects_list_all_pages(fake: &FakeJira, client: &JiraClient) {
     );
 }
 
-async fn issue_types_of_a_project(_fake: &FakeJira, client: &JiraClient) {
+async fn issue_types_of_a_project(fake: &FakeJira, client: &JiraClient) {
+    issue_types_list_all_pages(fake, client).await;
     let types = client.issue_types(&ops()).await.unwrap();
     let names: Vec<&str> = types.iter().map(|t| t.name.as_str()).collect();
     assert_eq!(names, ["Task", "Incident", "Bug"]);
@@ -348,6 +357,36 @@ async fn issue_types_of_a_project(_fake: &FakeJira, client: &JiraClient) {
     let created = client.create_issue(&by_id).await.unwrap();
     let issue = client.get_issue(&created.key).await.unwrap();
     assert_eq!(issue.fields.issue_type.unwrap().name, "Bug");
+}
+
+/// AC7: the issue types (createmeta) of a project come from all pages.
+async fn issue_types_list_all_pages(fake: &FakeJira, client: &JiraClient) {
+    let mut big = FakeProject::new("BIG", "30000", "Big");
+    for n in 0..53 {
+        big = big.issue_type(&format!("{}", 40_000 + n), &format!("Type {n:02}"));
+    }
+    let fake = fake.clone().with_project(big);
+    let key = ProjectKey::parse("BIG").unwrap();
+    let before = fake.count(FakeOp::CreateMeta);
+    let types = client.issue_types(&key).await.unwrap();
+    assert_eq!(types.len(), 53);
+    assert_eq!(types[0].name, "Type 00");
+    assert_eq!(types[52].name, "Type 52");
+    assert_eq!(types[52].id, IssueTypeId::parse("40052").unwrap());
+    assert_eq!(
+        fake.count(FakeOp::CreateMeta) - before,
+        2,
+        "two pages of 50"
+    );
+    let one_page = with(client, |s| s.max_pages = 1);
+    let err = one_page.issue_types(&key).await.unwrap_err();
+    assert_eq!(
+        err,
+        JiraError::PageLimit {
+            op: Op::ListIssueTypes,
+            max: 1
+        }
+    );
 }
 
 async fn approximate_count(_fake: &FakeJira, client: &JiraClient) {

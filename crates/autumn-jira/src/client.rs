@@ -12,13 +12,12 @@ mod pager;
 mod settings;
 
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use san_mateo::SanMateo;
 use san_mateo::clock::{Entropy, OsEntropy};
 use san_mateo::transport::HttpTransport;
 use serde_json::{Value, json};
-use tokio::sync::OnceCell;
 
 use crate::adf::Adf;
 use crate::backend::{
@@ -105,7 +104,9 @@ pub struct JiraClient {
     backend: Arc<dyn JiraBackend>,
     settings: ClientSettings,
     entropy: Arc<dyn Entropy>,
-    myself: Arc<OnceCell<AccountId>>,
+    /// The account id of the credentials. `refresh_site` clears it,
+    /// because a reconnect can give the connection another user.
+    myself: Arc<Mutex<Option<AccountId>>>,
 }
 
 impl fmt::Debug for JiraClient {
@@ -194,7 +195,7 @@ impl JiraClient {
             backend,
             settings: ClientSettings::default(),
             entropy: Arc::new(OsEntropy),
-            myself: Arc::new(OnceCell::new()),
+            myself: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -248,6 +249,10 @@ impl JiraClient {
     /// another site. The clones of this client share the backend, so they
     /// also use the new site.
     ///
+    /// It also clears the cached account id. A reconnect can give the
+    /// connection another user, and the marker lookup compares the comment
+    /// author with that id. The next marked write reads `GET /myself` again.
+    ///
     /// It returns the new cloud id. It returns `None` for a fixed site: an
     /// API token client, a `jira-basic` connection, or a target cloud id.
     ///
@@ -256,7 +261,14 @@ impl JiraClient {
     /// The errors of the read, for example `JiraError::CloudId` when no
     /// site matches.
     pub async fn refresh_site(&self) -> Result<Option<CloudId>> {
+        *self.cached_account() = None;
         self.backend.refresh_site().await
+    }
+
+    /// The lock of the cached account id. A poisoned lock still holds a
+    /// whole value, so the call takes it.
+    fn cached_account(&self) -> std::sync::MutexGuard<'_, Option<AccountId>> {
+        self.myself.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Reads the user of the credentials (`GET /myself`). It caches the
@@ -273,7 +285,7 @@ impl JiraClient {
                 format!("{API}/myself"),
             ))
             .await?;
-        let _ = self.myself.set(user.account_id.clone());
+        *self.cached_account() = Some(user.account_id.clone());
         Ok(user)
     }
 
@@ -284,19 +296,11 @@ impl JiraClient {
     ///
     /// The typed errors of the call.
     pub async fn account_id(&self) -> Result<AccountId> {
-        self.myself
-            .get_or_try_init(|| async {
-                let user: User = self
-                    .read(&ApiRequest::new(
-                        Op::Myself,
-                        Method::Get,
-                        format!("{API}/myself"),
-                    ))
-                    .await?;
-                Ok::<_, JiraError>(user.account_id)
-            })
-            .await
-            .cloned()
+        let cached = self.cached_account().clone();
+        if let Some(id) = cached {
+            return Ok(id);
+        }
+        Ok(self.myself().await?.account_id)
     }
 
     /// Reads the site info (`GET /serverInfo`).

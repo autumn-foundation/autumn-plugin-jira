@@ -218,8 +218,10 @@ Rules for each example (EX8 checks them by text):
   autumn-jira-camel --example camel_route`. `RUN_TIMEOUT` is 30 s.
 - **Check and failure tests:** ex: `camel_route::the_route_creates_and_moves`
   checks the out headers and the Jira state with exact values.
-  `camel_route::unknown_option_fails_at_route_add` wants `InvalidUri` that
-  lists the option names. `camel_route::a_wrong_value_fails_the_check`.
+  `camel_route::unknown_option_fails_at_route_add` wants `InvalidUri` from
+  the component. At the route add, camel-core wraps it in a `RouteError`
+  that keeps the `InvalidUri` text and the option names. The test checks
+  both variants and the text. `camel_route::a_wrong_value_fails_the_check`.
 
 ### 7.5 `ecosystem` (EX5, EX6, EX7)
 
@@ -263,10 +265,16 @@ Rules for each example (EX8 checks them by text):
   example sets each env var that the example needs.
   `readme_snippets_copy_their_examples` checks that a snippet that names an
   example holds only code lines of that example, in the same order.
-  Comments and test items of the example do not count.
+  Comments and test items of the example do not count. The README doc
+  test does not compile a `rust,ignore` block, so the same test fails on
+  a `rust,ignore` block that names no example.
   `docs_give_the_ci_commands_of_the_separate_workspace` checks that
   `CLAUDE.md` and the README give the ecosystem commands of CI. `no_example_turns_on_the_dev_only_proxy_flags` checks for
-  `full_migrations_sql`, `allow_private_hosts` and `allow_plain_http`.
+  `full_migrations_sql`, `allow_private_hosts` and `allow_plain_http`. It
+  reads the example sources, the copied files and the ecosystem files.
+  `each_example_is_wired` also refuses `full_migrations_sql` in an example
+  source. The self-test `a_comment_or_a_string_is_not_code` has a bad
+  sample for that rule.
   `each_example_file_is_in_the_list` finds an example file that is not in
   the list. `the_ecosystem_workspace_stays_apart` checks the separate
   workspace.

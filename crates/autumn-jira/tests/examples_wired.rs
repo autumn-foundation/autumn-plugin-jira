@@ -553,20 +553,30 @@ mod wired {
     /// code lines of that example, in the same order. Comments and test
     /// items of the example do not count. `source` gives the text of an
     /// example by name.
+    ///
+    /// The README doc test does not compile a `rust,ignore` block. So such
+    /// a block must name an example, and this check then reads it (AC38).
     pub fn snippet_violations(
         readme: &str,
         source: &dyn Fn(&str) -> Option<String>,
     ) -> Vec<String> {
         let mut out = Vec::new();
-        for (_, body) in fenced_blocks(readme) {
-            let Some(first) = body.first() else {
-                continue;
-            };
-            let Some(name) = first
-                .trim()
-                .strip_prefix("// From the ")
-                .and_then(|rest| rest.split_whitespace().next())
-            else {
+        for (info, body) in fenced_blocks(readme) {
+            let ignored = info.starts_with("rust") && info.split(',').any(|w| w.trim() == "ignore");
+            let name = body.first().and_then(|first| {
+                first
+                    .trim()
+                    .strip_prefix("// From the ")
+                    .and_then(|rest| rest.split_whitespace().next())
+            });
+            let Some(name) = name else {
+                if ignored {
+                    let code = body.iter().map(|l| l.trim()).find(|l| !l.is_empty());
+                    out.push(format!(
+                        "README: a `rust,ignore` snippet is not compiled and names no example: {}",
+                        code.unwrap_or("(empty)")
+                    ));
+                }
                 continue;
             };
             let name = name.trim_matches('`');
@@ -657,6 +667,12 @@ mod self_tests {
                     #[cfg(test)]\n\
                     mod tests {\n    fn t() { super::check().expect_err(\"x\"); }\n}\n";
         assert_eq!(wired::source_violations("x", good, false), NONE);
+        // EX8: an example that runs the full migration SQL fails the check.
+        let full = format!("{good}fn migrate() {{ migrate::full_migrations_sql(); }}\n");
+        assert_eq!(
+            wired::source_violations("x", &full, false),
+            ["x: use `migrate::apply`"]
+        );
     }
 
     #[test]
@@ -730,8 +746,16 @@ mod self_tests {
                    ```rust,ignore\n// From the other example.\nx();\n```\n";
         let found = wired::snippet_violations(bad, &source);
         assert_eq!(found.len(), 2, "{found:?}");
+        // AC38: the README doc test compiles a `rust` or a `rust,no_run`
+        // block. It does not compile an `ignore` block, so such a block must
+        // name an example.
+        let compiled = "```rust\nlet any = 1;\n```\n```rust,no_run\nlet any = 1;\n```\n";
+        assert_eq!(wired::snippet_violations(compiled, &source), NONE);
         let free = "```rust,ignore\nlet any = 1;\n```\n";
-        assert_eq!(wired::snippet_violations(free, &source), NONE);
+        assert_eq!(
+            wired::snippet_violations(free, &source),
+            ["README: a `rust,ignore` snippet is not compiled and names no example: let any = 1;"]
+        );
         // R2E-tests-guards-9: the order counts, and test code and comments
         // are not the example.
         let two = "fn start() {\n    let a = one();\n    // let c = gone();\n    let b = two();\n}\n\
@@ -871,7 +895,11 @@ fn no_example_turns_on_the_dev_only_proxy_flags() {
         let text = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
             .to_ascii_lowercase();
-        for flag in ["allow_private_hosts", "allow_plain_http"] {
+        for flag in [
+            "full_migrations_sql",
+            "allow_private_hosts",
+            "allow_plain_http",
+        ] {
             assert!(!text.contains(flag), "{} has {flag}", path.display());
         }
     }

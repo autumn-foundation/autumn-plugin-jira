@@ -2,7 +2,8 @@
 //!
 //! `Display` never holds a reply body, a header value, a query string or a
 //! secret. Jira `errorMessages` are in `JiraError::messages`, not in
-//! `Display`.
+//! `Display`. `Debug` gives only the number of the messages and the length
+//! of the `RateLimit-Reason` text.
 
 use std::fmt;
 use std::time::Duration;
@@ -206,7 +207,11 @@ impl MarkerRef {
 }
 
 /// An error of a Jira client call.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+///
+/// `Debug` is not derived. It gives the number of the `Validation` messages
+/// and the length of the `RateLimit-Reason` text. That text comes from the
+/// reply, so a log line of `{err:?}` holds no body text (AC13).
+#[derive(Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum JiraError {
     /// The caller gave a bad value. Nothing was sent.
@@ -383,6 +388,116 @@ pub enum JiraError {
         /// A short code.
         code: &'static str,
     },
+}
+
+/// The length of a text in `Debug`, for example `13 chars`.
+struct Chars(usize);
+
+impl fmt::Debug for Chars {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} chars", self.0)
+    }
+}
+
+impl fmt::Debug for JiraError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidInput { what, reason } => f
+                .debug_struct("InvalidInput")
+                .field("what", what)
+                .field("reason", reason)
+                .finish(),
+            Self::NotFoundOrForbidden { op } => op_only(f, "NotFoundOrForbidden", *op),
+            Self::Unauthorized { op, status, hint } => f
+                .debug_struct("Unauthorized")
+                .field("op", op)
+                .field("status", status)
+                .field("hint", hint)
+                .finish(),
+            Self::CaptchaRequired { op } => op_only(f, "CaptchaRequired", *op),
+            // The messages are body text: only their number is shown.
+            Self::Validation {
+                op,
+                status,
+                messages,
+                fields,
+            } => f
+                .debug_struct("Validation")
+                .field("op", op)
+                .field("status", status)
+                .field("messages", &messages.len())
+                .field("fields", fields)
+                .finish(),
+            Self::Conflict { op } => op_only(f, "Conflict", *op),
+            Self::Gone { op } => op_only(f, "Gone", *op),
+            Self::PayloadTooLarge { op } => op_only(f, "PayloadTooLarge", *op),
+            // The reason is a header value: only its length is shown.
+            Self::RateLimited {
+                op,
+                retry_after,
+                reason,
+            } => f
+                .debug_struct("RateLimited")
+                .field("op", op)
+                .field("retry_after", retry_after)
+                .field("reason", &reason.as_ref().map(|r| Chars(r.chars().count())))
+                .finish(),
+            Self::Upstream { op, status } => op_status(f, "Upstream", *op, *status),
+            Self::OutcomeUnknown { op, cause, marker } => f
+                .debug_struct("OutcomeUnknown")
+                .field("op", op)
+                .field("cause", cause)
+                .field("marker", marker)
+                .finish(),
+            Self::Network { op, code } => f
+                .debug_struct("Network")
+                .field("op", op)
+                .field("code", code)
+                .finish(),
+            Self::Redirect { op, status } => op_status(f, "Redirect", *op, *status),
+            Self::UnexpectedStatus { op, status } => op_status(f, "UnexpectedStatus", *op, *status),
+            Self::Decode { op, reason } => f
+                .debug_struct("Decode")
+                .field("op", op)
+                .field("reason", reason)
+                .finish(),
+            Self::PaginationStalled { op, pages } => f
+                .debug_struct("PaginationStalled")
+                .field("op", op)
+                .field("pages", pages)
+                .finish(),
+            Self::PageLimit { op, max } => f
+                .debug_struct("PageLimit")
+                .field("op", op)
+                .field("max", max)
+                .finish(),
+            Self::TransitionNotAvailable { target, available } => f
+                .debug_struct("TransitionNotAvailable")
+                .field("target", target)
+                .field("available", available)
+                .finish(),
+            Self::LabelsNotOnScreen { project } => f
+                .debug_struct("LabelsNotOnScreen")
+                .field("project", project)
+                .finish(),
+            Self::CloudId(text) => f.debug_tuple("CloudId").field(text).finish(),
+            Self::Config { code } => f.debug_struct("Config").field("code", code).finish(),
+            Self::Auth { code } => f.debug_struct("Auth").field("code", code).finish(),
+        }
+    }
+}
+
+/// Writes the `Debug` of a variant that has only an `op`.
+fn op_only(f: &mut fmt::Formatter<'_>, name: &str, op: Op) -> fmt::Result {
+    f.debug_struct(name).field("op", &op).finish()
+}
+
+/// Writes the `Debug` of a variant that has an `op` and a `status`.
+fn op_status(f: &mut fmt::Formatter<'_>, name: &str, op: Op, status: u16) -> fmt::Result {
+    f.debug_struct(name)
+        .field("op", &op)
+        .field("status", &status)
+        .finish()
 }
 
 /// How a camel host shows an error.
@@ -1046,6 +1161,47 @@ mod tests {
         assert!(unauthorized.to_string().contains("read:jira-work"));
         for (e, ..) in samples() {
             assert!(!e.to_string().contains("Field 'priority'"), "{e}");
+        }
+    }
+
+    #[test]
+    fn debug_holds_no_messages_or_reason() {
+        let e = JiraError::Validation {
+            op: Op::CreateIssue,
+            status: 400,
+            messages: vec!["secret one".to_owned(), "secret two".to_owned()],
+            fields: vec!["summary".to_owned()],
+        };
+        assert_eq!(
+            format!("{e:?}"),
+            "Validation { op: CreateIssue, status: 400, messages: 2, fields: [\"summary\"] }"
+        );
+        let limited = JiraError::RateLimited {
+            op: Op::Search,
+            retry_after: Some(Duration::from_secs(3)),
+            reason: Some("secret header".to_owned()),
+        };
+        assert_eq!(
+            format!("{limited:?}"),
+            "RateLimited { op: Search, retry_after: Some(3s), reason: Some(13 chars) }"
+        );
+        // The other variants keep the derived shape.
+        assert_eq!(
+            format!(
+                "{:?}",
+                JiraError::Upstream {
+                    op: Op::Search,
+                    status: 503
+                }
+            ),
+            "Upstream { op: Search, status: 503 }"
+        );
+        assert_eq!(
+            format!("{:?}", JiraError::CloudId("none".to_owned())),
+            "CloudId(\"none\")"
+        );
+        for (e, ..) in samples() {
+            assert!(!format!("{e:?}").contains("secret"), "{e:?}");
         }
     }
 
