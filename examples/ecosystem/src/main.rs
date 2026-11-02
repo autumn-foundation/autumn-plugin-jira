@@ -471,7 +471,8 @@ async fn run_unbounded(
     let key = RouteKey::new(Secret::new(format!("route-key-{}", OsEntropy.hex(16))))?;
     // The autumn app first: it starts nothing that needs a stop.
     let bridge = HarvestSignalBridge::new(pool.clone(), jira.clone(), key.clone())
-        .allow_workflow(INCIDENT_FLOW);
+        .allow_workflow(INCIDENT_FLOW)
+        .site_host(transport::site_host()?);
     let app = app::test_app(&san, bridge.clone(), &scenario.app_secret)?;
     let (mut camel, source) = start_camel(&san, transport::durable_client(&san)).await?;
     let handle = CamelHandle::new();

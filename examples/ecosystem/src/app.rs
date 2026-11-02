@@ -73,8 +73,10 @@ pub fn san_mateo_plugin(san: &SanMateo) -> Result<SanMateoPlugin, BoxError> {
 /// The bridge is a sink for all actors (R2-webhook-security-5). The bot
 /// account makes the API writes, and a status that the bot sets must also
 /// signal a waiting run. The bridge does not write to Jira, so it cannot
-/// make a loop. It reads the status from the site, not from the payload.
-/// Other sinks of the app do not get the events of the bot.
+/// make a loop. It reads the issue from the site of its client, and it
+/// knows the host of that site (`transport::site_host`). So it refuses a
+/// delivery of another site. Other sinks of the app do not get the events
+/// of the bot.
 ///
 /// # Errors
 ///

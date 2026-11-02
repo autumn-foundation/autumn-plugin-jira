@@ -245,8 +245,9 @@ Rules for each example (EX8 checks them by text):
   `examples/ecosystem/src/tests.rs`. EX5: `happy_path_timeline_is_exact`.
   EX6: `lost_create_fails_closed`, `bad_webhook_secret_resolves_by_poll`,
   `no_webhook_no_poll_times_out`, `a_wrong_value_fails_the_check`. EX7:
-  `webhook_negatives`, `two_tenants_stay_apart`,
-  `is_retryable_copy_matches_harvest_camel`, `boot_three_plugins_real_http`.
+  `webhook_negatives`, `a_delivery_of_another_site_is_refused`,
+  `two_tenants_stay_apart`, `is_retryable_copy_matches_harvest_camel`,
+  `boot_three_plugins_real_http`.
   Status: done (WP7).
 
 ### 7.6 The wiring guard (EX8)

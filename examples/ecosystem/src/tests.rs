@@ -451,8 +451,9 @@ async fn boot_child_server() {
     let pool = engine_pool(&url, 4, DbRole::Hot, &EngineDbTimeouts::default()).unwrap();
     let key = RouteKey::new(Secret::new(format!("route-key-{}", OsEntropy.hex(16)))).unwrap();
     let jira = transport::jira_client(&san);
-    let bridge =
-        HarvestSignalBridge::new(pool, jira.clone(), key.clone()).allow_workflow(INCIDENT_FLOW);
+    let bridge = HarvestSignalBridge::new(pool, jira.clone(), key.clone())
+        .allow_workflow(INCIDENT_FLOW)
+        .site_host(transport::site_host().unwrap());
     let queue = format!("ecosystem-boot-{}", OsEntropy.hex(8));
     let mut activities = autumn_jira_harvest::activities();
     activities.push(san_mateo_harvest::san_mateo_proxy_info());
