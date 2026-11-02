@@ -49,6 +49,7 @@ mod tests;
 
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use autumn_harvest::diesel;
@@ -347,14 +348,53 @@ const fn s(n: usize) -> &'static str {
 /// A setup error, a workflow failure (`workflow <id>: ...`), or the run
 /// timeout.
 pub async fn run(url: &str, scenario: &Scenario, sites: Sites) -> Result<Report, BoxError> {
-    let timeout = run_timeout();
-    // The future of the run is large, so it lives on the heap.
-    tokio::time::timeout(timeout, Box::pin(run_unbounded(url, scenario, sites)))
-        .await
-        .map_err(|_| format!("the run did not end in {timeout:?}"))?
+    run_within(url, scenario, sites, run_timeout(), &StopLog::default()).await
 }
 
-async fn run_unbounded(url: &str, scenario: &Scenario, sites: Sites) -> Result<Report, BoxError> {
+/// The stops of one run: the connector, the worker and camel. The tests
+/// read it after a run.
+#[derive(Debug, Default)]
+struct StopLog {
+    connector: AtomicBool,
+    runner: AtomicBool,
+    camel: AtomicBool,
+}
+
+impl StopLog {
+    /// Records one stop.
+    fn stopped(flag: &AtomicBool) {
+        flag.store(true, Ordering::SeqCst);
+    }
+
+    /// `true` when the run stopped the connector, the worker and camel.
+    #[cfg(test)]
+    fn all(&self) -> bool {
+        [&self.connector, &self.runner, &self.camel]
+            .iter()
+            .all(|f| f.load(Ordering::SeqCst))
+    }
+}
+
+/// [`run`] with the time limit `limit`. `stops` records each stop.
+async fn run_within(
+    url: &str,
+    scenario: &Scenario,
+    sites: Sites,
+    limit: Duration,
+    stops: &StopLog,
+) -> Result<Report, BoxError> {
+    // The future of the run is large, so it lives on the heap.
+    tokio::time::timeout(limit, Box::pin(run_unbounded(url, scenario, sites, stops)))
+        .await
+        .map_err(|_| format!("the run did not end in {limit:?}"))?
+}
+
+async fn run_unbounded(
+    url: &str,
+    scenario: &Scenario,
+    sites: Sites,
+    stops: &StopLog,
+) -> Result<Report, BoxError> {
     migrate_once(url).await?;
     let pool = engine_pool(url, 8, DbRole::Hot, &EngineDbTimeouts::default())?;
     let san = transport::san_mateo(&sites, CLIENT_SECRET).await?;
@@ -433,10 +473,13 @@ async fn run_unbounded(url: &str, scenario: &Scenario, sites: Sites) -> Result<R
     // of the run comes first.
     cancel.cancel();
     let stopped_connector = connector.await;
+    StopLog::stopped(&stops.connector);
     if let Some(runner) = runner.take() {
         runner.stop().await;
     }
+    StopLog::stopped(&stops.runner);
     let stopped_camel = camel.stop().await;
+    StopLog::stopped(&stops.camel);
     let driven = driven?;
     stopped_connector?;
     stopped_camel?;

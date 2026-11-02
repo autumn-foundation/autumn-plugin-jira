@@ -169,6 +169,37 @@ async fn no_webhook_no_poll_times_out() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_run_timeout_still_stops_everything() {
+    let Some(url) = database_url() else { return };
+    // The run waits for Done, and nothing resolves the issue.
+    let scenario = Scenario {
+        person_resolves: false,
+        wait_secs: 3600,
+        poll_every_secs: None,
+        ..Scenario::happy()
+    };
+    let limit = Duration::from_secs(20).saturating_mul(time_factor());
+    let stops = StopLog::default();
+    let err = {
+        let _one = ONE_RUN.lock().await;
+        let sites = scenario_sites(&scenario);
+        Box::pin(run_within(&url, &scenario, sites, limit, &stops))
+            .await
+            .expect_err("the run times out")
+            .to_string()
+    };
+    assert!(err.starts_with("the run did not end in"), "{err}");
+    assert!(
+        stops.all(),
+        "the connector, the worker and camel stop: {stops:?}"
+    );
+    // The next run in this process passes.
+    let (report, _sites) = Box::pin(run_scenario(&url, &Scenario::happy())).await;
+    let report = report.expect("the happy path runs after a timeout");
+    check(&report.summary).unwrap_or_else(|e| panic!("{e}\n{}", report.summary));
+}
+
 #[test]
 fn a_wrong_value_fails_the_check() {
     let mut summary = Summary {
