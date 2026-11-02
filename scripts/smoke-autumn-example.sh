@@ -167,20 +167,32 @@ for profile in dev prod; do
   no_secrets_in_log
 done
 
-# The real path (JIRA_SITE is set) with no API token: the boot stops
-# before any call to Jira, and the error names the variable.
+# boot_fails NAME VAR=VALUE...: starts the real path (JIRA_SITE is set)
+# with no API token. The boot must stop before any call to Jira with a
+# non-zero exit, and the error must name the env var NAME.
+boot_fails() {
+  local name=$1
+  shift
+  start dev JIRA_WEBHOOK_SECRET="$hook_secret" JIRA_SITE=acme JIRA_EMAIL=smoke@example.com "$@"
+  for _ in $(seq 1 300); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  kill -0 "$pid" 2>/dev/null && fail "the app runs with no API token"
+  local code=0
+  wait "$pid" || code=$?
+  pid=""
+  [ "$code" -ne 0 ] || fail "exit code 0 with no API token"
+  grep -q "$name" "$work/app.log" || fail "the error does not name the variable $name"
+  no_secrets_in_log
+}
+
 echo "autumn_app: a missing JIRA_API_TOKEN stops the boot"
-start dev JIRA_WEBHOOK_SECRET="$hook_secret" JIRA_SITE=acme JIRA_EMAIL=smoke@example.com
-for _ in $(seq 1 300); do
-  kill -0 "$pid" 2>/dev/null || break
-  sleep 0.1
-done
-kill -0 "$pid" 2>/dev/null && fail "the app runs with no API token"
-code=0
-wait "$pid" || code=$?
-pid=""
-[ "$code" -ne 0 ] || fail "exit code 0 with no API token"
-grep -q JIRA_API_TOKEN "$work/app.log" || fail "the error does not name the variable"
-no_secrets_in_log
+boot_fails JIRA_API_TOKEN
+
+# The real path reads the profile file and the AUTUMN_JIRA__* env vars,
+# as the fake path does. So the error names the env var of the override.
+echo "autumn_app: the real path reads the AUTUMN_JIRA__ env vars"
+boot_fails SMOKE_JIRA_TOKEN AUTUMN_JIRA__API_TOKEN__TOKEN_ENV=SMOKE_JIRA_TOKEN
 
 echo "autumn_app: OK"
