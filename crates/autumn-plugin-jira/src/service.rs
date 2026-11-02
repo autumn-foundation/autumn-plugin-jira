@@ -87,8 +87,11 @@ impl JiraService {
     /// San Mateo mode: a client for another connection of the same
     /// integration. Use it for one Jira site for each tenant.
     ///
-    /// The service keeps one client for each connection id. The clients
-    /// share the settings of `[jira.http]`.
+    /// The service keeps a client for each connection id, at most 1024. A
+    /// new id then drops the client that was used least recently. The
+    /// clients share the settings of `[jira.http]`. Give only connection
+    /// ids that your app has checked: an id makes no call, but each new id
+    /// can drop a cached client.
     ///
     /// `cloud_id` and `site_url` of `[jira.san_mateo]` apply only to the
     /// client of `connection_id`. The client of another connection gets
@@ -108,12 +111,17 @@ impl JiraService {
             })?
             .client(connection_id)
     }
-}
 
-impl JiraService {
-    /// Drops the cached client of `connection_id`.
+    /// San Mateo mode: drops the cached client of `connection_id`. The next
+    /// [`for_connection`](Self::for_connection) makes a new client, which
+    /// reads the site of the connection again. Use it when a tenant
+    /// connects to another site. The default client does not change.
+    ///
+    /// In API token mode, or for an id that is not cached, it does nothing.
     pub fn forget(&self, connection_id: &str) {
-        let _ = connection_id;
+        if let Some(tenants) = &self.tenants {
+            tenants.forget(connection_id);
+        }
     }
 }
 
@@ -148,7 +156,34 @@ pub(crate) struct Tenants {
     cloud_id: Option<CloudId>,
     site_url: Option<String>,
     settings: ClientSettings,
-    clients: Mutex<HashMap<String, JiraClient>>,
+    clients: Mutex<Clients>,
+}
+
+/// The cached clients, with the time of the last use of each one.
+#[derive(Default)]
+struct Clients {
+    /// The client and the tick of its last use, by connection id.
+    map: HashMap<String, (JiraClient, u64)>,
+    /// Goes up by one at each use.
+    tick: u64,
+}
+
+impl Clients {
+    fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    /// Drops the client with the oldest use.
+    fn drop_oldest(&mut self) {
+        let oldest = self
+            .map
+            .iter()
+            .min_by_key(|(_, (_, used))| *used)
+            .map(|(id, _)| id.clone());
+        if let Some(id) = oldest {
+            self.map.remove(&id);
+        }
+    }
 }
 
 impl Tenants {
@@ -191,24 +226,41 @@ impl Tenants {
             });
         }
         let mut clients = self.clients.lock().unwrap_or_else(PoisonError::into_inner);
-        let client = clients
-            .entry(connection_id.to_owned())
-            .or_insert_with(|| {
-                let mut target = SanMateoTarget::new(
-                    self.environment.clone(),
-                    ConnectionKey::new(self.integration.clone(), connection_id),
-                );
-                // The configured site is the site of the default tenant.
-                // Another tenant finds its own site.
-                if self.default_connection.as_deref() == Some(connection_id) {
-                    target.cloud_id.clone_from(&self.cloud_id);
-                    target.site_url.clone_from(&self.site_url);
-                }
-                JiraClient::san_mateo(self.san.clone(), target).with_settings(self.settings.clone())
-            })
-            .clone();
+        clients.tick += 1;
+        let tick = clients.tick;
+        if let Some((client, used)) = clients.map.get_mut(connection_id) {
+            *used = tick;
+            return Ok(client.clone());
+        }
+        if clients.len() >= MAX_CACHED_CLIENTS {
+            clients.drop_oldest();
+        }
+        let mut target = SanMateoTarget::new(
+            self.environment.clone(),
+            ConnectionKey::new(self.integration.clone(), connection_id),
+        );
+        // The configured site is the site of the default tenant. Another
+        // tenant finds its own site.
+        if self.default_connection.as_deref() == Some(connection_id) {
+            target.cloud_id.clone_from(&self.cloud_id);
+            target.site_url.clone_from(&self.site_url);
+        }
+        let client =
+            JiraClient::san_mateo(self.san.clone(), target).with_settings(self.settings.clone());
+        clients
+            .map
+            .insert(connection_id.to_owned(), (client.clone(), tick));
         drop(clients);
         Ok(client)
+    }
+
+    /// Drops the cached client of `connection_id`.
+    fn forget(&self, connection_id: &str) {
+        self.clients
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .map
+            .remove(connection_id);
     }
 
     /// The number of cached clients.
@@ -226,6 +278,7 @@ impl Tenants {
         self.clients
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+            .map
             .contains_key(connection_id)
     }
 
