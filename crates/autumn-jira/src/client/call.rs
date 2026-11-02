@@ -127,7 +127,7 @@ fn stop_error(op: Op, sent: &Sent) -> JiraError {
 }
 
 /// Returns why the outcome of a write is unknown.
-const fn unknown_cause(sent: &Sent) -> UnknownCause {
+pub(crate) const fn unknown_cause(sent: &Sent) -> UnknownCause {
     match sent {
         Ok(reply) => UnknownCause::ServerError(reply.status),
         Err(BackendError::MaybeSent { code }) if matches!(code.as_bytes(), b"timeout") => {

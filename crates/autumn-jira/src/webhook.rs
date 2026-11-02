@@ -802,7 +802,7 @@ mod tests {
         );
         // A delete does not tell who deleted: the author is not the actor.
         let mut deleted = comment_payload("comment_deleted", "x");
-        deleted["comment"]["author"] = bot.clone();
+        deleted["comment"]["author"] = bot;
         assert_eq!(parse(&deleted).actor, None);
         // A top-level `user` always wins.
         deleted["user"] = ann;

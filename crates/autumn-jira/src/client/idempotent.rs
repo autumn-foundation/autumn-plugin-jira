@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use super::call::{Ended, Next};
+use super::call::{self, Ended, Next};
 use super::{
     CommentOutcome, CreateOutcome, JiraClient, TransitionOutcome, comment_request, issue_path,
     transition_request,
@@ -108,6 +108,15 @@ fn is_marked_by(comment: &Comment, own: &AccountId, marker: &str) -> bool {
             .body
             .as_ref()
             .is_some_and(|b| b.to_plain_text().lines().any(|l| l.trim() == marker))
+}
+
+/// The error of a transition that the client does not send again.
+const fn transition_unknown(cause: UnknownCause) -> JiraError {
+    JiraError::OutcomeUnknown {
+        op: Op::DoTransition,
+        cause,
+        marker: None,
+    }
 }
 
 /// Orders ids as numbers: a shorter digit string is smaller.
@@ -323,13 +332,23 @@ impl JiraClient {
 
     /// Moves an issue to a status. Before each attempt, the client reads
     /// the status. At the target, it returns `AlreadyThere` and sends no
-    /// transition. Else it sends the first transition to the target. A
-    /// retry after a lost reply reads the status again, so it is safe.
+    /// transition. Else it sends the first transition to the target.
+    ///
+    /// After a 5xx or a "maybe sent" attempt, the status alone cannot show
+    /// that the first attempt did not run. So the client sends again only
+    /// when the issue is still at the status of the first attempt, and the
+    /// transition is not global and not looped. Such a transition is not
+    /// valid after a commit, so Jira rejects a second send. Else the call
+    /// stops with `OutcomeUnknown`: an automation can have moved the issue
+    /// on, or a global transition can run two times. A 400 or a 409 after
+    /// a "maybe sent" attempt makes the client read the status once more:
+    /// at the target, it returns `Moved`.
     ///
     /// # Errors
     ///
     /// `TransitionNotAvailable` with the names of the transitions when no
-    /// transition goes to the target. The typed errors of the calls.
+    /// transition goes to the target. `OutcomeUnknown` with no marker when
+    /// a send again is not safe. The typed errors of the calls.
     pub async fn transition_to_status_with(
         &self,
         issue: impl Into<IssueRef> + Send,
@@ -339,11 +358,23 @@ impl JiraClient {
         let issue = issue.into();
         let status_only = FieldSet::new([FieldId::known("status")]);
         let mut attempt = 1_u32;
+        // The status before the first attempt, and the cause of the last
+        // "maybe sent" attempt.
+        let mut origin = None;
+        let mut unknown: Option<UnknownCause> = None;
         loop {
             let current = self.get_issue_with(issue.clone(), &status_only).await?;
-            if let Some(status) = current.status().filter(|s| target.matches(s)) {
+            let status = current.status();
+            let status_id = status.as_ref().map(|s| s.id.clone());
+            if let Some(status) = status.filter(|s| target.matches(s)) {
                 return Ok(TransitionOutcome::AlreadyThere(status));
             }
+            if let Some(cause) = unknown
+                && status_id != origin
+            {
+                return Err(transition_unknown(cause));
+            }
+            origin = status_id;
             let list = self.transitions(issue.clone()).await?;
             let Some(transition) = list.iter().find(|t| target.matches(&t.to)) else {
                 return Err(JiraError::TransitionNotAvailable {
@@ -351,8 +382,18 @@ impl JiraClient {
                     available: list.iter().map(|t| t.name.clone()).collect(),
                 });
             };
+            if let Some(cause) = unknown
+                && (transition.is_global || transition.looped)
+            {
+                return Err(transition_unknown(cause));
+            }
             let request = transition_request(&issue, &transition.id, fields);
             let sent = self.backend.send(request).await;
+            let maybe = matches!(
+                call::classify(&sent),
+                policy::Outcome::ServerError | policy::Outcome::MaybeSent
+            )
+            .then(|| call::unknown_cause(&sent));
             match self.judge(OpClass::CheckedWrite, Op::DoTransition, attempt, sent) {
                 Next::Done(_) => {
                     return Ok(TransitionOutcome::Moved {
@@ -361,15 +402,25 @@ impl JiraClient {
                     });
                 }
                 Next::Wait(wait) => {
+                    unknown = maybe.or(unknown);
                     tokio::time::sleep(wait).await;
                     attempt += 1;
                 }
-                Next::Confirm(cause) => {
-                    return Err(JiraError::OutcomeUnknown {
-                        op: Op::DoTransition,
-                        cause,
-                        marker: None,
-                    });
+                Next::Confirm(cause) => return Err(transition_unknown(cause)),
+                Next::Fail(error @ (JiraError::Validation { .. } | JiraError::Conflict { .. }))
+                    if unknown.is_some() =>
+                {
+                    // An earlier attempt can have moved the issue.
+                    let now = self.get_issue_with(issue.clone(), &status_only).await?;
+                    return now
+                        .status()
+                        .filter(|s| target.matches(s))
+                        .map_or(Err(error), |to| {
+                            Ok(TransitionOutcome::Moved {
+                                via: transition.id.clone(),
+                                to,
+                            })
+                        });
                 }
                 Next::Fail(error) => return Err(error),
             }
