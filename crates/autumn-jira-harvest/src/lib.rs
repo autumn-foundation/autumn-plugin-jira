@@ -47,5 +47,6 @@ pub use failure::{
 };
 pub use route::{ROUTES_PROPERTY, RouteKey, SignalRoute, TRACKED_LABEL};
 pub use wait::{
-    IssueSignal, MAX_WAIT, SIGNAL, StatusWait, WaitOptions, WaitSource, await_issue_status,
+    IssueSignal, MAX_POLL_ROUNDS, MAX_SIGNAL_ROUNDS, MAX_WAIT, SIGNAL, StatusWait, WaitOptions,
+    WaitSource, await_issue_status,
 };

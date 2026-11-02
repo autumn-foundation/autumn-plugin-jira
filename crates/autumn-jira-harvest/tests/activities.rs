@@ -322,7 +322,12 @@ fn failure_for_table() {
         assert_eq!(failure.message, err.to_string(), "{name}");
         assert_eq!(
             failure.details,
-            Some(json!({"code": err.code(), "status": err.status(), "sent": sent})),
+            Some(json!({
+                "code": err.code(),
+                "status": err.status(),
+                "sent": sent,
+                "retryable": err.is_retryable(),
+            })),
             "{name}"
         );
         // The wire payload keeps the type, the class and the hint.

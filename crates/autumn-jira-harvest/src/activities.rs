@@ -86,8 +86,8 @@ fn settle(settle_secs: Option<u64>) -> Duration {
 }
 
 /// The details of a failure after an attempt that can have sent a write.
-fn maybe_sent_details(code: &str, status: Option<u16>) -> Value {
-    json!({"code": code, "status": status, "sent": true})
+fn maybe_sent_details(code: &str, status: Option<u16>, retryable: bool) -> Value {
+    json!({"code": code, "status": status, "sent": true, "retryable": retryable})
 }
 
 /// The failure of a negative lookup after an attempt that can have sent
@@ -98,7 +98,7 @@ fn negative_lookup() -> ActivityFailure {
         "the write can have run, and the marker lookup found nothing; set \
          resend_after_negative_lookup to send it again (ADR 0003)",
     )
-    .with_details(maybe_sent_details("outcome_unknown", None))
+    .with_details(maybe_sent_details("outcome_unknown", None, false))
 }
 
 /// The failure of a lookup that failed after an attempt that can have sent
@@ -112,7 +112,7 @@ fn lookup_failure(error: &JiraError, settle: Duration) -> ActivityFailure {
         OUTCOME_PENDING_ERROR,
         format!("the write can have run, and the marker lookup failed: {error}"),
     )
-    .with_details(maybe_sent_details(error.code(), error.status()))
+    .with_details(maybe_sent_details(error.code(), error.status(), true))
     .with_retry_after(settle)
 }
 

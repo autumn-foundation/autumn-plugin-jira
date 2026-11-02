@@ -664,7 +664,10 @@ async fn a_failed_poll_is_a_missed_poll() {
 #[tokio::test]
 async fn a_failed_last_read_times_out() {
     let env = env_with_failed_polls(&in_progress());
-    let run = env.simulation().run(5, handler(), input(180, Some(60))).await;
+    let run = env
+        .simulation()
+        .run(5, handler(), input(180, Some(60)))
+        .await;
     let wait: StatusWait = serde_json::from_value(
         run.result()
             .clone()
@@ -826,7 +829,10 @@ async fn too_many_poll_rounds_fail_at_once() {
 async fn the_round_bound_fits_the_history_cap() {
     let env = WorkflowTestEnv::new().mock_activity(GET_ISSUE, |_| Ok(issue_at(&in_progress())));
     let base = env.simulation().run(1, handler(), input(60, None)).await;
-    let polled = env.simulation().run(1, handler(), input(660, Some(60))).await;
+    let polled = env
+        .simulation()
+        .run(1, handler(), input(660, Some(60)))
+        .await;
     let poll_round = (polled.events().len() - base.events().len()).div_ceil(10);
     let skipped = (0..10).fold(WorkflowTestEnv::new(), |env, n| {
         env.queue_signal(SIGNAL, signal(OTHER_ISSUE, Some(done()), None, n))
@@ -867,10 +873,12 @@ async fn two_waits(
 }
 
 /// R4-harvest-determinism-7: all waits share one signal name, so two waits
-/// at the same time take the signals of each other. The second wait fails
-/// at once with `jira.invalid_input`, on each replay too.
+/// at the same time take the signals of each other. The waits of one run
+/// run one at a time: the second wait starts when the first wait ends. It
+/// then reads its issue first, so it sees each change that it did not get
+/// as a signal. A replay gives the same order.
 #[tokio::test]
-async fn two_waits_at_the_same_time_fail_closed() {
+async fn two_waits_at_the_same_time_run_one_after_the_other() {
     let handler = two_waits_info().handler;
     let input = serde_json::to_value(TwoWaits {
         first: issue_id(ISSUE),
@@ -881,26 +889,39 @@ async fn two_waits_at_the_same_time_fail_closed() {
         .mock_activity(GET_ISSUE, |_| Ok(issue_at(&done())))
         .run(handler, input)
         .await;
-    let failed = outcome.events().iter().find_map(|e| match e {
-        WorkflowEvent::WorkflowFailed { error_type, .. } => Some(error_type.clone()),
-        _ => None,
-    });
-    assert_eq!(failed, Some(Some(INVALID_INPUT_ERROR.to_owned())));
-    // Only the first wait read its issue.
-    assert_eq!(reads(outcome.events()).len(), 1);
+    let both: Vec<StatusWait> =
+        serde_json::from_value(outcome.result.clone().expect("the waits end")).unwrap();
+    assert_eq!(both.len(), 2);
+    let events = outcome.events();
+    let scheduled: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(n, e)| matches!(e, WorkflowEvent::ActivityScheduled { .. }).then_some(n))
+        .collect();
+    let completed = events
+        .iter()
+        .position(|e| matches!(e, WorkflowEvent::ActivityCompleted { .. }))
+        .unwrap();
+    assert_eq!(scheduled.len(), 2);
+    assert!(
+        scheduled[1] > completed,
+        "the second wait read before the first wait ended: {events:?}"
+    );
     let report = outcome.replay_check(handler).await;
     assert!(
         matches!(report.status, ReplayStatus::ReplaySucceeded),
         "{report}"
     );
-    assert_replays_with_the_clock_off_as("two_waits", handler, outcome.events().to_vec()).await;
+    assert_replays_with_the_clock_off_as("two_waits", handler, events.to_vec()).await;
 
-    // One wait after the other is correct.
-    let outcome = WorkflowTestEnv::new()
-        .mock_activity(GET_ISSUE, |_| Ok(issue_at(&done())))
-        .run(wait_for_issue_info().handler, input_for(ISSUE))
-        .await;
-    assert!(matches!(result(&outcome), StatusWait::Reached { .. }));
+    // One wait after the other is correct, and a wait after a wait starts.
+    for _ in 0..2 {
+        let outcome = WorkflowTestEnv::new()
+            .mock_activity(GET_ISSUE, |_| Ok(issue_at(&done())))
+            .run(wait_for_issue_info().handler, input_for(ISSUE))
+            .await;
+        assert!(matches!(result(&outcome), StatusWait::Reached { .. }));
+    }
 }
 
 fn input_for(issue: &str) -> Value {

@@ -49,12 +49,15 @@ pub(crate) fn invalid_input(message: &str) -> ActivityFailure {
 }
 
 /// `"jira.<code>"`; retryable iff `err.is_retryable()`; `RateLimited` -> `with_retry_after`;
-/// `OutcomeUnknown` with marker -> `with_retry_after(SETTLE_SECS)`; details `{code, status, sent}`.
+/// `OutcomeUnknown` with marker -> `with_retry_after(SETTLE_SECS)`; details
+/// `{code, status, sent, retryable}`.
 ///
 /// The message is the `Display` text of the error. It has no body, no Jira
 /// message and no secret (plan 4.6). `sent` is
 /// [`JiraError::may_have_run`]: `false` only when the request cannot have
-/// run in Jira. [`previous_attempt`] reads it.
+/// run in Jira. [`previous_attempt`] reads it. `retryable` is
+/// `err.is_retryable()`. A workflow sees no retry class on a failed
+/// activity, so `await_issue_status` reads this detail.
 #[must_use]
 pub fn failure_for(err: &JiraError) -> ActivityFailure {
     let code = err.code();
@@ -65,7 +68,12 @@ pub fn failure_for(err: &JiraError) -> ActivityFailure {
     } else {
         ActivityFailure::non_retryable(error_type, message)
     }
-    .with_details(json!({"code": code, "status": err.status(), "sent": err.may_have_run()}));
+    .with_details(json!({
+        "code": code,
+        "status": err.status(),
+        "sent": err.may_have_run(),
+        "retryable": err.is_retryable(),
+    }));
     match err {
         JiraError::RateLimited {
             retry_after: Some(wait),
