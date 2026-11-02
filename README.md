@@ -427,11 +427,17 @@ has no lookup before the send, so a busy issue still gets the comment.
 the wait faster. The wait does not need them: a poll ends it too.
 
 ```rust,ignore
+// From the ecosystem example, which CI runs.
 #[workflow]
-async fn wait_for_done(ctx: &WorkflowContext, issue: IssueId) -> Result<StatusWait, WorkflowFailure> {
-    let options = WaitOptions::new(Duration::from_secs(24 * 3600));
-    await_issue_status(ctx, &issue, &StatusTarget::done(), &options).await
-}
+pub async fn incident_flow(
+    ctx: &WorkflowContext,
+    input: AlertInput,
+) -> Result<IncidentOutput, WorkflowFailure> {
+    // The create and the transition come first. See the example.
+    let mut options = WaitOptions::new(Duration::from_secs(input.wait_secs));
+    options.poll_every = input.poll_every_secs.map(Duration::from_secs);
+    let wait = await_issue_status(ctx, &created.id, &StatusTarget::done(), &options).await?;
+    // The workflow then acts on `StatusWait::Reached` or `TimedOut`.
 ```
 
 - The deadline comes from `ctx.system_now()`. The history records it, so
@@ -483,12 +489,20 @@ its host by itself. For a San Mateo client, use the site URL of
 `accessible-resources`:
 
 ```rust,ignore
-let host = SiteHost::from_url(&resource.url).ok_or("no site host")?;
-let bridge = HarvestSignalBridge::new(pool, client, route_key)
-    .allow_workflow("jira_ticket_lifecycle")
-    .site_host(host);
-// sink_for_all_actors: a status change by an ignored account still signals the run.
-let plugin = JiraPlugin::new().sink_for_all_actors(bridge);
+// From the ecosystem example, which CI runs.
+let bridge = HarvestSignalBridge::new(pool.clone(), jira.clone(), key.clone())
+    .allow_workflow(INCIDENT_FLOW)
+    .site_host(transport::site_host()?);
+// `transport::site_host` reads the host of the site URL of `accessible-resources`:
+SiteHost::from_url(SITE_URL).ok_or_else(|| format!("no site host in {SITE_URL}").into())
+```
+
+The bridge is a sink for all actors. So a status change by an ignored
+account, for example the bot, still signals the run:
+
+```rust,ignore
+// From the ecosystem example, which CI runs.
+Ok(JiraPlugin::with_config(jira_config()?).sink_for_all_actors(bridge))
 ```
 
 Route entries made before this version have v1 tags, which bind no

@@ -265,7 +265,9 @@ Rules for each example (EX8 checks them by text):
   example sets each env var that the example needs.
   `readme_snippets_copy_their_examples` checks that a snippet that names an
   example holds only code lines of that example, in the same order.
-  Comments and test items of the example do not count.
+  Comments and test items of the example do not count. The README doc
+  test does not compile a `rust,ignore` block, so the same test fails on
+  a `rust,ignore` block that names no example.
   `docs_give_the_ci_commands_of_the_separate_workspace` checks that
   `CLAUDE.md` and the README give the ecosystem commands of CI. `no_example_turns_on_the_dev_only_proxy_flags` checks for
   `full_migrations_sql`, `allow_private_hosts` and `allow_plain_http`. It
