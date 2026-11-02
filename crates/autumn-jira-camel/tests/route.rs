@@ -476,3 +476,292 @@ async fn a_named_connection_picks_its_client() {
         "{debug}"
     );
 }
+
+/// The routes of the idempotency tests.
+const MARKED: &[(&str, &str)] = &[
+    (
+        "direct:create",
+        "jira:createIssue?project=OPS&issueType=Task",
+    ),
+    ("direct:comment", "jira:addComment?issueKey=OPS-1"),
+    (
+        "direct:strict",
+        "jira:createIssue?project=OPS&issueType=Task&requireIdempotencyKey=true",
+    ),
+    (
+        "direct:strict-comment",
+        "jira:addComment?issueKey=OPS-1&requireIdempotencyKey=true",
+    ),
+    (
+        "direct:resend",
+        "jira:createIssue?project=OPS&issueType=Task&resendAfterNegativeLookup=true",
+    ),
+    (
+        "direct:resend-comment",
+        "jira:addComment?issueKey=OPS-1&resendAfterNegativeLookup=true",
+    ),
+];
+
+/// A message with the harvest-camel headers of one attempt.
+fn attempt(body: serde_json::Value, key: &str, attempt: serde_json::Value) -> Message {
+    json_with(body, &[(KEY, json!(key)), (ATTEMPT, attempt)])
+}
+
+/// The labels of an issue in the fake.
+fn labels(fake: &FakeJira, key: &str) -> Vec<String> {
+    serde_json::from_value(fake.issue(key).unwrap()["fields"]["labels"].clone()).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn key_header_uses_the_idempotent_path() {
+    let fake = FakeJira::new();
+    let camel = start(component(&fake), MARKED).await.unwrap();
+
+    // The first attempt creates the issue with the marker label and the
+    // marker property.
+    let body = json!({"summary": "Disk full", "labels": ["alert"]});
+    let ex = send(
+        &camel,
+        "direct:create",
+        attempt(body.clone(), "wf-1/a-1", json!(1)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(reply(&ex)["outcome"], json!("created"));
+    assert_eq!(header(&ex, HEADER_OUTCOME), Some(json!("created")));
+    let marked = labels(&fake, "OPS-1");
+    assert!(marked.contains(&"alert".to_owned()), "{marked:?}");
+    assert!(
+        marked.iter().any(|l| l.starts_with("autumn-idem-")),
+        "{marked:?}"
+    );
+    let bean = fake.issue("OPS-1").unwrap();
+    assert_eq!(
+        bean["properties"]["autumn-jira"]["idempotencyKey"].as_str(),
+        Some(
+            autumn_jira::IdempotencyKey::parse("wf-1/a-1")
+                .unwrap()
+                .as_str()
+        )
+    );
+    // The same key again: found, no second POST. With no attempt header
+    // the call counts as a first attempt.
+    let ex = send(
+        &camel,
+        "direct:create",
+        json_with(body, &[(KEY, json!("wf-1/a-1"))]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(reply(&ex)["key"], json!("OPS-1"));
+    assert_eq!(reply(&ex)["outcome"], json!("found"));
+    assert_eq!(header(&ex, HEADER_OUTCOME), Some(json!("found")));
+    assert_eq!(header(&ex, HEADER_ISSUE_KEY), Some(json!("OPS-1")));
+    assert_eq!(fake.count(FakeOp::CreateIssue), 1);
+
+    // The comment has the marker paragraph. The same key finds it.
+    let ex = send(
+        &camel,
+        "direct:comment",
+        attempt(json!("Looking"), "wf-1/a-2", json!(1)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(reply(&ex)["outcome"], json!("created"));
+    let id = reply(&ex)["id"].clone();
+    let ex = send(
+        &camel,
+        "direct:comment",
+        attempt(json!("Looking"), "wf-1/a-2", json!(1)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(reply(&ex)["outcome"], json!("found"));
+    assert_eq!(reply(&ex)["id"], id);
+    assert_eq!(fake.count(FakeOp::AddComment), 1);
+    assert!(fake.snapshot().to_string().contains("autumn-ref: "));
+
+    // A lost reply (503 after the commit): the lookup finds the issue, with
+    // one POST.
+    fake.fault(FakeOp::CreateIssue, Fault::StatusAfterCommit(503));
+    let ex = send(
+        &camel,
+        "direct:create",
+        attempt(json!({"summary": "Lost"}), "wf-2/a-1", json!(1)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(reply(&ex)["key"], json!("OPS-2"));
+    assert_eq!(reply(&ex)["outcome"], json!("found"));
+    assert_eq!(fake.count(FakeOp::CreateIssue), 2);
+
+    // requireIdempotencyKey: no key header fails with no call.
+    let err = send(&camel, "direct:strict", json(json!({"summary": "x"})))
+        .await
+        .unwrap_err();
+    assert!(validation(&err).contains(KEY), "{err}");
+    let err = send(&camel, "direct:strict-comment", json(json!("x")))
+        .await
+        .unwrap_err();
+    assert!(validation(&err).contains(KEY), "{err}");
+    // A blank key or a key that is not a string fails too.
+    for bad in [json!(" "), json!(7), json!(["k"])] {
+        let message = json_with(json!({"summary": "x"}), &[(KEY, bad.clone())]);
+        let err = send(&camel, "direct:create", message).await.unwrap_err();
+        assert!(validation(&err).contains(KEY), "{bad}: {err}");
+    }
+    assert_eq!(fake.count(FakeOp::CreateIssue), 2);
+    assert_eq!(fake.count(FakeOp::AddComment), 1);
+    stop(camel).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retry_attempt_looks_up_only() {
+    let fake = FakeJira::new();
+    let camel = start(component(&fake), MARKED).await.unwrap();
+    let body = json!({"summary": "Disk full"});
+
+    // Attempt 2 with a key that made no issue: the lookup finds nothing,
+    // so the write fails closed with no POST.
+    for n in [json!(2), json!("3")] {
+        let err = send(
+            &camel,
+            "direct:create",
+            attempt(body.clone(), "wf-1/a-1", n),
+        )
+        .await
+        .unwrap_err();
+        let m = validation(&err);
+        assert!(m.starts_with("jira outcome_unknown: "), "{m}");
+        assert!(m.contains("resendAfterNegativeLookup"), "{m}");
+    }
+    assert_eq!(fake.count(FakeOp::CreateIssue), 0);
+    assert!(fake.count(FakeOp::Search) >= 2, "a lookup each time");
+
+    // Attempt 1 creates. Attempt 2 finds it with no new POST.
+    send(
+        &camel,
+        "direct:create",
+        attempt(body.clone(), "wf-1/a-2", json!(1)),
+    )
+    .await
+    .unwrap();
+    let ex = send(
+        &camel,
+        "direct:create",
+        attempt(body.clone(), "wf-1/a-2", json!(2)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(reply(&ex)["key"], json!("OPS-1"));
+    assert_eq!(reply(&ex)["outcome"], json!("found"));
+    assert_eq!(fake.count(FakeOp::CreateIssue), 1);
+
+    // The same rule for a comment.
+    let err = send(
+        &camel,
+        "direct:comment",
+        attempt(json!("x"), "wf-1/a-3", json!(2)),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        validation(&err).starts_with("jira outcome_unknown: "),
+        "{err}"
+    );
+    assert_eq!(fake.count(FakeOp::AddComment), 0);
+    send(
+        &camel,
+        "direct:comment",
+        attempt(json!("x"), "wf-1/a-4", json!(1)),
+    )
+    .await
+    .unwrap();
+    let ex = send(
+        &camel,
+        "direct:comment",
+        attempt(json!("x"), "wf-1/a-4", json!(5)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(reply(&ex)["outcome"], json!("found"));
+    assert_eq!(fake.count(FakeOp::AddComment), 1);
+
+    // A bad attempt header fails with no call.
+    for bad in [json!(0), json!("x"), json!(-1), json!(true)] {
+        let err = send(
+            &camel,
+            "direct:create",
+            attempt(body.clone(), "wf-1/a-5", bad.clone()),
+        )
+        .await
+        .unwrap_err();
+        assert!(validation(&err).contains(ATTEMPT), "{bad}: {err}");
+    }
+    assert_eq!(fake.count(FakeOp::CreateIssue), 1);
+
+    // A lost create that the lookups cannot see yet: OutcomeUnknown with
+    // the marker maps to Io, so harvest retries. Without a key it maps to
+    // ValidationError: harvest does not send a plain write again.
+    fake.index_lag(std::time::Duration::from_secs(3600));
+    fake.fault(FakeOp::CreateIssue, Fault::StatusAfterCommit(503));
+    let err = send(
+        &camel,
+        "direct:create",
+        attempt(body.clone(), "wf-1/a-6", json!(1)),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, CamelError::Io(_)), "{err:?}");
+    assert!(err.to_string().contains("outcome_unknown"), "{err}");
+    fake.fault(FakeOp::CreateIssue, Fault::StatusAfterCommit(503));
+    let err = send(&camel, "direct:create", json(body.clone()))
+        .await
+        .unwrap_err();
+    assert!(validation(&err).contains("outcome_unknown"), "{err}");
+    assert_eq!(fake.count(FakeOp::CreateIssue), 3);
+    stop(camel).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn opt_in_resends() {
+    let fake = FakeJira::new();
+    let camel = start(component(&fake), MARKED).await.unwrap();
+    // OPS-1 for the comments.
+    send(&camel, "direct:create", json(json!({"summary": "Base"})))
+        .await
+        .unwrap();
+
+    // Attempt 2 with the opt-in: a negative lookup sends the write.
+    let ex = send(
+        &camel,
+        "direct:resend",
+        attempt(json!({"summary": "Again"}), "wf-1/a-1", json!(2)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(reply(&ex)["outcome"], json!("created"));
+    assert_eq!(reply(&ex)["key"], json!("OPS-2"));
+    assert_eq!(fake.count(FakeOp::CreateIssue), 2);
+    // The opt-in still finds an issue that exists: no duplicate.
+    let ex = send(
+        &camel,
+        "direct:resend",
+        attempt(json!({"summary": "Again"}), "wf-1/a-1", json!(3)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(reply(&ex)["outcome"], json!("found"));
+    assert_eq!(fake.count(FakeOp::CreateIssue), 2);
+
+    let ex = send(
+        &camel,
+        "direct:resend-comment",
+        attempt(json!({"text": "Again"}), "wf-1/a-2", json!(2)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(reply(&ex)["outcome"], json!("created"));
+    assert_eq!(fake.count(FakeOp::AddComment), 1);
+    stop(camel).await;
+}
