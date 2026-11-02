@@ -24,9 +24,11 @@
 // a box does not match the trait signatures.
 #![allow(clippy::result_large_err, reason = "CamelError is 168 bytes")]
 
+mod component;
 mod error;
 mod options;
 
+pub use component::JiraComponent;
 pub use error::to_camel_error;
 pub use options::{EndpointOptions, Operation, uri_options};
 
