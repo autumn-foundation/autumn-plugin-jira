@@ -1,0 +1,220 @@
+//! Protocol cases of the client over `MemoryTransport` and `FakeJira`
+//! (AC2, AC3, AC6 decode cases).
+
+mod common;
+
+use std::sync::Arc;
+
+use autumn_jira::client::{ClientSettings, DeleteOutcome};
+use autumn_jira::error::{Op, SCOPE_HINT};
+use autumn_jira::request::{EditOptions, IssueEdit, IssueTypeRef};
+use autumn_jira::san_mateo::transport::HttpResponse;
+use autumn_jira::san_mateo::{MemoryTransport, Secret};
+use autumn_jira::{BasicAuth, IssueKey, JiraClient, JiraError, NewIssue, ProjectKey};
+use autumn_jira_fake::{DEFAULT_API_TOKEN, DEFAULT_EMAIL, FakeJira, FakeOp, Fault};
+use common::{api_token_client, auth, fast_settings, site};
+use serde_json::json;
+
+const BASE: &str = "https://acme.atlassian.net/rest/api/3";
+
+fn memory_client(transport: &MemoryTransport) -> JiraClient {
+    JiraClient::api_token(site(), auth(), Arc::new(transport.clone())).with_settings(fast_settings())
+}
+
+fn key(text: &str) -> IssueKey {
+    IssueKey::parse(text).unwrap()
+}
+
+fn task() -> NewIssue {
+    NewIssue::new(
+        ProjectKey::parse("OPS").unwrap(),
+        IssueTypeRef::Name("Task".to_owned()),
+        "s",
+    )
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_redirect_is_not_followed() {
+    let transport = MemoryTransport::new();
+    transport.reply(
+        "GET",
+        &format!("{BASE}/myself"),
+        HttpResponse::new(302, "").header("location", "https://evil.example/steal"),
+    );
+    let client = memory_client(&transport);
+    let err = client.myself().await.unwrap_err();
+    assert_eq!(err, JiraError::Redirect { op: Op::Myself, status: 302 });
+    let sent = transport.requests();
+    assert_eq!(sent.len(), 1);
+    assert!(sent.iter().all(|r| !r.url.contains("evil.example")));
+
+    // The fake: a redirect on a write is never sent again.
+    let fake = FakeJira::new();
+    fake.fault(FakeOp::CreateIssue, Fault::Redirect);
+    let err = api_token_client(&fake).create_issue(&task()).await.unwrap_err();
+    assert!(matches!(err, JiraError::Redirect { op: Op::CreateIssue, .. }));
+    assert_eq!(fake.count(FakeOp::CreateIssue), 1);
+    assert!(fake.issues().is_empty());
+}
+
+#[tokio::test]
+async fn path_segments_are_encoded() {
+    let transport = MemoryTransport::new();
+    let url = format!("{BASE}/issue/OPS-1/properties/a%20b%2Fc%3Fd%23e");
+    transport.reply("PUT", &url, HttpResponse::new(200, ""));
+    transport.reply("GET", &url, HttpResponse::json(200, &json!({"key": "a b/c?d#e", "value": 7})));
+    let client = memory_client(&transport);
+    client
+        .set_issue_property(&key("OPS-1"), "a b/c?d#e", &json!(7))
+        .await
+        .unwrap();
+    let value = client.get_issue_property(&key("OPS-1"), "a b/c?d#e").await.unwrap();
+    assert_eq!(value, Some(json!(7)));
+    let sent = transport.requests();
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[0].url, url);
+    assert_eq!(sent[0].body, b"7");
+    // Every URL starts with the one base URL.
+    assert!(sent.iter().all(|r| r.url.starts_with("https://acme.atlassian.net/rest/api/3/")));
+}
+
+#[tokio::test]
+async fn basic_header_is_sent() {
+    let transport = MemoryTransport::new();
+    transport.reply(
+        "GET",
+        &format!("{BASE}/myself"),
+        HttpResponse::json(200, &json!({"accountId": "acct-bot"})),
+    );
+    memory_client(&transport).myself().await.unwrap();
+    let expected = format!(
+        "Basic {}",
+        data_encoding::BASE64.encode(format!("{DEFAULT_EMAIL}:{DEFAULT_API_TOKEN}").as_bytes())
+    );
+    let sent = transport.requests();
+    assert_eq!(sent[0].header_value("authorization"), Some(expected.as_str()));
+    // The fake checks the same header.
+    let fake = FakeJira::new();
+    let me = api_token_client(&fake).myself().await.unwrap();
+    assert_eq!(me.account_id.as_str(), autumn_jira_fake::BOT);
+}
+
+#[tokio::test(start_paused = true)]
+async fn unauthorized_is_not_retried() {
+    let fake = FakeJira::new();
+    let wrong = BasicAuth::new(DEFAULT_EMAIL, Secret::new("wrong-token")).unwrap();
+    let client =
+        JiraClient::api_token(site(), wrong, Arc::new(fake.clone())).with_settings(fast_settings());
+    let err = client.myself().await.unwrap_err();
+    assert_eq!(
+        err,
+        JiraError::Unauthorized { op: Op::Myself, status: 401, hint: SCOPE_HINT }
+    );
+    assert_eq!(fake.count(FakeOp::Myself), 1);
+    assert!(err.to_string().contains("read:jira-work"));
+    assert!(!err.to_string().contains("wrong-token"));
+
+    let transport = MemoryTransport::new();
+    transport.reply("GET", &format!("{BASE}/myself"), HttpResponse::new(403, "no"));
+    let err = memory_client(&transport).myself().await.unwrap_err();
+    assert!(matches!(err, JiraError::Unauthorized { status: 403, .. }));
+    assert_eq!(transport.requests().len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn captcha_is_typed() {
+    let transport = MemoryTransport::new();
+    transport.reply(
+        "GET",
+        &format!("{BASE}/myself"),
+        HttpResponse::new(401, "").header("X-Seraph-LoginReason", "AUTHENTICATION_DENIED"),
+    );
+    let err = memory_client(&transport).myself().await.unwrap_err();
+    assert_eq!(err, JiraError::CaptchaRequired { op: Op::Myself });
+    assert_eq!(transport.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn moved_issue_key_is_kept() {
+    let transport = MemoryTransport::new();
+    transport.reply(
+        "GET",
+        &format!("{BASE}/issue/OLD-1"),
+        HttpResponse::json(
+            200,
+            &json!({"id": "10001", "key": "NEW-7", "fields": {"summary": "moved"}}),
+        ),
+    );
+    let issue = memory_client(&transport).get_issue(&key("OLD-1")).await.unwrap();
+    assert_eq!(issue.key.as_str(), "NEW-7");
+    assert_eq!(issue.id.as_str(), "10001");
+    assert!(transport.requests()[0].url.ends_with(
+        "?fields=summary%2Cstatus%2Cissuetype%2Cproject%2Cassignee%2Clabels%2Ccreated%2Cupdated%2Cdescription"
+    ));
+}
+
+#[tokio::test]
+async fn short_non_last_comment_page() {
+    let url = format!("{BASE}/issue/OPS-1/comment");
+    let comment = |id: &str| json!({"id": id, "body": {"type": "doc", "version": 1, "content": []}});
+    // The first page is short but not the last: `total` says 3.
+    let transport = MemoryTransport::new();
+    let pages = [
+        json!({"startAt": 0, "total": 3, "comments": [comment("1")]}),
+        json!({"startAt": 1, "total": 3, "comments": [comment("2"), comment("3")]}),
+    ];
+    for page in &pages {
+        transport.reply("GET", &url, HttpResponse::json(200, page));
+    }
+    let comments = memory_client(&transport).all_comments(&key("OPS-1")).await.unwrap();
+    let ids: Vec<&str> = comments.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(ids, ["1", "2", "3"]);
+    let sent = transport.requests();
+    assert_eq!(sent.len(), 2);
+    assert!(sent[1].url.contains("startAt=1"), "{}", sent[1].url);
+
+    // An empty page ends the list, even when `total` says more.
+    let empty = MemoryTransport::new();
+    empty.reply(
+        "GET",
+        &url,
+        HttpResponse::json(200, &json!({"startAt": 0, "total": 9, "comments": []})),
+    );
+    assert!(memory_client(&empty).all_comments(&key("OPS-1")).await.unwrap().is_empty());
+    assert_eq!(empty.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn empty_204_is_not_parsed_and_statuses_are_checked() {
+    let transport = MemoryTransport::new();
+    transport.reply("PUT", &format!("{BASE}/issue/OPS-1"), HttpResponse::new(204, ""));
+    transport.reply("DELETE", &format!("{BASE}/issue/OPS-1"), HttpResponse::new(204, ""));
+    transport.reply(
+        "POST",
+        &format!("{BASE}/issue"),
+        HttpResponse::json(200, &json!({"id": "1", "key": "OPS-1"})),
+    );
+    let client = memory_client(&transport);
+    client
+        .edit_issue(&key("OPS-1"), &IssueEdit::new().set_summary("x"), EditOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        client.delete_issue(&key("OPS-1"), true).await.unwrap(),
+        DeleteOutcome::Deleted
+    );
+    // Create expects 201. A 200 is not a success.
+    let err = client.create_issue(&task()).await.unwrap_err();
+    assert_eq!(err, JiraError::UnexpectedStatus { op: Op::CreateIssue, status: 200 });
+    assert!(transport.requests()[1].url.ends_with("?deleteSubtasks=true"));
+}
+
+#[test]
+fn debug_has_no_token() {
+    let client = JiraClient::api_token(site(), auth(), Arc::new(MemoryTransport::new()));
+    let text = format!("{client:?}");
+    assert!(text.contains("acme.atlassian.net"), "{text}");
+    assert!(!text.contains(DEFAULT_API_TOKEN) && !text.contains(DEFAULT_EMAIL), "{text}");
+    assert_eq!(client.settings(), &ClientSettings::default());
+    assert_eq!(client.info().site, "acme.atlassian.net");
+}
