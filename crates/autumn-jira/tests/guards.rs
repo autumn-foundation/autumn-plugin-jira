@@ -1466,6 +1466,16 @@ mod check {
         (out, readme)
     }
 
+    /// `publish_metadata_violations` with the root manifest of the
+    /// workspace, for `key.workspace = true`.
+    pub fn publish_metadata_violations_in(
+        path: &str,
+        manifest: &str,
+        _workspace: &str,
+    ) -> (Vec<String>, Option<String>) {
+        publish_metadata_violations(path, manifest)
+    }
+
     /// The words of a text as one line: Markdown line breaks and comment
     /// markers do not split a phrase.
     fn flat(text: &str) -> String {
@@ -2501,6 +2511,25 @@ fn published_crates_have_metadata_sees_a_gap() {
     assert_eq!(check::publish_metadata_violations("x", &six).0.len(), 1);
     let private = "[package]\nname = \"x\"\npublish = false\n";
     assert_eq!(check::publish_metadata_violations("x", private).0, NONE);
+    // R2E-tests-guards-7: a key from the workspace, a multi-line array, and
+    // an empty value.
+    let workspace = "[workspace.package]\nreadme = \"README.md\"\n";
+    let inherited = full.replace("readme = \"../../README.md\"", "readme.workspace = true");
+    let (problems, readme) = check::publish_metadata_violations_in("x", &inherited, workspace);
+    assert_eq!(problems, NONE);
+    assert_eq!(readme.as_deref(), Some("README.md"));
+    let lost = check::publish_metadata_violations_in("x", &inherited, "[workspace]\n");
+    assert_eq!(lost.0.len(), 1, "{lost:?}");
+    let multi = full.replace("[\"a\", \"b\"]", "[\n  \"a\",\n  \"b\",\n]");
+    assert_eq!(check::publish_metadata_violations("x", &multi).0, NONE);
+    for empty in [
+        full.replace("description = \"d\"", "description = \"\""),
+        full.replace("[\"a\", \"b\"]", "[\"\"]"),
+        full.replace("[\"c\"]", "[]"),
+    ] {
+        let found = check::publish_metadata_violations("x", &empty).0;
+        assert_eq!(found.len(), 1, "{empty}: {found:?}");
+    }
 }
 
 // --- ASD-STE100 prose ------------------------------------------------------
