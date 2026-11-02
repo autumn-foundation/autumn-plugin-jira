@@ -26,7 +26,7 @@ pub use activities::{GET_ISSUE, GetIssueInput};
 pub use clients::ClientRef;
 pub use failure::{
     CONFIG_ERROR, ERROR_PREFIX, INVALID_INPUT_ERROR, OUTCOME_PENDING_ERROR, OUTCOME_UNKNOWN_ERROR,
-    SETTLE_SECS, WORKFLOW_ERROR,
+    SETTLE_SECS, WORKFLOW_ERROR, failure_for, previous_attempt,
 };
 pub use wait::{
     IssueSignal, MAX_WAIT, SIGNAL, StatusWait, WaitOptions, WaitSource, await_issue_status,
