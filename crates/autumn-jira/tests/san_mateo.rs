@@ -190,3 +190,44 @@ async fn backend_errors_are_typed() {
         Err(autumn_jira::JiraError::CloudId(_))
     ));
 }
+
+/// A cloud id of a site that the token does not cover any more.
+const OLD_SITE: &str = "11111111-2222-4333-8444-555555555555";
+
+#[tokio::test(start_paused = true)]
+async fn a_stale_metadata_cloud_id_is_checked_after_a_404() {
+    // The tenant connected site OLD, then reconnected to the fake site.
+    // san-mateo keeps the old metadata.
+    let fake = with_oauth(FakeJira::new());
+    let san = san_mateo(Arc::new(fake.clone()));
+    let metadata = Map::from_iter([("cloudId".to_owned(), json!(OLD_SITE))]);
+    let key = oauth_connection(&san, metadata).await;
+    let backend = SanMateoBackend::new(san.clone(), SanMateoTarget::new(ENV, key.clone()));
+    // The first call goes to the old site and gets 404. The backend does
+    // not send it again.
+    assert_eq!(backend.send(myself()).await.unwrap().status, 404);
+    assert_eq!(fake.count(FakeOp::Myself), 0);
+    assert_eq!(fake.count(FakeOp::AccessibleResources), 1);
+    let conn = san
+        .get_connection(ENV, &key, GetOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(conn.metadata["cloudId"], json!(DEFAULT_CLOUD_ID));
+    // The next call goes to the site of the token.
+    assert_eq!(backend.send(myself()).await.unwrap().status, 200);
+    assert_eq!(fake.count(FakeOp::Myself), 1);
+
+    // A discovery confirms the id: a 404 now does not check it again.
+    let issue = ApiRequest::new(Op::GetIssue, Method::Get, "/rest/api/3/issue/OPS-404");
+    assert_eq!(backend.send(issue.clone()).await.unwrap().status, 404);
+    assert_eq!(fake.count(FakeOp::AccessibleResources), 1);
+
+    // A new backend reads the stored id. A 404 under a cloud id that the
+    // token covers changes nothing, and the backend checks it one time only.
+    let backend = SanMateoBackend::new(san, SanMateoTarget::new(ENV, key));
+    for _ in 0..3 {
+        assert_eq!(backend.send(issue.clone()).await.unwrap().status, 404);
+    }
+    assert_eq!(fake.count(FakeOp::AccessibleResources), 2);
+    assert_eq!(backend.send(myself()).await.unwrap().status, 200);
+}
