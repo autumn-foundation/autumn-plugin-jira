@@ -52,7 +52,11 @@
 //! `HarvestActivityAttempt`. With the key, `createIssue` and `addComment`
 //! use the idempotent client calls: the write carries a marker, and a
 //! lookup finds an earlier write. An attempt above 1 does a lookup only,
-//! because the route cannot know if the earlier attempt sent the write. A
+//! because the route cannot know if the earlier attempt sent the write.
+//! The search index can lag, and harvest-camel gives the attempt no
+//! `Retry-After`. So a `createIssue` lookup that finds nothing waits
+//! `settleMs` (default 10 s) and looks up one more time. A comment lookup
+//! reads the comment list, which is always current, so it does not wait. A
 //! negative lookup then fails with `jira outcome_unknown`. The component
 //! does not send the write again. Only the unsafe opt-in
 //! `resendAfterNegativeLookup=true` sends it again (ADR 0003). Without the
@@ -90,6 +94,7 @@ mod headers;
 mod input;
 mod options;
 mod producer;
+mod settle;
 
 pub use component::JiraComponent;
 pub use error::to_camel_error;

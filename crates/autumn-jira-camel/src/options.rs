@@ -16,6 +16,14 @@ use crate::{DEFAULT_MAX_BODY_SIZE, SCHEME};
 /// The largest `maxPages` value.
 pub(crate) const MAX_PAGES: u32 = 1000;
 
+/// The default `settleMs`: 10 s. The harvest activity waits 30 s
+/// (`SETTLE_SECS`), but a `direct:` call stops after 30 s by default, and
+/// the wait and two lookups must fit in it.
+pub(crate) const DEFAULT_SETTLE_MS: u64 = 10_000;
+
+/// The largest `settleMs` value: 2 minutes.
+pub(crate) const MAX_SETTLE_MS: u64 = 120_000;
+
 /// One operation of the `jira:` component: the path of the URI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -107,6 +115,13 @@ pub struct EndpointOptions {
     /// explicit unsafe opt-in: a lookup can miss a write that Jira did not
     /// index yet, so Jira can get the write two times.
     pub resend_after_negative_lookup: bool,
+    /// The wait of `createIssue` before a second marker lookup, in ms. It
+    /// applies only to a lookup-only attempt whose first lookup finds
+    /// nothing. The search index can lag, so the wait lets the lookup see
+    /// an issue that an earlier attempt made. 0 turns the wait off. Keep the
+    /// wait and two lookups inside the timeout of the caller, for example
+    /// the 30 s default of a `direct:` call.
+    pub settle_ms: u64,
     /// The `notifyUsers` flag of `editIssue`. `None` keeps the Jira default.
     pub notify_users: Option<bool>,
     /// Let the `JiraIssueKey`, `JiraJql` and `JiraStatus` headers replace
@@ -181,6 +196,7 @@ impl EndpointOptions {
             max_pages: 1,
             require_idempotency_key: false,
             resend_after_negative_lookup: false,
+            settle_ms: DEFAULT_SETTLE_MS,
             notify_users: None,
             allow_header_overrides: false,
             throw_exception_on_failure: true,
@@ -206,6 +222,7 @@ impl EndpointOptions {
             "resendAfterNegativeLookup" => {
                 self.resend_after_negative_lookup = parse_bool(key, value)?;
             }
+            "settleMs" => self.settle_ms = parse_settle(value)?,
             "notifyUsers" => self.notify_users = Some(parse_bool(key, value)?),
             "allowHeaderOverrides" => self.allow_header_overrides = parse_bool(key, value)?,
             "throwExceptionOnFailure" => {
@@ -293,7 +310,7 @@ const MARKED_OPS: &[Operation] = &[Operation::CreateIssue, Operation::AddComment
 const SEARCH: &[Operation] = &[Operation::Search];
 
 /// The URI options, in the order of the metadata.
-const SPECS: [Spec; 15] = [
+const SPECS: [Spec; 16] = [
     Spec {
         name: "connection",
         kind: Kind::Text,
@@ -362,7 +379,7 @@ const SPECS: [Spec; 15] = [
         kind: Kind::Bool,
         default: Some("false"),
         ops: MARKED_OPS,
-        description: "Fail the exchange when it has no HarvestIdempotencyKey header. Without the header, the write is sent at most once.",
+        description: "Fail the exchange when it has no HarvestIdempotencyKey header. Without the header, the component sends the write at most once.",
     },
     Spec {
         name: "resendAfterNegativeLookup",
@@ -370,6 +387,15 @@ const SPECS: [Spec; 15] = [
         default: Some("false"),
         ops: MARKED_OPS,
         description: "Unsafe opt-in: on a retry attempt, send the write again when the marker lookup finds nothing. Jira can then get the write two times.",
+    },
+    Spec {
+        name: "settleMs",
+        kind: Kind::Int,
+        // DEFAULT_SETTLE_MS. The test `uri_options_match_the_parser`
+        // compares the two.
+        default: Some("10000"),
+        ops: &[Operation::CreateIssue],
+        description: "On a retry attempt, the wait in ms before a second marker lookup when the first lookup finds nothing. The search index can lag. From 0 (no wait) to 120000. Keep the wait and two lookups inside the timeout of the caller, for example the 30 s of a direct: call.",
     },
     Spec {
         name: "notifyUsers",
@@ -485,6 +511,19 @@ fn parse_range(key: &str, value: &str, max: u32) -> Result<u32, CamelError> {
         })
 }
 
+fn parse_settle(value: &str) -> Result<u64, CamelError> {
+    value
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|n| *n <= MAX_SETTLE_MS)
+        .ok_or_else(|| {
+            bad_uri(format!(
+                "settleMs must be a whole number from 0 to {MAX_SETTLE_MS}, got '{value}'"
+            ))
+        })
+}
+
 fn parse_max_body_size(value: &str) -> Result<usize, CamelError> {
     value
         .trim()
@@ -583,6 +622,16 @@ mod tests {
     use super::*;
     use crate::{DEFAULT_MAX_BODY_SIZE, OPERATIONS};
 
+    #[test]
+    fn settle_ms_takes_0_to_the_max() {
+        let uri = |v: &str| format!("jira:createIssue?project=OPS&issueType=Task&settleMs={v}");
+        assert_eq!(parse(&uri("0")).unwrap().settle_ms, 0);
+        assert_eq!(parse(&uri("120000")).unwrap().settle_ms, MAX_SETTLE_MS);
+        for bad in ["120001", "-1", "x", ""] {
+            assert!(invalid_uri(&uri(bad)).contains("settleMs"), "{bad}");
+        }
+    }
+
     const CONNECTIONS: &[&str] = &["default", "eu"];
 
     fn parse(uri: &str) -> Result<EndpointOptions, CamelError> {
@@ -597,7 +646,7 @@ mod tests {
     }
 
     /// The option names in the order of the metadata.
-    const NAMES: [&str; 15] = [
+    const NAMES: [&str; 16] = [
         "connection",
         "project",
         "issueType",
@@ -609,6 +658,7 @@ mod tests {
         "maxPages",
         "requireIdempotencyKey",
         "resendAfterNegativeLookup",
+        "settleMs",
         "notifyUsers",
         "allowHeaderOverrides",
         "throwExceptionOnFailure",
@@ -620,7 +670,7 @@ mod tests {
         use Operation::{AddComment, CreateIssue, EditIssue, GetIssue, Search, TransitionToStatus};
         match option {
             "project" => matches!(op, CreateIssue | Search),
-            "issueType" => op == CreateIssue,
+            "issueType" | "settleMs" => op == CreateIssue,
             "issueKey" => matches!(op, GetIssue | EditIssue | TransitionToStatus | AddComment),
             "status" => op == TransitionToStatus,
             "jql" | "maxResults" | "maxPages" => op == Search,
@@ -647,6 +697,7 @@ mod tests {
             "maxPages" => "2",
             "notifyUsers" | "throwExceptionOnFailure" => "false",
             "maxBodySize" => "5",
+            "settleMs" => "0",
             _ => "true",
         }
     }
@@ -727,6 +778,7 @@ mod tests {
             default("maxBodySize"),
             Some(DEFAULT_MAX_BODY_SIZE.to_string())
         );
+        assert_eq!(default("settleMs"), Some(DEFAULT_SETTLE_MS.to_string()));
         assert_eq!(default("notifyUsers"), None, "unset keeps the Jira default");
         assert_eq!(default("project"), None);
         assert_eq!(find("maxResults").kind, OptionKind::Int);

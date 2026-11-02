@@ -15,6 +15,7 @@
 //! act on the issue of an earlier step.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use autumn_jira::client::{CommentOutcome, CreateOutcome, IssuePage, TransitionOutcome};
 use autumn_jira::error::Op;
@@ -29,6 +30,7 @@ use crate::error::to_camel_error;
 use crate::headers::{self, Marked};
 use crate::input;
 use crate::options::{EndpointOptions, Operation};
+use crate::settle::settle;
 use crate::{HEADER_ISSUE_ID, HEADER_ISSUE_KEY, HEADER_NEXT_TOKEN, HEADER_OUTCOME};
 
 /// The outcome of a write that made the issue or the comment.
@@ -250,11 +252,21 @@ impl Producer {
             ));
         };
         if !self.may_send(&marked) {
-            return match self
+            let mut found = self
                 .client
                 .find_by_idempotency_key(project, &marked.key)
-                .await?
-            {
+                .await?;
+            if found.is_none() && options.settle_ms > 0 {
+                // The search index can lag behind the create of an earlier
+                // attempt. harvest-camel gives the attempt no Retry-After,
+                // so the producer waits here (ADR 0003).
+                settle(Duration::from_millis(options.settle_ms)).await;
+                found = self
+                    .client
+                    .find_by_idempotency_key(project, &marked.key)
+                    .await?;
+            }
+            return match found {
                 Some(found) => Ok(Reply::issue(found.id.as_str(), found.key.as_str(), FOUND)),
                 None => Err(outcome_unknown(op)),
             };

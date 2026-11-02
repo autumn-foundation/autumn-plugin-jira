@@ -477,11 +477,12 @@ async fn a_named_connection_picks_its_client() {
     );
 }
 
-/// The routes of the idempotency tests.
+/// The routes of the idempotency tests. `settleMs=0`: a negative lookup
+/// fails at once.
 const MARKED: &[(&str, &str)] = &[
     (
         "direct:create",
-        "jira:createIssue?project=OPS&issueType=Task",
+        "jira:createIssue?project=OPS&issueType=Task&settleMs=0",
     ),
     ("direct:comment", "jira:addComment?issueKey=OPS-1"),
     (
@@ -1026,7 +1027,7 @@ async fn camel_redelivery_of_marked_create_looks_up_only() {
     fake.fault(FakeOp::CreateIssue, Fault::StatusAfterCommit(503));
     let camel = start_redelivering(
         component(&fake),
-        "jira:createIssue?project=OPS&issueType=Task",
+        "jira:createIssue?project=OPS&issueType=Task&settleMs=0",
         2,
         is_io,
     )
@@ -1195,14 +1196,14 @@ async fn the_out_header_of_an_earlier_step_is_not_an_override() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retry_attempt_lookup_waits_for_index_lag() {
-    // The default settle wait is 30 s, the SETTLE_SECS of the harvest
-    // activity. Only createIssue takes the option: the comment list is
-    // always current.
+    // The default settle wait is 10 s: the wait and two lookups must fit in
+    // the 30 s of a direct: call. Only createIssue takes the option: the
+    // comment list is always current.
     let settle = uri_options()
         .into_iter()
         .find(|o| o.name == "settleMs")
         .expect("the settleMs option");
-    assert_eq!(settle.default_value.as_deref(), Some("30000"));
+    assert_eq!(settle.default_value.as_deref(), Some("10000"));
 
     let fake = FakeJira::new();
     fake.index_lag(std::time::Duration::from_secs(1));
@@ -1240,10 +1241,10 @@ async fn retry_attempt_lookup_waits_for_index_lag() {
     assert_eq!(fake.count(FakeOp::CreateIssue), 1);
     stop(camel).await;
 
-    // settleMs=0 turns the wait off. The option takes 0 to 600000.
+    // settleMs=0 turns the wait off. The option takes 0 to 120000.
     let err = route_add_error(
         component(&fake),
-        "jira:createIssue?project=OPS&issueType=Task&settleMs=600001",
+        "jira:createIssue?project=OPS&issueType=Task&settleMs=120001",
     )
     .await;
     assert!(err.contains("settleMs"), "{err}");
