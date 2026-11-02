@@ -5,7 +5,8 @@
     dead_code,
     clippy::unwrap_used,
     clippy::expect_used,
-    reason = "test helpers; each test file uses a part of them"
+    clippy::result_large_err,
+    reason = "test helpers; each test file uses a part of them; CamelError is large"
 )]
 
 use std::sync::Arc;
@@ -78,7 +79,11 @@ pub async fn start_one(component: JiraComponent, to: &str) -> Result<CamelContex
 
 /// Sends one message to `from` and waits for the result. An exchange with
 /// an error gives that error.
-pub async fn send(camel: &CamelContext, from: &str, message: Message) -> Result<Exchange, CamelError> {
+pub async fn send(
+    camel: &CamelContext,
+    from: &str,
+    message: Message,
+) -> Result<Exchange, CamelError> {
     let direct = camel.registry().get_or_err("direct")?;
     let endpoint = direct.create_endpoint(from, camel)?;
     let rt: Arc<dyn RuntimeObservability> = Arc::new(NoOpComponentContext);

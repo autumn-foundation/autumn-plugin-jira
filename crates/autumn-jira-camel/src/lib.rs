@@ -26,7 +26,9 @@
 
 mod component;
 mod error;
+mod input;
 mod options;
+mod producer;
 
 pub use component::JiraComponent;
 pub use error::to_camel_error;

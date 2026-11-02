@@ -30,12 +30,18 @@ fn option_names() -> Vec<String> {
 
 /// The routes of the CRUD test.
 const CRUD: &[(&str, &str)] = &[
-    ("direct:create", "jira:createIssue?project=OPS&issueType=Task"),
+    (
+        "direct:create",
+        "jira:createIssue?project=OPS&issueType=Task",
+    ),
     (
         "direct:get",
         "jira:getIssue?issueKey=OPS-1&fields=summary,status,labels",
     ),
-    ("direct:edit", "jira:editIssue?issueKey=OPS-1&notifyUsers=false"),
+    (
+        "direct:edit",
+        "jira:editIssue?issueKey=OPS-1&notifyUsers=false",
+    ),
     (
         "direct:move",
         "jira:transitionToStatus?issueKey=OPS-1&status=category:indeterminate",
@@ -151,9 +157,13 @@ async fn create_get_edit_transition_comment_search() {
     assert_eq!(fake.count(FakeOp::DoTransition), 1);
 
     // addComment: a JSON object with text, or a plain string.
-    let ex = send(&camel, "direct:comment", json(json!({"text": "Looking now"})))
-        .await
-        .unwrap();
+    let ex = send(
+        &camel,
+        "direct:comment",
+        json(json!({"text": "Looking now"})),
+    )
+    .await
+    .unwrap();
     let comment = reply(&ex);
     assert_eq!(comment["issue"], json!("OPS-1"));
     assert_eq!(comment["outcome"], json!("created"));
@@ -217,7 +227,11 @@ async fn consumer_is_rejected() {
     assert!(metadata.capabilities.supports_producer);
     assert!(!metadata.capabilities.supports_consumer);
     assert!(!metadata.capabilities.supports_polling_consumer);
-    let names: Vec<String> = metadata.uri_options.iter().map(|o| o.name.clone()).collect();
+    let names: Vec<String> = metadata
+        .uri_options
+        .iter()
+        .map(|o| o.name.clone())
+        .collect();
     assert_eq!(names, option_names());
     assert!(metadata.validate_scheme(SCHEME).is_ok());
 
@@ -250,7 +264,7 @@ async fn consumer_is_rejected() {
     let err = started.expect_err("a jira: consumer must fail");
     assert!(err.to_string().contains("producer-only"), "{err}");
     let _ = camel.stop().await;
-    assert!(fake.requests().is_empty());
+    assert_eq!(fake.requests().len(), 0, "no call");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -275,7 +289,10 @@ async fn unknown_option_lists_names() {
     }
     // An unknown operation lists the operations. The match is exact.
     let m = route_add_error(component(&fake), "jira:createissue?project=OPS").await;
-    assert!(m.contains("createissue") && m.contains("createIssue"), "{m}");
+    assert!(
+        m.contains("createissue") && m.contains("createIssue"),
+        "{m}"
+    );
     // An unknown connection is a config error that lists the names.
     let named = component(&fake).connection("eu", client(&fake));
     match named.endpoint_options("jira:getIssue?issueKey=OPS-1&connection=us") {
@@ -300,7 +317,7 @@ async fn project_and_jql_conflict() {
     assert!(m.contains("project") && m.contains("jql"), "{m}");
     let m = route_add_error(component(&fake), "jira:search").await;
     assert!(m.contains("allowHeaderOverrides"), "{m}");
-    assert!(fake.requests().is_empty());
+    assert_eq!(fake.requests().len(), 0, "no call");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -310,7 +327,10 @@ async fn errors_hold_no_body() {
     let camel = start(
         component(&fake),
         &[
-            ("direct:create", "jira:createIssue?project=OPS&issueType=Task"),
+            (
+                "direct:create",
+                "jira:createIssue?project=OPS&issueType=Task",
+            ),
             ("direct:get", "jira:getIssue?issueKey=OPS-1"),
             (
                 "direct:soft",
@@ -329,7 +349,10 @@ async fn errors_hold_no_body() {
     let no_secret = |err: &CamelError| {
         let text = format!("{err} {err:?}");
         assert!(!text.contains(SECRET), "{text}");
-        assert!(!text.contains(autumn_jira_fake::DEFAULT_API_TOKEN), "{text}");
+        assert!(
+            !text.contains(autumn_jira_fake::DEFAULT_API_TOKEN),
+            "{text}"
+        );
     };
 
     // A Jira 400 on a bad field: ValidationError with the field name only.
@@ -377,12 +400,20 @@ async fn errors_hold_no_body() {
         assert!(validation(&err).contains("createIssue"), "{body}: {err}");
         no_secret(&err);
     }
-    let err = send(&camel, "direct:create", Message::new(Body::Text(SECRET.into())))
-        .await
-        .unwrap_err();
+    let err = send(
+        &camel,
+        "direct:create",
+        Message::new(Body::Text(SECRET.into())),
+    )
+    .await
+    .unwrap_err();
     validation(&err);
     no_secret(&err);
-    for body in [json!({}), json!({"setSummary": [SECRET]}), json!({(SECRET): 1})] {
+    for body in [
+        json!({}),
+        json!({"setSummary": [SECRET]}),
+        json!({(SECRET): 1}),
+    ] {
         let err = send(&camel, "direct:edit", json(body.clone()))
             .await
             .unwrap_err();
@@ -404,7 +435,10 @@ async fn errors_hold_no_body() {
     )
     .await
     .unwrap_err();
-    assert!(matches!(err, CamelError::StreamLimitExceeded(10)), "{err:?}");
+    assert!(
+        matches!(err, CamelError::StreamLimitExceeded(10)),
+        "{err:?}"
+    );
     assert_eq!(fake.count(FakeOp::CreateIssue), 1, "only the first create");
     // throwExceptionOnFailure=false: the exchange holds the error code.
     let ex = send(&camel, "direct:soft", Message::default())
@@ -437,5 +471,8 @@ async fn a_named_connection_picks_its_client() {
     assert_eq!(eu.count(FakeOp::CreateIssue), 1);
     assert_eq!(default_site.count(FakeOp::CreateIssue), 0);
     let debug = format!("{:?}", JiraComponent::new(client(&eu)));
-    assert!(!debug.contains(autumn_jira_fake::DEFAULT_API_TOKEN), "{debug}");
+    assert!(
+        !debug.contains(autumn_jira_fake::DEFAULT_API_TOKEN),
+        "{debug}"
+    );
 }

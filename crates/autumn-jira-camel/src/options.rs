@@ -129,10 +129,6 @@ impl EndpointOptions {
     /// [`CamelError::InvalidUri`] for a URI problem, for example an unknown
     /// option, a bad value or a missing required option.
     /// [`CamelError::Config`] when no client has the `connection` name.
-    #[allow(
-        dead_code,
-        reason = "JiraComponent::endpoint_options (WP6 K1) calls it"
-    )]
     pub(crate) fn parse(uri: &str, connections: &[&str]) -> Result<Self, CamelError> {
         let parts = parse_uri(uri)?;
         if parts.scheme != SCHEME {
