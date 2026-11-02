@@ -305,12 +305,14 @@ impl JiraClient {
         let path = format!("{}/comment", issue_path(&issue.into()));
         let max = self.settings.max_pages;
         let mut start = 0_u64;
-        for _ in 0..max {
+        let mut pages = 0_u32;
+        loop {
             let request = ApiRequest::new(Op::ListComments, Method::Get, path.clone())
                 .query("orderBy", "-created")
                 .query("startAt", start.to_string())
                 .query("maxResults", COMMENT_LOOKUP.to_string());
             let page: CommentPage = self.read(&request).await?;
+            pages = pages.saturating_add(1);
             let returned = super::count(page.comments.len());
             if let Some(found) = page
                 .comments
@@ -319,15 +321,23 @@ impl JiraClient {
             {
                 return Ok(Some(found));
             }
-            match policy::offset_next(start, returned, page.total) {
-                Some(next) => start = next,
-                None => return Ok(None),
+            let next = policy::offset_next(start, returned, page.total);
+            match policy::token_page_step(pages, max, false, next.is_some(), false) {
+                policy::PageStep::Fetch => {
+                    if let Some(n) = next {
+                        start = n;
+                    }
+                }
+                policy::PageStep::Limit => {
+                    return Err(JiraError::PageLimit {
+                        op: Op::ListComments,
+                        max,
+                    });
+                }
+                // `repeated` is `false`, so `Stalled` does not come.
+                policy::PageStep::Done | policy::PageStep::Stalled => return Ok(None),
             }
         }
-        Err(JiraError::PageLimit {
-            op: Op::ListComments,
-            max,
-        })
     }
 
     /// Moves an issue to a status. Before each attempt, the client reads

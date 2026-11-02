@@ -663,6 +663,10 @@ impl JiraClient {
     }
 
     /// Reads all pages of an offset pager, at most `max_pages` pages.
+    ///
+    /// It uses the rule of the token pager (`policy::token_page_step`): it
+    /// always reads the first page, and it gives `PageLimit` only when more
+    /// pages come after `max_pages` pages.
     async fn offset_pages<T>(
         &self,
         op: Op,
@@ -673,23 +677,23 @@ impl JiraClient {
         let mut start = 0_u64;
         let mut pages = 0_u32;
         loop {
-            if pages >= max {
-                return Err(JiraError::PageLimit { op, max });
-            }
             let page = fetch(start).await?;
-            pages += 1;
+            pages = pages.saturating_add(1);
             let returned = count(page.values.len());
             out.extend(page.values);
-            if page.is_last {
-                return Ok(out);
-            }
             let next = page.total.map_or_else(
                 || (returned > 0).then(|| start.saturating_add(returned)),
                 |total| policy::offset_next(start, returned, total),
             );
-            match next {
-                Some(n) => start = n,
-                None => return Ok(out),
+            match policy::token_page_step(pages, max, page.is_last, next.is_some(), false) {
+                policy::PageStep::Fetch => {
+                    if let Some(n) = next {
+                        start = n;
+                    }
+                }
+                policy::PageStep::Limit => return Err(JiraError::PageLimit { op, max }),
+                // `repeated` is `false`, so `Stalled` does not come.
+                policy::PageStep::Done | policy::PageStep::Stalled => return Ok(out),
             }
         }
     }
