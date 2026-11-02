@@ -162,10 +162,19 @@ pub(crate) struct Runtime {
 impl Runtime {
     /// The handler tasks that run now, also the tasks that timed out.
     pub(crate) fn handler_tasks(&self) -> usize {
-        usize::try_from(self.webhook.max_handler_tasks)
-            .unwrap_or(usize::MAX)
+        slot_count(self.webhook.max_handler_tasks, Semaphore::MAX_PERMITS)
             .saturating_sub(self.slots.available_permits())
     }
+}
+
+/// The number of handler slots: `max_handler_tasks`, but not more than
+/// `cap`. Give `Semaphore::MAX_PERMITS` as `cap`. tokio panics for a
+/// semaphore with more permits than that. On a 32-bit target, a `u32`
+/// value can be more than that limit.
+pub(crate) fn slot_count(max_handler_tasks: u32, cap: usize) -> usize {
+    usize::try_from(max_handler_tasks)
+        .unwrap_or(usize::MAX)
+        .min(cap)
 }
 
 impl std::fmt::Debug for Runtime {
@@ -209,5 +218,23 @@ impl JiraRuntime {
     #[must_use]
     pub fn counters(&self) -> WebhookCounters {
         self.runtime.counters.snapshot()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// R2B-webhooks-secrets-3, R2D-integration-6: a large
+    /// `max_handler_tasks` does not make tokio panic at the start.
+    #[test]
+    fn the_slot_count_stays_at_the_semaphore_cap() {
+        // `Semaphore::MAX_PERMITS` on a 32-bit target.
+        let cap_32 = usize::try_from(u32::MAX >> 3).unwrap();
+        assert_eq!(slot_count(u32::MAX, cap_32), cap_32);
+        assert_eq!(slot_count(64, cap_32), 64);
+        let n = slot_count(u32::MAX, Semaphore::MAX_PERMITS);
+        assert!(n <= Semaphore::MAX_PERMITS);
+        assert_eq!(Semaphore::new(n).available_permits(), n);
     }
 }

@@ -436,7 +436,11 @@ async fn comment_lookup_finds_marker_beyond_100() {
         .add_comment_idempotent(&issue, &Adf::text("Escalated"), &k)
         .await
         .unwrap();
-    assert!(matches!(first, CommentOutcome::Created(_)), "{first:?}");
+    // No Debug print: a comment outcome holds the account id of the client.
+    assert!(
+        matches!(first, CommentOutcome::Created(_)),
+        "the outcome is Created"
+    );
     // A bot writes 120 newer comments.
     for n in 0..120 {
         fake.human_comment(issue.as_str(), &format!("ci note {n}"), "ann")
@@ -451,7 +455,11 @@ async fn comment_lookup_finds_marker_beyond_100() {
         .add_comment_idempotent(&issue, &Adf::text("Escalated"), &k)
         .await
         .unwrap();
-    assert!(matches!(again, CommentOutcome::Found(_)), "{again:?}");
+    // No Debug print: a comment outcome holds the account id of the client.
+    assert!(
+        matches!(again, CommentOutcome::Found(_)),
+        "the outcome is Found"
+    );
     assert_eq!(fake.count(FakeOp::AddComment), 1);
 }
 
@@ -482,7 +490,11 @@ async fn a_marker_from_another_author_is_not_found() {
         .add_comment_idempotent(&issue, &Adf::text("Escalated"), &k)
         .await
         .unwrap();
-    assert!(matches!(outcome, CommentOutcome::Created(_)), "{outcome:?}");
+    // No Debug print: a comment outcome holds the account id of the client.
+    assert!(
+        matches!(outcome, CommentOutcome::Created(_)),
+        "the outcome is Created"
+    );
     assert_eq!(fake.count(FakeOp::AddComment), 1);
 }
 
@@ -506,7 +518,11 @@ async fn marked_write_with_an_unexpected_2xx_looks_up_the_marker() {
         .add_comment_idempotent(&issue, &Adf::text("hi"), &key(51))
         .await
         .unwrap();
-    assert!(matches!(outcome, CommentOutcome::Found(_)), "{outcome:?}");
+    // No Debug print: a comment outcome holds the account id of the client.
+    assert!(
+        matches!(outcome, CommentOutcome::Found(_)),
+        "the outcome is Found"
+    );
     assert_eq!(fake.count(FakeOp::AddComment), 1);
 }
 
@@ -766,4 +782,350 @@ async fn transition_400_after_lost_reply_reads_the_status() {
     );
     assert_eq!(posts.load(Ordering::SeqCst), 2);
     assert_eq!(fake.count(FakeOp::DoTransition), 2);
+}
+
+/// The `DoTransition` requests of a scripted backend.
+fn transition_posts(backend: &Scripted) -> usize {
+    backend
+        .requests()
+        .iter()
+        .filter(|r| r.op == Op::DoTransition)
+        .count()
+}
+
+/// A client with two attempts for each call, as a durable host has.
+fn two_attempts(backend: Arc<Scripted>) -> JiraClient {
+    let mut settings = fast_settings();
+    settings.max_attempts = 2;
+    JiraClient::new(backend).with_settings(settings)
+}
+
+#[tokio::test(start_paused = true)]
+async fn transition_maybe_sent_on_the_last_attempt_is_outcome_unknown() {
+    let fake = FakeJira::new();
+    let plain = api_token_client(&fake);
+    let issue = plain.create_issue(&task("t")).await.unwrap().key;
+    let backend = Scripted::new(Arc::new(direct(Arc::new(fake.clone()))), |_, _| None);
+    let client = two_attempts(Arc::clone(&backend));
+    // Attempt 1 does not commit. Attempt 2 commits, and the reply is a 504.
+    fake.fault(FakeOp::DoTransition, Fault::Status(503));
+    fake.fault(FakeOp::DoTransition, Fault::StatusAfterCommit(504));
+    let err = client
+        .transition_to_status(&issue, &StatusTarget::in_progress())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        JiraError::OutcomeUnknown {
+            op: Op::DoTransition,
+            cause: UnknownCause::ServerError(504),
+            marker: None,
+        }
+    );
+    assert!(!err.is_retryable(), "a host retry must not send again");
+    assert!(err.may_have_run());
+    assert_eq!(transition_posts(&backend), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_rate_limit_after_a_maybe_sent_attempt_is_outcome_unknown() {
+    let fake = FakeJira::new();
+    let plain = api_token_client(&fake);
+    let issue = plain.create_issue(&task("t")).await.unwrap().key;
+    let backend = Scripted::new(Arc::new(direct(Arc::new(fake.clone()))), |_, _| None);
+    let client = two_attempts(Arc::clone(&backend));
+    fake.fault(FakeOp::DoTransition, Fault::Status(503));
+    fake.rate_limit(FakeOp::DoTransition, 1, 1);
+    let err = client
+        .transition_to_status(&issue, &StatusTarget::in_progress())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        JiraError::OutcomeUnknown {
+            op: Op::DoTransition,
+            cause: UnknownCause::ServerError(503),
+            marker: None,
+        }
+    );
+    assert!(err.may_have_run());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_status_read_after_a_maybe_sent_attempt_is_outcome_unknown() {
+    let fake = FakeJira::new();
+    let plain = api_token_client(&fake);
+    let issue = plain.create_issue(&task("t")).await.unwrap().key;
+    let posted = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&posted);
+    let backend = Scripted::new(Arc::new(direct(Arc::new(fake.clone()))), move |r, _| {
+        match r.op {
+            Op::DoTransition => flag.store(true, Ordering::SeqCst),
+            Op::GetIssue if flag.load(Ordering::SeqCst) => {
+                return Some(Ok(json_reply(404, &json!({"errorMessages": ["gone"]}))));
+            }
+            _ => {}
+        }
+        None
+    });
+    let client = JiraClient::new(backend.clone()).with_settings(fast_settings());
+    fake.fault(FakeOp::DoTransition, Fault::NetworkAfterCommit);
+    let err = client
+        .transition_to_status(&issue, &StatusTarget::in_progress())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        JiraError::OutcomeUnknown {
+            op: Op::DoTransition,
+            cause: UnknownCause::Network,
+            marker: None,
+        }
+    );
+    assert_eq!(transition_posts(&backend), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn transition_400_after_maybe_sent_when_moved_on_is_outcome_unknown() {
+    let fake = FakeJira::new();
+    let plain = api_token_client(&fake);
+    let issue = plain.create_issue(&task("t")).await.unwrap().key;
+    let path = format!("/rest/api/3/issue/{issue}");
+    let stale_issue = capture(&fake, Op::GetIssue, &path, &[("fields", "status")]).await;
+    let stale_list = capture(
+        &fake,
+        Op::GetTransitions,
+        &format!("{path}/transitions"),
+        &[],
+    )
+    .await;
+    let posts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let stale = Arc::new(AtomicBool::new(true));
+    let (count, lag, automation, name) = (
+        Arc::clone(&posts),
+        Arc::clone(&stale),
+        fake.clone(),
+        issue.to_string(),
+    );
+    let backend = Scripted::new(Arc::new(direct(Arc::new(fake.clone()))), move |r, _| {
+        let after_first = count.load(Ordering::SeqCst) == 1;
+        match r.op {
+            Op::DoTransition => {
+                count.fetch_add(1, Ordering::SeqCst);
+                None
+            }
+            // An automation moves the issue on, and the re-read lags.
+            Op::GetIssue if after_first && lag.load(Ordering::SeqCst) => {
+                let _ = automation.human_transition(&name, "Done", "ann");
+                Some(Ok(json_reply(200, &stale_issue)))
+            }
+            Op::GetTransitions if after_first && lag.swap(false, Ordering::SeqCst) => {
+                Some(Ok(json_reply(200, &stale_list)))
+            }
+            _ => None,
+        }
+    });
+    let client = JiraClient::new(backend.clone()).with_settings(fast_settings());
+    fake.fault(FakeOp::DoTransition, Fault::NetworkAfterCommit);
+    let err = client
+        .transition_to_status(&issue, &StatusTarget::in_progress())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        JiraError::OutcomeUnknown {
+            op: Op::DoTransition,
+            cause: UnknownCause::Network,
+            marker: None,
+        }
+    );
+    assert!(err.may_have_run());
+    assert_eq!(fake.count(FakeOp::DoTransition), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_resumed_transition_at_the_target_is_already_there() {
+    let fake = FakeJira::new();
+    let plain = api_token_client(&fake);
+    let issue = plain.create_issue(&task("t")).await.unwrap().key;
+    // The attempt of the host before committed the move.
+    fake.human_transition(issue.as_str(), "In Progress", "ann")
+        .unwrap();
+    let backend = Scripted::new(Arc::new(direct(Arc::new(fake.clone()))), |_, _| None);
+    let client = JiraClient::new(backend.clone()).with_settings(fast_settings());
+    let outcome = client
+        .resume_transition_to_status(&issue, &StatusTarget::in_progress(), UnknownCause::Timeout)
+        .await
+        .unwrap();
+    assert!(
+        matches!(&outcome, TransitionOutcome::AlreadyThere(s) if s.name == "In Progress"),
+        "{outcome:?}"
+    );
+    assert_eq!(transition_posts(&backend), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_resumed_transition_off_the_target_sends_nothing() {
+    let fake = FakeJira::new();
+    let plain = api_token_client(&fake);
+    let issue = plain.create_issue(&task("t")).await.unwrap().key;
+    let backend = Scripted::new(Arc::new(direct(Arc::new(fake.clone()))), |_, _| None);
+    let client = JiraClient::new(backend.clone()).with_settings(fast_settings());
+    let err = client
+        .resume_transition_to_status(&issue, &StatusTarget::in_progress(), UnknownCause::Timeout)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        JiraError::OutcomeUnknown {
+            op: Op::DoTransition,
+            cause: UnknownCause::Timeout,
+            marker: None,
+        }
+    );
+    assert!(!err.is_retryable());
+    let ops: Vec<Op> = backend.requests().iter().map(|r| r.op).collect();
+    assert_eq!(ops, vec![Op::GetIssue], "one status read and no send");
+    // A failed read is also not a send again.
+    let gone = Scripted::new(Arc::new(direct(Arc::new(fake.clone()))), |r, _| {
+        (r.op == Op::GetIssue).then(|| Ok(json_reply(404, &json!({}))))
+    });
+    let client = JiraClient::new(gone).with_settings(fast_settings());
+    let err = client
+        .resume_transition_to_status(&issue, &StatusTarget::in_progress(), UnknownCause::Network)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "outcome_unknown");
+}
+
+#[tokio::test(start_paused = true)]
+async fn transition_with_no_is_global_after_maybe_sent_is_not_resent() {
+    let fake = FakeJira::new();
+    let plain = api_token_client(&fake);
+    let issue = plain.create_issue(&task("t")).await.unwrap().key;
+    let path = format!("/rest/api/3/issue/{issue}/transitions");
+    let mut bare = capture(&fake, Op::GetTransitions, &path, &[]).await;
+    for t in bare["transitions"].as_array_mut().unwrap() {
+        let t = t.as_object_mut().unwrap();
+        t.remove("isGlobal");
+        t.remove("looped");
+    }
+    let backend = Scripted::new(Arc::new(direct(Arc::new(fake.clone()))), move |r, _| {
+        (r.op == Op::GetTransitions).then(|| Ok(json_reply(200, &bare)))
+    });
+    let client = JiraClient::new(backend.clone()).with_settings(fast_settings());
+    let list = client.transitions(&issue).await.unwrap();
+    assert_eq!((list[0].is_global, list[0].looped), (None, None));
+    // The first attempt does not commit, and its outcome is not known.
+    fake.fault(FakeOp::DoTransition, Fault::Timeout);
+    let err = client
+        .transition_to_status(&issue, &StatusTarget::in_progress())
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "outcome_unknown", "{err:?}");
+    assert_eq!(transition_posts(&backend), 1);
+}
+
+/// Returns the query value of `name` in a request.
+fn query_of<'a>(request: &'a autumn_jira::backend::ApiRequest, name: &str) -> Option<&'a str> {
+    request
+        .query
+        .iter()
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v.as_str())
+}
+
+#[tokio::test(start_paused = true)]
+async fn comment_lookup_survives_a_delete_between_pages() {
+    let fake = FakeJira::new();
+    let client = api_token_client(&fake);
+    let issue = client.create_issue(&task("busy")).await.unwrap().key;
+    for n in 0..49 {
+        fake.human_comment(issue.as_str(), &format!("old {n}"), "ann")
+            .unwrap();
+    }
+    let k = key(70);
+    let first = client
+        .add_comment_idempotent(&issue, &Adf::text("Escalated"), &k)
+        .await
+        .unwrap();
+    // No Debug print: a comment outcome holds the account id of the client.
+    assert!(
+        matches!(first, CommentOutcome::Created(_)),
+        "the outcome is Created"
+    );
+    for n in 0..100 {
+        fake.human_comment(issue.as_str(), &format!("new {n}"), "ann")
+            .unwrap();
+    }
+    // The marked comment is at index 100, newest first. A person deletes a
+    // newer comment after the first page, so the marked comment moves to
+    // index 99. The second page at 100 then shows the later comments.
+    let path = format!("/rest/api/3/issue/{issue}/comment");
+    let query = [
+        ("orderBy", "-created"),
+        ("startAt", "101"),
+        ("maxResults", "100"),
+    ];
+    let mut shifted = capture(&fake, Op::ListComments, &path, &query).await;
+    shifted["startAt"] = json!(100);
+    shifted["total"] = json!(149);
+    let backend = Scripted::new(Arc::new(direct(Arc::new(fake.clone()))), move |r, _| {
+        (r.op == Op::ListComments && query_of(r, "startAt") == Some("100"))
+            .then(|| Ok(json_reply(200, &shifted)))
+    });
+    let client = JiraClient::new(backend).with_settings(fast_settings());
+    let found = client
+        .find_comment_by_idempotency_key(&issue, &k)
+        .await
+        .unwrap();
+    assert!(
+        found.is_some(),
+        "the delete moved the marker past the cursor"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_first_attempt_comments_on_an_issue_with_many_comments() {
+    let fake = FakeJira::new();
+    let mut settings = fast_settings();
+    settings.max_pages = 1;
+    let client = api_token_client(&fake).with_settings(settings);
+    let issue = client.create_issue(&task("busy")).await.unwrap().key;
+    for n in 0..150 {
+        fake.human_comment(issue.as_str(), &format!("note {n}"), "ann")
+            .unwrap();
+    }
+    let k = key(71);
+    // A call that does not know of earlier calls fails closed at the cap.
+    let err = client
+        .add_comment_idempotent(&issue, &Adf::text("Escalated"), &k)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "page_limit");
+    assert_eq!(fake.count(FakeOp::AddComment), 0);
+    // The first attempt of a host sends: no earlier call used the key.
+    let outcome = client
+        .add_comment_idempotent_first(&issue, &Adf::text("Escalated"), &k)
+        .await
+        .unwrap();
+    // No Debug print: a comment outcome holds the account id of the client.
+    assert!(
+        matches!(outcome, CommentOutcome::Created(_)),
+        "the outcome is Created"
+    );
+    assert_eq!(fake.count(FakeOp::AddComment), 1);
+    // After a lost reply, the lookup finds the new comment on page 1.
+    let k = key(72);
+    fake.fault(FakeOp::AddComment, Fault::NetworkAfterCommit);
+    let outcome = client
+        .add_comment_idempotent_first(&issue, &Adf::text("Again"), &k)
+        .await
+        .unwrap();
+    // No Debug print: a comment outcome holds the account id of the client.
+    assert!(
+        matches!(outcome, CommentOutcome::Found(_)),
+        "the outcome is Found"
+    );
+    assert_eq!(fake.count(FakeOp::AddComment), 2);
 }

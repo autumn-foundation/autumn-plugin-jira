@@ -4,7 +4,9 @@
   budgets, the lookup-failure rule and the delete rule across attempts.
   Amended after review round 1: the transition resend rule, the camel
   redelivery rules, the camel settle wait and the san-mateo budgets
-  (plan V54 to V95).
+  (plan V54 to V95). Amended after review round 2 (plan V97 to V116).
+  These amendments are the stops after a "maybe sent" transition, the
+  resume mode, the first comment attempt and the timeout cap.
 - Date: 2026-11-02
 
 ## Context
@@ -37,10 +39,19 @@ layers multiply the sends and break the activity timeout.
   marker.
 - Marked comment: a last paragraph `autumn-ref: <26 lower base32>`. The
   lookup reads the newest comments, which are not from the search index.
+  When the total drops between two pages, the next page starts back by
+  that drop, so a delete does not hide the marker (plan V99).
   It reads pages newest first, up to `max_pages`. At the cap it gives
   `PageLimit`, so it fails closed. A match is a comment by the own account
   with a line that is the full marker. A person can type the marker, but
   a person is not the author of the client comments (plan V62).
+- First comment attempt (plan V99, V104): `add_comment_idempotent_first`
+  does no lookup before the POST. Nothing can have sent the comment
+  before attempt 1, so a lookup there only adds the risk of `PageLimit`
+  on a busy issue. After a 5xx or a lost reply it still looks up, and a
+  `PageLimit` then gives `OutcomeUnknown` with the marker. Harvest uses it
+  on attempt 1 and after a `NotSent` attempt. A camel `addComment` uses it
+  on harvest attempt 1 with no camel redelivery (plan V116).
 - Checked transition: before each attempt, the client reads the status. At
   the target it returns `AlreadyThere`. The status alone cannot show that a
   "maybe sent" attempt did not run. So after a 5xx or a "maybe sent"
@@ -49,6 +60,21 @@ layers multiply the sends and break the activity timeout.
   and not looped, so Jira rejects it after a commit. Else the call gives
   `OutcomeUnknown`. A 400 or a 409 after a "maybe sent" attempt makes the
   client read the status once more. At the target, it returns `Moved`.
+  A missing `isGlobal` or `looped` flag counts as `true` (plan V98).
+- Every stop after a "maybe sent" transition attempt (plan V97): the call
+  can stop off the target after such an attempt. Then the result is
+  `OutcomeUnknown` with no marker, and it is not retryable. This covers the
+  stop of the last attempt, a 429, a 4xx, a failed status read and
+  `TransitionNotAvailable`. Without this rule, a host retry of a
+  retryable stop starts a new call, and the new call sends again.
+- Resume mode (plan V97, V104, V105): `resume_transition_to_status` makes
+  one status read and sends nothing. At the target it returns
+  `AlreadyThere`. Else, or when the read fails, it gives
+  `OutcomeUnknown`. Harvest calls it after a `MaybeSent` or `Unknown`
+  attempt. The camel component calls it on a camel redelivery and on a
+  `HarvestActivityAttempt` above 1. A host that starts a new
+  `transition_to_status` call after a "maybe sent" attempt can send the
+  transition two times.
 - Why this transition rule (review round 1, plan V63): the status check
   alone sent a transition again in two bad cases. An automation can move
   the issue on after the first attempt commits. A global or looped
@@ -104,14 +130,18 @@ layers multiply the sends and break the activity timeout.
   `jira_delete_issue` get 9m. `jira_create_issue`,
   `jira_transition_to_status` and `jira_watch_issue` (four idempotent
   calls, 1 960 s) get 42m. `jira_add_comment` gets 70m (3 920 s). It can
-  read `GET /myself` and up to 3 comment pages before and after the send
-  (`COMMENT_LOOKUP_PAGES`). At that cap the lookup fails closed with
+  read `GET /myself` and up to 3 comment pages after the send, and before
+  it on the opt-in resend (`COMMENT_LOOKUP_PAGES`). At that cap the lookup fails closed with
   `PageLimit` (plan V96). The first budgets (3m, 5m, 12m) held for a
   direct client only. A `start_to_close` timeout gives `Unknown` on the
   next attempt, so a short budget makes more lookups only, not a
   duplicate. The test `start_to_close_covers_the_client_budget` adds up
-  the calls with the real constants, for direct and san-mateo sends. The
-  plugin caps `[jira.http] timeout_secs` at 60, so the model holds.
+  the calls with the real constants, for direct and san-mateo sends. In
+  API token mode the plugin caps `[jira.http] timeout_secs` at 60, so the
+  model holds. In san_mateo mode the plugin does not use that value. The
+  app must keep the San Mateo transport timeout at
+  `MAX_TRANSPORT_TIMEOUT_SECS` (60 s) or less, or the model does not hold
+  (plan V111).
 - Unknown sends (plan V54, V59): a transport `Invalid` error is "not
   sent" only for the texts of a check before the send. A send error after
   Jira has the request can have run, so it is "maybe sent". On a marked
@@ -122,7 +152,8 @@ layers multiply the sends and break the activity timeout.
   lookup only, also on harvest attempt 1. A camel redelivery of a write
   with no key header fails and sends nothing. So a camel `retry(..)` never
   sends a create or a comment two times. A redelivery header of an earlier
-  step also makes a later write look up only. That fails closed.
+  step also makes a later write look up only, or read the status only.
+  That fails closed.
 - Camel settle wait (plan V90): harvest-camel gives a camel attempt no
   `Retry-After`. So a lookup-only `createIssue` that finds nothing waits
   `settleMs` (default 10 s) and looks up one more time. The default fits
@@ -132,7 +163,9 @@ layers multiply the sends and break the activity timeout.
 ## Consequences
 
 - Good: by default no duplicate issue, comment or transition. The rule is a
-  named, proved theorem.
+  named, proved theorem. For a transition, this holds when each host
+  retry after a "maybe sent" attempt uses the resume mode. The harvest
+  activity and the camel component do so.
 - Good: in the normal case (index lag of seconds) a lost reply resolves to
   `found` on the next harvest attempt.
 - Bad: by default a lost create whose issue stays hidden longer than the
@@ -148,8 +181,11 @@ layers multiply the sends and break the activity timeout.
   than design v2 did. A deadline inside `SanMateoBackend` from the
   activity deadline is a better fix for later.
 - Bad: a camel redelivery that follows a failed earlier step makes each
-  later write in that exchange look up only. Such a write can fail with
-  `outcome_unknown`, but it never makes a duplicate.
+  later write in that exchange look up only, or read the status only. Such
+  a write can fail with `outcome_unknown`, but it never makes a duplicate.
+- Bad: a lost reply on a transition followed by an automation that moves
+  the issue on ends with `OutcomeUnknown`. A person or a later step must
+  check.
 - Considered and deferred: a key-window probe with `bulkfetch` above a
   high-water mark gives a strong negative without the search index. It
   depends on three facts that no source confirms: keys only go up, keys are

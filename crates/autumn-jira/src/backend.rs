@@ -15,7 +15,7 @@ use crate::error::{JiraError, Op, Result};
 use crate::ids::CloudId;
 use crate::model::AccessibleResource;
 
-pub use self::san_mateo::{SanMateoBackend, SanMateoTarget};
+pub use self::san_mateo::{CLOUD_ID_RECHECK_INTERVAL, SanMateoBackend, SanMateoTarget};
 pub use direct::DirectBackend;
 
 /// The characters that stay as they are in a path segment or a query

@@ -162,7 +162,9 @@ pub struct JiraHttpConfig {
     /// (`autumn_jira::client::MAX_TRANSPORT_TIMEOUT_SECS`): the budgets of
     /// the harvest activities hold for 60 s for each request. In
     /// `san_mateo` mode, the San Mateo transport owns the timeout, so the
-    /// plugin does not use this value.
+    /// plugin does not use this value and does not cap it. Then keep the
+    /// timeout of the San Mateo transport at 60 s or less, or the harvest
+    /// budgets do not hold.
     pub timeout_secs: u64,
 }
 
@@ -425,7 +427,11 @@ impl JiraConfig {
             "[jira.http] lookup_attempts",
         )?;
         require_positive(http.timeout_secs, "[jira.http] timeout_secs")?;
-        if http.timeout_secs > MAX_TRANSPORT_TIMEOUT_SECS {
+        // In `san_mateo` mode the San Mateo transport owns the timeout, and
+        // the plugin does not use this value. So the cap applies only when
+        // the plugin can build the API token transport.
+        let san_mateo_mode = self.san_mateo.is_some() && self.api_token.is_none();
+        if !san_mateo_mode && http.timeout_secs > MAX_TRANSPORT_TIMEOUT_SECS {
             return Err(PluginError::config(format!(
                 "[jira.http] timeout_secs must be {MAX_TRANSPORT_TIMEOUT_SECS} or less: the harvest activity budgets hold for {MAX_TRANSPORT_TIMEOUT_SECS} s for each request"
             )));
@@ -910,5 +916,18 @@ mod tests {
             assert!(e.contains(word), "{text}: {e}");
         }
         assert!(JiraConfig::default().validate().is_ok());
+    }
+
+    /// R2D-integration-4: in `san_mateo` mode the plugin does not use
+    /// `[jira.http] timeout_secs`. A value above the cap does not stop the
+    /// start. In API token mode the cap still applies.
+    #[test]
+    fn the_timeout_cap_applies_in_api_token_mode_only() {
+        let san_mateo = "[jira.san_mateo]\nenvironment = \"e\"\nintegration = \"jira\"\nconnection_id = \"c\"\n[jira.http]\ntimeout_secs = 120\n";
+        let config = JiraConfig::from_toml_str(san_mateo).unwrap();
+        assert_eq!(config.http.timeout_secs, 120);
+        let api = "[jira.api_token]\nsite = \"acme\"\n[jira.http]\ntimeout_secs = 120\n";
+        let e = JiraConfig::from_toml_str(api).unwrap_err().to_string();
+        assert!(e.contains("[jira.http] timeout_secs"), "{e}");
     }
 }

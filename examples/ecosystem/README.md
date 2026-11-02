@@ -225,14 +225,23 @@ A person moves the issue to Done. The fake signs the delivery, and the
 driver posts it to the app. autumn checks the HMAC and the delivery id.
 The plugin then calls the sink `HarvestSignalBridge`. The bridge reads the
 route property of the issue with a strongly consistent GET. It checks the
-tag in constant time and the allowlist. Then it reads the status of the
-issue on the site of its own client and signals the run. The delivery id
-is the signal idempotency key.
+tag in constant time and the allowlist. Then it reads the issue on the
+site of its own client and signals the run. The delivery id is the signal
+idempotency key.
+
+A San Mateo client tells the bridge no site host. So the example gives the
+host of `SITE_URL` with `site_host`. `SITE_URL` is the `url` of the site in
+`accessible-resources`, and the target of the client picks the site with
+it. The bridge then refuses a delivery whose `issue.self` names another
+site. It makes no call and counts the delivery in `other_site`. For a
+delivery of its own site, the signal holds the status of the payload, so
+a short status still ends a wait.
 
 ```rust
 // src/main.rs and src/app.rs
 let bridge = HarvestSignalBridge::new(pool.clone(), jira.clone(), key.clone())
-    .allow_workflow(INCIDENT_FLOW);
+    .allow_workflow(INCIDENT_FLOW)
+    .site_host(transport::site_host()?);
 JiraPlugin::with_config(jira_config()?).sink_for_all_actors(bridge)
 ```
 
@@ -295,7 +304,8 @@ pub async fn incident(jira: JiraService, Path(key): Path<IssueKey>) -> AutumnRes
 | `tests::bad_webhook_secret_resolves_by_poll` | Each POST gives 401; a poll ends the wait. |
 | `tests::no_webhook_no_poll_times_out` | The timeout branch and its escalation comment. |
 | `tests::a_wrong_value_fails_the_check` | A wrong line gives `check failed:`. |
-| `tests::webhook_negatives` | 409 for the same delivery, 401 for a tampered one, 200 for the bot; one signal. |
+| `tests::webhook_negatives` | 409 for the same delivery, 401 for a tampered one, 200 for the bot. The copy of the bot goes to the bridge (a sink for all actors): the bridge gets 2 deliveries, and `ignored_self` is 0. |
+| `tests::a_delivery_of_another_site_is_refused` | A signed copy whose `issue.self` names another site comes first. It gets 200, and the bridge counts it in `other_site` and makes no call. Only the delivery of the own site signals the run. |
 | `tests::two_tenants_stay_apart` | Two connections on two fake sites, one plugin, no mix. |
 | `tests::is_retryable_copy_matches_harvest_camel` | The pinned copy in `crates/autumn-jira-camel/tests/retry_rule.rs` equals the real `harvest_camel::is_retryable`. |
 | `tests::boot_three_plugins_real_http` | `run()` with `SanMateoPlugin`, `HarvestPlugin` (external mode) and `JiraPlugin` takes one signed POST over real HTTP. |
@@ -308,4 +318,6 @@ pub async fn incident(jira: JiraService, Path(key): Path<IssueKey>) -> AutumnRes
   as `from("kafka:alerts")` in place of `direct:alerts`.
 - The graph has two rustls crypto providers (`ring` and `aws-lc-rs`).
   `main` installs `ring` before any client is built.
-- Stop in this order: the connector, the harvest worker, then camel.
+- Stop in this order: the connector, the harvest worker, then camel. The
+  stop log records a worker stop only when a worker stopped. So a deadline
+  during the worker swap of step [6] shows as a missing stop.

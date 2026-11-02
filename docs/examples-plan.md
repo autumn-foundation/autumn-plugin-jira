@@ -1,6 +1,6 @@
 # Plan: runnable examples
 
-- Status: Accepted (as built for EX1 to EX4; EX5 to EX8 in progress, wave 4).
+- Status: Accepted (as built for EX1 to EX8).
 - Date: 2026-11-02
 - Style: ASD-STE100. Short sentences. Active voice. Present tense.
 - Inputs: [plan.md](plan.md) sections 11, 12 and 16.2, ADR 0008, the
@@ -245,8 +245,9 @@ Rules for each example (EX8 checks them by text):
   `examples/ecosystem/src/tests.rs`. EX5: `happy_path_timeline_is_exact`.
   EX6: `lost_create_fails_closed`, `bad_webhook_secret_resolves_by_poll`,
   `no_webhook_no_poll_times_out`, `a_wrong_value_fails_the_check`. EX7:
-  `webhook_negatives`, `two_tenants_stay_apart`,
-  `is_retryable_copy_matches_harvest_camel`, `boot_three_plugins_real_http`.
+  `webhook_negatives`, `a_delivery_of_another_site_is_refused`,
+  `two_tenants_stay_apart`, `is_retryable_copy_matches_harvest_camel`,
+  `boot_three_plugins_real_http`.
   Status: done (WP7).
 
 ### 7.6 The wiring guard (EX8)
@@ -261,7 +262,8 @@ Rules for each example (EX8 checks them by text):
   the `run:` script of a step with no `if:`. The README command of an
   example sets each env var that the example needs.
   `readme_snippets_copy_their_examples` checks that a snippet that names an
-  example holds only lines of that example.
+  example holds only code lines of that example, in the same order.
+  Comments and test items of the example do not count.
   `docs_give_the_ci_commands_of_the_separate_workspace` checks that
   `CLAUDE.md` and the README give the ecosystem commands of CI. `no_example_turns_on_the_dev_only_proxy_flags` checks for
   `full_migrations_sql`, `allow_private_hosts` and `allow_plain_http`.

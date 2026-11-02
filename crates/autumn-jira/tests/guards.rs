@@ -860,6 +860,36 @@ mod check {
             .collect()
     }
 
+    /// The manifest of a `cargo update` in a shell line, or `None`. The
+    /// update can come after `&&`, `||`, `;` or `|`, and can follow a `cd`.
+    /// Both `--manifest-path p` and `--manifest-path=p` name the manifest
+    /// (R2E-tests-guards-8).
+    fn updated_manifest(line: &str, dir: &mut Option<String>) -> Option<String> {
+        let mut found = None;
+        for command in line.split(['&', '|', ';']) {
+            let words = shell_words(command);
+            match words.as_slice() {
+                ["cd", to, ..] => *dir = Some((*to).trim_end_matches('/').to_owned()),
+                ["cargo", "update", rest @ ..] => {
+                    let named = rest.iter().enumerate().find_map(|(k, w)| {
+                        if *w == "--manifest-path" {
+                            rest.get(k + 1).copied()
+                        } else {
+                            w.strip_prefix("--manifest-path=")
+                        }
+                    });
+                    let named = named.map(|m| m.trim_matches(['"', '\'']).to_owned());
+                    found = Some(named.unwrap_or_else(|| {
+                        dir.as_ref()
+                            .map_or_else(|| "Cargo.toml".to_owned(), |d| format!("{d}/Cargo.toml"))
+                    }));
+                }
+                _ => {}
+            }
+        }
+        found
+    }
+
     /// AC39: a `cargo update` changes the lock, so a later step of the same
     /// job runs `scripts/one-version.sh` on the same manifest. The step has
     /// no `if`, so it runs after each update.
@@ -867,15 +897,13 @@ mod check {
         let scripts = run_scripts(ci);
         let mut out = Vec::new();
         for (i, script) in scripts.iter().enumerate() {
+            // A `cd` holds for the rest of the script.
+            let mut dir: Option<String> = None;
             for (n, line) in &script.lines {
-                let words = shell_words(line);
-                if words.get(..2) != Some(&["cargo", "update"][..]) {
+                let Some(manifest) = updated_manifest(line, &mut dir) else {
                     continue;
-                }
-                let manifest = words
-                    .windows(2)
-                    .find(|w| w[0] == "--manifest-path")
-                    .map_or("Cargo.toml", |w| w[1]);
+                };
+                let manifest = manifest.as_str();
                 let checked = scripts[i + 1..]
                     .iter()
                     .filter(|s| s.job == script.job && s.cond.is_none())
@@ -1393,45 +1421,100 @@ mod check {
             .collect()
     }
 
-    /// The `key = value` lines of the `[package]` table of a manifest.
-    fn package_keys(manifest: &str) -> BTreeMap<String, String> {
+    /// The `key = value` lines of one table of a manifest. An array can
+    /// span lines: the value runs to its closing bracket.
+    fn table_keys(manifest: &str, table: &str) -> BTreeMap<String, String> {
+        let header = format!("[{table}]");
         let mut out = BTreeMap::new();
-        let mut in_package = false;
+        let mut in_table = false;
+        let mut open: Option<(String, String)> = None;
         for line in manifest.lines() {
             let t = strip_toml_comment(line).trim();
-            if t.starts_with('[') {
-                in_package = t == "[package]";
+            if let Some((key, mut value)) = open.take() {
+                value.push_str(t);
+                if value.matches('[').count() > value.matches(']').count() {
+                    open = Some((key, value));
+                } else {
+                    out.insert(key, value);
+                }
                 continue;
             }
-            if let (true, Some((key, value))) = (in_package, t.split_once('=')) {
-                out.insert(key.trim().to_owned(), value.trim().to_owned());
+            if t.starts_with('[') {
+                in_table = t == header;
+                continue;
+            }
+            if let (true, Some((key, value))) = (in_table, t.split_once('=')) {
+                let (key, value) = (key.trim().to_owned(), value.trim().to_owned());
+                if value.matches('[').count() > value.matches(']').count() {
+                    open = Some((key, value));
+                } else {
+                    out.insert(key, value);
+                }
             }
         }
         out
     }
 
+    /// The `[package]` keys of a manifest. A `key.workspace = true` takes
+    /// the value of `[workspace.package]` in the root manifest, as cargo
+    /// does. A key that the workspace does not have stays out.
+    fn package_keys(manifest: &str, workspace: &str) -> BTreeMap<String, String> {
+        let shared = table_keys(workspace, "workspace.package");
+        let mut out = BTreeMap::new();
+        for (key, value) in table_keys(manifest, "package") {
+            match key.strip_suffix(".workspace") {
+                Some(name) if value == "true" => {
+                    if let Some(v) = shared.get(name) {
+                        out.insert(name.to_owned(), v.clone());
+                    }
+                }
+                _ => {
+                    out.insert(key, value);
+                }
+            }
+        }
+        out
+    }
+
+    /// The quoted strings of a TOML value.
+    fn quoted(value: &str) -> Vec<&str> {
+        value.split('"').skip(1).step_by(2).collect()
+    }
+
     /// The crates.io metadata of a crate that is published: `description`,
-    /// `readme`, one to five `keywords`, and `categories`. A crate with
-    /// `publish = false` needs none. It gives the `readme` value, so the
-    /// caller can check that the file exists.
+    /// `readme`, one to five `keywords`, and `categories`. No value is
+    /// empty. A crate with `publish = false` needs none. It gives the
+    /// `readme` value, so the caller can check that the file exists.
     pub fn publish_metadata_violations(
         path: &str,
         manifest: &str,
     ) -> (Vec<String>, Option<String>) {
-        let keys = package_keys(manifest);
+        publish_metadata_violations_in(path, manifest, "")
+    }
+
+    /// `publish_metadata_violations` with the root manifest of the
+    /// workspace, for `key.workspace = true` (R2E-tests-guards-7).
+    pub fn publish_metadata_violations_in(
+        path: &str,
+        manifest: &str,
+        workspace: &str,
+    ) -> (Vec<String>, Option<String>) {
+        let keys = package_keys(manifest, workspace);
         if keys.get("publish").is_some_and(|v| v == "false") {
             return (Vec::new(), None);
         }
         let mut out = Vec::new();
         for key in ["description", "readme", "keywords", "categories"] {
-            if !keys.contains_key(key) {
-                out.push(format!("{path}: [package] has no `{key}`"));
-            }
-        }
-        if let Some(words) = keys.get("keywords") {
-            let count = words.matches('"').count() / 2;
-            if !(1..=5).contains(&count) {
-                out.push(format!("{path}: {count} keywords; crates.io takes 1 to 5"));
+            match keys.get(key).map(|v| quoted(v)) {
+                None => out.push(format!("{path}: [package] has no `{key}`")),
+                Some(items) if items.is_empty() || items.iter().any(|i| i.trim().is_empty()) => {
+                    out.push(format!("{path}: [package] has an empty `{key}`"));
+                }
+                Some(items) if key == "keywords" && items.len() > 5 => {
+                    let count = items.len();
+                    out.push(format!("{path}: {count} keywords; crates.io takes 1 to 5"));
+                }
+                Some(_) => {}
             }
         }
         let readme = keys.get("readme").map(|v| v.trim_matches('"').to_owned());
@@ -1658,11 +1741,99 @@ mod check {
         out
     }
 
+    /// The EX ids that a text names. `EX5 to EX8` names EX5, EX6, EX7 and
+    /// EX8.
+    pub fn ex_ids(text: &str) -> Vec<u32> {
+        let words: Vec<&str> = text.split_whitespace().collect();
+        let num = |w: &str| -> Option<u32> {
+            let w = w.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+            w.strip_prefix("EX")?.parse().ok()
+        };
+        let mut out = Vec::new();
+        for (i, w) in words.iter().enumerate() {
+            let Some(from) = num(w) else { continue };
+            match (words.get(i + 1), words.get(i + 2).and_then(|w| num(w))) {
+                (Some(&"to"), Some(to)) if to >= from => out.extend(from..=to),
+                _ => out.push(from),
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// The EX ids whose section in `docs/examples-plan.md` says
+    /// `Status: done`.
+    pub fn done_ex_ids(examples_plan: &str) -> Vec<u32> {
+        let mut out = Vec::new();
+        for section in examples_plan.split("\n### ").skip(1) {
+            let heading = section.lines().next().unwrap_or_default();
+            if section.lines().any(|l| l.contains("Status: done")) {
+                out.extend(ex_ids(heading));
+            }
+        }
+        out
+    }
+
+    /// The units of a Markdown text: each table row and each paragraph,
+    /// with its first line.
+    fn units(md: &str) -> Vec<(usize, String)> {
+        let mut out: Vec<(usize, String)> = Vec::new();
+        let mut open = false;
+        for (n, line) in md.lines().enumerate() {
+            let t = line.trim();
+            if t.is_empty() {
+                open = false;
+            } else if t.starts_with('|') {
+                out.push((n + 1, t.to_owned()));
+                open = false;
+            } else if open && let Some(last) = out.last_mut() {
+                last.1.push(' ');
+                last.1.push_str(t);
+            } else {
+                out.push((n + 1, t.to_owned()));
+                open = true;
+            }
+        }
+        out
+    }
+
+    /// R2G-fixcheck-b-2: no table row or paragraph says "in progress" for
+    /// an EX id whose section in `docs/examples-plan.md` says done.
+    pub fn ex_status_violations(path: &str, text: &str, done: &[u32]) -> Vec<String> {
+        units(text)
+            .into_iter()
+            .filter(|(_, unit)| unit.to_lowercase().contains("in progress"))
+            .filter_map(|(n, unit)| {
+                let stale: Vec<String> = ex_ids(&unit)
+                    .into_iter()
+                    .filter(|id| done.contains(id))
+                    .map(|id| format!("EX{id}"))
+                    .collect();
+                (!stale.is_empty()).then(|| {
+                    format!(
+                        "{path}:{n}: says \"in progress\" for {}, which examples-plan says is done",
+                        stale.join(", ")
+                    )
+                })
+            })
+            .collect()
+    }
+
     /// Each `The docs say "..."` of a text cites words that `corpus` has.
     pub fn cited_doc_violations(path: &str, text: &str, corpus: &str) -> Vec<String> {
         const MARK: &str = "The docs say \"";
         let flat_text = flat(text);
-        let corpus = flat(corpus).to_lowercase();
+        // A quote is not a doc that says the text. So the check removes each
+        // quote from the corpus first.
+        let mut corpus = flat(corpus);
+        while let Some(at) = corpus.find(MARK) {
+            let end = corpus[at + MARK.len()..]
+                .find('"')
+                .map_or(corpus.len(), |e| at + MARK.len() + e + 1);
+            corpus.replace_range(at..end, "");
+        }
+        let corpus = corpus.to_lowercase();
         let mut out = Vec::new();
         for (at, _) in flat_text.match_indices(MARK) {
             let rest = &flat_text[at + MARK.len()..];
@@ -1991,6 +2162,55 @@ fn no_ctx_now_in_harvest_sees_ctx_now() {
     assert_eq!(check::ctx_now_violations(p, typed).len(), 1);
     let good = "// Never call ctx.now() here.\nlet t = ctx.system_now();\nlet s = \"ctx.now()\";";
     assert_eq!(check::ctx_now_violations(p, good), NONE);
+}
+
+// --- Postgres tests share one runtime -----------------------------------
+
+/// The `#[tokio::test]` lines of a Postgres test file. A file is a
+/// Postgres test file when it has `fn database_url`.
+///
+/// autumn-harvest keeps one notify sender for each pool in a process-global
+/// list. When a sender stops, the next pool that registers starts it again
+/// on its own runtime. That can be the runtime of another test. The sender
+/// then opens connections of the first pool on that runtime. When the other
+/// test ends, its runtime stops, and those connections close in the middle
+/// of a transaction. One runtime for the whole binary stops this.
+fn pg_runtime_violations(path: &str, text: &str) -> Vec<String> {
+    if !text.contains("fn database_url") {
+        return Vec::new();
+    }
+    text.lines()
+        .enumerate()
+        .filter(|(_, line)| line.trim_start().starts_with("#[tokio::test"))
+        .map(|(n, _)| {
+            format!(
+                "{path}:{}: use the shared runtime, not #[tokio::test]",
+                n + 1
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn postgres_tests_share_one_runtime() {
+    let mut files = files_under(&root().join("crates/autumn-jira-harvest/tests"), &["rs"]);
+    files.extend(files_under(&root().join("examples/ecosystem/src"), &["rs"]));
+    assert_files(
+        "postgres_tests_share_one_runtime",
+        &files,
+        pg_runtime_violations,
+    );
+}
+
+#[test]
+fn postgres_tests_share_one_runtime_sees_a_test_runtime() {
+    let p = "crates/autumn-jira-harvest/tests/bridge_pg.rs";
+    let bad = "fn database_url() {}\n#[tokio::test(flavor = \"multi_thread\")]\nasync fn t() {}";
+    assert_eq!(pg_runtime_violations(p, bad).len(), 1);
+    let good = "fn database_url() {}\n#[test]\nfn t() { runtime().block_on(async {}); }";
+    assert_eq!(pg_runtime_violations(p, good), NONE);
+    let other = "#[tokio::test]\nasync fn t() {}";
+    assert_eq!(pg_runtime_violations(p, other), NONE);
 }
 
 // --- AC30: no exactly-once claim -----------------------------------------
@@ -2367,6 +2587,10 @@ fn weekly_updates_get_the_one_version_check_sees_a_gap() {
                   \x20       run: cargo update\n";
     let eco = "jobs:\n  eco:\n    steps:\n\
                \x20     - run: cargo update --manifest-path \"$MANIFEST\"\n";
+    let eco_eq = "jobs:\n  eco:\n    steps:\n\
+                  \x20     - run: cargo update --manifest-path=\"$MANIFEST\"\n";
+    let eco_cd = "jobs:\n  eco:\n    steps:\n\
+                  \x20     - run: cd examples/ecosystem && cargo update\n";
     for bad in [
         weekly.to_owned(),
         format!(
@@ -2374,12 +2598,18 @@ fn weekly_updates_get_the_one_version_check_sees_a_gap() {
         ),
         format!("{weekly}      - if: false\n        run: bash scripts/one-version.sh Cargo.toml\n"),
         format!("{eco}      - run: bash scripts/one-version.sh Cargo.toml\n"),
+        // R2E-tests-guards-8: the `=` form and an update after `cd`.
+        format!("{eco_eq}      - run: bash scripts/one-version.sh Cargo.toml\n"),
+        eco_cd.to_owned(),
+        format!("{eco_cd}      - run: bash scripts/one-version.sh Cargo.toml\n"),
     ] {
         assert_eq!(check::update_violations(&bad).len(), 1, "{bad}");
     }
     for good in [
         format!("{weekly}      - run: bash scripts/one-version.sh Cargo.toml\n"),
         format!("{eco}      - run: bash scripts/one-version.sh \"$MANIFEST\"\n"),
+        format!("{eco_eq}      - run: bash scripts/one-version.sh \"$MANIFEST\"\n"),
+        format!("{eco_cd}      - run: bash scripts/one-version.sh examples/ecosystem/Cargo.toml\n"),
         "jobs:\n  lock:\n    steps:\n      - run: echo \"Run: cargo update -p a\"\n".to_owned(),
     ] {
         assert_eq!(check::update_violations(&good), NONE, "{good}");
@@ -2422,7 +2652,8 @@ fn published_crates_have_metadata() {
     let mut found = Vec::new();
     for krate in CRATES {
         let path = format!("crates/{krate}/Cargo.toml");
-        let (problems, readme) = check::publish_metadata_violations(&path, &read(&path));
+        let (problems, readme) =
+            check::publish_metadata_violations_in(&path, &read(&path), &read("Cargo.toml"));
         found.extend(problems);
         if let Some(readme) = readme
             && !root().join("crates").join(krate).join(&readme).is_file()
@@ -2454,6 +2685,25 @@ fn published_crates_have_metadata_sees_a_gap() {
     assert_eq!(check::publish_metadata_violations("x", &six).0.len(), 1);
     let private = "[package]\nname = \"x\"\npublish = false\n";
     assert_eq!(check::publish_metadata_violations("x", private).0, NONE);
+    // R2E-tests-guards-7: a key from the workspace, a multi-line array, and
+    // an empty value.
+    let workspace = "[workspace.package]\nreadme = \"README.md\"\n";
+    let inherited = full.replace("readme = \"../../README.md\"", "readme.workspace = true");
+    let (problems, readme) = check::publish_metadata_violations_in("x", &inherited, workspace);
+    assert_eq!(problems, NONE);
+    assert_eq!(readme.as_deref(), Some("README.md"));
+    let lost = check::publish_metadata_violations_in("x", &inherited, "[workspace]\n");
+    assert_eq!(lost.0.len(), 1, "{lost:?}");
+    let multi = full.replace("[\"a\", \"b\"]", "[\n  \"a\",\n  \"b\",\n]");
+    assert_eq!(check::publish_metadata_violations("x", &multi).0, NONE);
+    for empty in [
+        full.replace("description = \"d\"", "description = \"\""),
+        full.replace("[\"a\", \"b\"]", "[\"\"]"),
+        full.replace("[\"c\"]", "[]"),
+    ] {
+        let found = check::publish_metadata_violations("x", &empty).0;
+        assert_eq!(found.len(), 1, "{empty}: {found:?}");
+    }
 }
 
 // --- ASD-STE100 prose ------------------------------------------------------
@@ -2587,18 +2837,26 @@ fn docs_make_no_stale_claims_sees_each_claim() {
     assert_eq!(check::stale_claim_violations(p, good), NONE);
 }
 
+/// The docs that an ADR can cite with `The docs say "..."`. No ADR is in
+/// the list, because two ADRs with the same quote must not satisfy each
+/// other (R2E-tests-guards-2).
+fn cited_docs() -> Vec<PathBuf> {
+    claim_docs()
+        .into_iter()
+        .filter(|p| !rel(p).starts_with("docs/adr"))
+        .collect()
+}
+
 #[test]
 fn adrs_cite_real_doc_text() {
-    let mut corpus = read("README.md");
-    for doc in claim_docs() {
+    let mut corpus = String::new();
+    for doc in cited_docs() {
         corpus.push_str(&std::fs::read_to_string(doc).unwrap());
     }
     let mut found = Vec::new();
     for adr in files_under(&root().join("docs/adr"), &["md"]) {
         let text = std::fs::read_to_string(&adr).unwrap();
-        // The ADR itself does not count as the doc that it cites.
-        let others = corpus.replace(&text, "");
-        found.extend(check::cited_doc_violations(&rel(&adr), &text, &others));
+        found.extend(check::cited_doc_violations(&rel(&adr), &text, &corpus));
     }
     assert!(found.is_empty(), "{}", found.join("\n"));
 }
@@ -2612,6 +2870,64 @@ fn adrs_cite_real_doc_text_sees_a_missing_quote() {
     );
     let corpus = "The opt-in is best effort; no duplicate here, mostly.";
     assert_eq!(check::cited_doc_violations("a", adr, corpus), NONE);
+    // A quote in another ADR is not a doc that says the text (R2E-tests-guards-2).
+    let cite = "The docs say \"gone text\".";
+    let other_adr = "Other ADR: The docs say \"gone text\".";
+    assert_eq!(check::cited_doc_violations("a", cite, other_adr).len(), 1);
+}
+
+#[test]
+fn adrs_cite_real_doc_text_reads_no_adr() {
+    let corpus = cited_docs();
+    assert!(
+        corpus.iter().all(|p| !rel(p).starts_with("docs/adr")),
+        "{corpus:?}"
+    );
+    assert!(corpus.iter().any(|p| rel(p) == "README.md"), "{corpus:?}");
+}
+
+#[test]
+fn ex_status_agrees() {
+    let done = check::done_ex_ids(&read("docs/examples-plan.md"));
+    let mut found = Vec::new();
+    for path in ["docs/examples-plan.md", "docs/ac-evidence.md"] {
+        found.extend(check::ex_status_violations(path, &read(path), &done));
+    }
+    assert!(found.is_empty(), "{}", found.join("\n"));
+}
+
+#[test]
+fn ex_status_agrees_sees_a_gap() {
+    assert_eq!(
+        check::ex_ids("EX1, EX5 to EX8 and (EX9)."),
+        [1, 5, 6, 7, 8, 9]
+    );
+    let plan = "# P\n\n### 7.5 `eco` (EX5, EX6)\n\n- Status: done (WP7).\n\n\
+                ### 7.6 Guard (EX8)\n\n- Status: in progress.\n";
+    let done = check::done_ex_ids(plan);
+    assert_eq!(done, [5, 6]);
+    for bad in [
+        "- Status: Accepted (EX1 to EX4; EX5 to EX8 in progress, wave 4).\n",
+        "| EX6 Failures | In progress (wave 4) | t |\n",
+        "Status: DRAFT. Wave 4 is in\nprogress. The rows of EX5 to EX8 say so.\n",
+    ] {
+        assert_eq!(
+            check::ex_status_violations("p", bad, &done).len(),
+            1,
+            "{bad}"
+        );
+    }
+    for good in [
+        "| EX8 Guard | In progress | t |\n",
+        "| EX5 Happy path | Done | t |\n",
+        "EX5 is done.\n\nThe rest is in progress.\n",
+    ] {
+        assert_eq!(
+            check::ex_status_violations("p", good, &done),
+            NONE,
+            "{good}"
+        );
+    }
 }
 
 #[test]

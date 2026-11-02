@@ -231,3 +231,88 @@ async fn a_stale_metadata_cloud_id_is_checked_after_a_404() {
     assert_eq!(fake.count(FakeOp::AccessibleResources), 2);
     assert_eq!(backend.send(myself()).await.unwrap().status, 200);
 }
+
+/// The cloud id of the site that the tenant moves to.
+const NEW_SITE: &str = "77777777-2222-4333-8444-555555555555";
+
+/// A transport that serves fake `a` until `moved`, then fake `b`: the
+/// tenant reconnects the same san-mateo connection to another site.
+struct Moving {
+    a: FakeJira,
+    b: FakeJira,
+    moved: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl autumn_jira::san_mateo::transport::HttpTransport for Moving {
+    async fn send(
+        &self,
+        request: autumn_jira::san_mateo::transport::HttpRequest,
+    ) -> Result<HttpResponse, autumn_jira::san_mateo::transport::TransportError> {
+        if self.moved.load(std::sync::atomic::Ordering::SeqCst) {
+            self.b.send(request).await
+        } else {
+            self.a.send(request).await
+        }
+    }
+}
+
+fn moving() -> Arc<Moving> {
+    Arc::new(Moving {
+        a: with_oauth(FakeJira::new()),
+        b: with_oauth(FakeJira::new().with_site("beta", NEW_SITE)),
+        moved: std::sync::atomic::AtomicBool::new(false),
+    })
+}
+
+/// Moves the tenant to site B, then waits out the check interval.
+async fn move_site(sites: &Moving) {
+    sites.moved.store(true, std::sync::atomic::Ordering::SeqCst);
+    tokio::time::advance(autumn_jira::backend::CLOUD_ID_RECHECK_INTERVAL).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reconnect_after_confirmation_is_seen() {
+    let sites = moving();
+    let san = san_mateo(sites.clone());
+    let metadata = Map::from_iter([("cloudId".to_owned(), json!(DEFAULT_CLOUD_ID))]);
+    let key = oauth_connection(&san, metadata).await;
+    let backend = SanMateoBackend::new(san.clone(), SanMateoTarget::new(ENV, key.clone()));
+    // An ordinary 404 confirms the stored id. More 404s in the interval do
+    // not check again.
+    let issue = ApiRequest::new(Op::GetIssue, Method::Get, "/rest/api/3/issue/OPS-404");
+    for _ in 0..3 {
+        assert_eq!(backend.send(issue.clone()).await.unwrap().status, 404);
+    }
+    assert_eq!(sites.a.count(FakeOp::AccessibleResources), 1);
+    move_site(&sites).await;
+    // The old id gets a 404 now. The backend checks again and stores B.
+    assert_eq!(backend.send(myself()).await.unwrap().status, 404);
+    assert_eq!(sites.b.count(FakeOp::AccessibleResources), 1);
+    let conn = san
+        .get_connection(ENV, &key, GetOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(conn.metadata["cloudId"], json!(NEW_SITE));
+    assert_eq!(backend.send(myself()).await.unwrap().status, 200);
+    let last = sites.b.requests().pop().unwrap();
+    assert_eq!(last.path, format!("/ex/jira/{NEW_SITE}/rest/api/3/myself"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reconnect_after_discovery_is_seen() {
+    let sites = moving();
+    let san = san_mateo(sites.clone());
+    let key = oauth_connection(&san, Map::new()).await;
+    let backend = SanMateoBackend::new(san.clone(), SanMateoTarget::new(ENV, key.clone()));
+    assert_eq!(backend.send(myself()).await.unwrap().status, 200);
+    assert_eq!(sites.a.count(FakeOp::AccessibleResources), 1);
+    move_site(&sites).await;
+    assert_eq!(backend.send(myself()).await.unwrap().status, 404);
+    assert_eq!(backend.send(myself()).await.unwrap().status, 200);
+    let conn = san
+        .get_connection(ENV, &key, GetOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(conn.metadata["cloudId"], json!(NEW_SITE));
+}

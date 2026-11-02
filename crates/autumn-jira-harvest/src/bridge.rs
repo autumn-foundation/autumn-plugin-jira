@@ -1,17 +1,26 @@
 //! The webhook-to-signal bridge (plan 9.4).
 //!
 //! [`HarvestSignalBridge`] is an [`EventSink`]. For a delivery that needs
-//! routing, the bridge reads the route property of the issue. It checks the
-//! tag and the allowlist of each route. Then it reads the status of the
-//! issue and sends [`SIGNAL`] to the run with `send_signal_idempotent`. The delivery
-//! id is the idempotency key, so a repeated delivery gives one signal.
-//! Webhooks are at least once.
+//! routing, the bridge reads the route property of the issue. Then it reads
+//! the status, the id and the labels of the issue. It checks the tag of
+//! each route against that issue, and the allowlist. It sends [`SIGNAL`] to
+//! the run with `send_signal_idempotent`. The delivery id is the
+//! idempotency key, so a repeated delivery gives one signal. Webhooks are at
+//! least once.
 //!
-//! A delivery does not name its Jira site, and two sites can have the same
-//! issue id. So the bridge does not trust the payload for the issue. It
-//! reads the status and the key from the site of its own client
-//! (R2-webhook-security-1). One bridge serves one site. Give each site its
-//! own webhook endpoint, its own webhook secret and its own bridge.
+//! Two sites can have the same issue id, and one webhook secret can serve
+//! two sites by mistake. So the bridge does not trust the payload for the
+//! issue. It reads the status and the key from the site of its own client
+//! (R2-webhook-security-1). One bridge serves one site. The plugin takes
+//! the webhooks of one Jira site for each app (plan V114). So an app has
+//! one webhook endpoint, one webhook secret and one bridge. A wait on an
+//! issue of another site ends by poll.
+//!
+//! When the bridge knows its site host, it also refuses a delivery whose
+//! `issue.self` names another host or no host (R2F-fixcheck-a-2). It makes
+//! no call for such a delivery and counts it in `other_site`. A client of a
+//! subdomain site tells its host. For a san-mateo client or a cloud id
+//! client, give the host with [`HarvestSignalBridge::site_host`].
 //!
 //! [`wants`] and [`routes_from_property`] are pure. They do no I/O.
 
@@ -26,13 +35,15 @@ use autumn_harvest::erase::is_terminal_state;
 use autumn_harvest::resolve_execution_id_by_workflow_id;
 use autumn_harvest::signal::send_signal_idempotent;
 use autumn_harvest::worker::DbPool;
-use autumn_jira::ids::FieldId;
+use autumn_jira::backend::{BackendInfo, BackendMode};
+use autumn_jira::ids::{FieldId, SiteHost};
+use autumn_jira::model::Issue;
 use autumn_jira::request::FieldSet;
 use autumn_jira::{Delivery, EventSink, HandlerError, IssueId, JiraClient, JiraEvent};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::route::{ROUTES_PROPERTY, RouteKey, SignalRoute, TRACKED_LABEL};
+use crate::route::{ROUTES_PROPERTY, RouteBinding, RouteKey, SignalRoute, TRACKED_LABEL};
 use crate::wait::{IssueSignal, SIGNAL};
 
 /// The result of one route of one delivery.
@@ -75,6 +86,9 @@ pub struct BridgeCounters {
     pub bad_tag: u64,
     /// Deliveries that ended with a transient error (503).
     pub transient: u64,
+    /// Deliveries of another site, or of no named site. The bridge made no
+    /// call for them.
+    pub other_site: u64,
 }
 
 /// The live counters.
@@ -89,6 +103,7 @@ struct Counters {
     not_allowed: AtomicU64,
     bad_tag: AtomicU64,
     transient: AtomicU64,
+    other_site: AtomicU64,
 }
 
 impl Counters {
@@ -104,6 +119,7 @@ impl Counters {
             not_allowed: read(&self.not_allowed),
             bad_tag: read(&self.bad_tag),
             transient: read(&self.transient),
+            other_site: read(&self.other_site),
         }
     }
 }
@@ -120,8 +136,10 @@ impl Counters {
 pub struct HarvestSignalBridge {
     pool: DbPool,
     client: JiraClient,
+    site: Option<SiteHost>,
     key: RouteKey,
     allowed: BTreeSet<String>,
+    accept_v1: bool,
     counters: Arc<Counters>,
 }
 
@@ -129,8 +147,10 @@ impl fmt::Debug for HarvestSignalBridge {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HarvestSignalBridge")
             .field("client", &self.client)
+            .field("site", &self.site)
             .field("key", &self.key)
             .field("allowed", &self.allowed)
+            .field("accept_v1", &self.accept_v1)
             .field("counters", &self.counters.snapshot())
             .finish_non_exhaustive()
     }
@@ -139,13 +159,20 @@ impl fmt::Debug for HarvestSignalBridge {
 impl HarvestSignalBridge {
     /// Makes a bridge with an empty allowlist. An empty allowlist allows no
     /// workflow, so call [`Self::allow_workflow`] for each workflow name.
+    ///
+    /// A client of a subdomain site gives the site host of the bridge. Other
+    /// clients give no host. Then the bridge does not check the site of a
+    /// delivery until you call [`Self::site_host`].
     #[must_use]
     pub fn new(pool: DbPool, client: JiraClient, key: RouteKey) -> Self {
+        let site = client_host(&client.info());
         Self {
             pool,
             client,
+            site,
             key,
             allowed: BTreeSet::new(),
+            accept_v1: false,
             counters: Arc::default(),
         }
     }
@@ -154,6 +181,30 @@ impl HarvestSignalBridge {
     #[must_use]
     pub fn allow_workflow(mut self, workflow_name: &str) -> Self {
         self.allowed.insert(workflow_name.to_owned());
+        self
+    }
+
+    /// Sets the site host of the bridge, for example `acme.atlassian.net`.
+    /// The bridge then refuses each delivery whose `issue.self` names
+    /// another host, or names no host. For a san-mateo client, use the host
+    /// of the site URL in `accessible-resources`:
+    /// `SiteHost::from_url(&resource.url)`.
+    #[must_use]
+    pub fn site_host(mut self, host: SiteHost) -> Self {
+        self.site = Some(host);
+        self
+    }
+
+    /// Opt-in for an upgrade: the bridge also takes a v1 tag.
+    ///
+    /// A v1 tag binds the run, not the issue. A person who can edit issue
+    /// properties can copy a v1 entry to another issue. Then each status
+    /// change of that issue signals the run (R2F-fixcheck-a-3). A run
+    /// that started before the upgrade has only v1 entries. Turn this on
+    /// until those runs end, then turn it off.
+    #[must_use]
+    pub const fn accept_unbound_v1_tags(mut self) -> Self {
+        self.accept_v1 = true;
         self
     }
 
@@ -172,6 +223,16 @@ impl HarvestSignalBridge {
     /// error of the property read.
     pub async fn route(&self, delivery: &Delivery) -> Result<Vec<RouteOutcome>, HandlerError> {
         bump(&self.counters.deliveries);
+        if let Some(own) = &self.site
+            && delivery.site() != Some(own)
+        {
+            bump(&self.counters.other_site);
+            tracing::warn!(
+                site = %own,
+                "jira bridge: a delivery names another site or no site; no call"
+            );
+            return Ok(Vec::new());
+        }
         let result = self.route_inner(delivery).await;
         match &result {
             Ok(outcomes) if outcomes.is_empty() => bump(&self.counters.skipped),
@@ -199,8 +260,8 @@ impl HarvestSignalBridge {
         }
     }
 
-    /// Steps 1 to 6 of plan 9.4. The issue read comes only after a route
-    /// passes its checks, so a forged route makes no extra call.
+    /// Steps 1 to 6 of plan 9.4. The tag binds the issue, so the issue read
+    /// comes before the tag check. A forged route makes no database call.
     async fn route_inner(&self, delivery: &Delivery) -> Result<Vec<RouteOutcome>, HandlerError> {
         let event = &delivery.event;
         let Some(issue) = event.issue().filter(|_| wants(event)) else {
@@ -222,15 +283,21 @@ impl HarvestSignalBridge {
         else {
             return Ok(Vec::new());
         };
-        let routes = routes_from_property(&property, &self.key, &self.allowed);
-        let signal = if routes
+        if route_entries(&property).is_empty() {
+            return Ok(Vec::new());
+        }
+        let (current, bindings) = self.read_issue(&issue.id).await?;
+        let routes = routes_from_property(
+            &property,
+            &self.key,
+            &self.allowed,
+            &bindings,
+            self.accept_v1,
+        );
+        let signal = routes
             .iter()
             .any(|(_, checked)| *checked == RouteOutcome::Signalled)
-        {
-            Some(self.read_signal(delivery, &issue.id).await?)
-        } else {
-            None
-        };
+            .then(|| signal_of(delivery, &current, self.site.is_some()));
         let payload = signal
             .as_ref()
             .map(serde_json::to_value)
@@ -256,26 +323,33 @@ impl HarvestSignalBridge {
         Ok(outcomes)
     }
 
-    /// Makes the signal of a delivery. The status and the key come from a
-    /// read of the issue on the site of the client, not from the payload.
-    async fn read_signal(
+    /// Reads the status and the labels of the issue on the site of the
+    /// client. Returns the issue and the bindings that a tag can have on it:
+    /// its id and each of its labels.
+    async fn read_issue(
         &self,
-        delivery: &Delivery,
         issue_id: &IssueId,
-    ) -> Result<IssueSignal, HandlerError> {
-        let fields = FieldSet::new(FieldId::parse("status").ok());
+    ) -> Result<(Issue, Vec<RouteBinding>), HandlerError> {
+        let fields = FieldSet::new(
+            ["status", "labels"]
+                .into_iter()
+                .filter_map(|f| FieldId::parse(f).ok()),
+        );
         let current = self
             .client
             .get_issue_with(issue_id.clone(), &fields)
             .await?;
-        Ok(IssueSignal {
-            delivery_id: delivery.meta.id.clone(),
-            event: delivery.event.name().to_owned(),
-            issue_id: current.id.clone(),
-            issue_key: Some(current.key.clone()),
-            status: current.status(),
-            timestamp_ms: delivery.timestamp.map(|t| t.epoch_ms()),
-        })
+        let bindings = std::iter::once(RouteBinding::Issue(current.id.clone()))
+            .chain(
+                current
+                    .fields
+                    .labels
+                    .iter()
+                    .cloned()
+                    .map(RouteBinding::MarkerLabel),
+            )
+            .collect();
+        Ok((current, bindings))
     }
 
     /// Steps 5 and 6: resolve the run and send the signal once for the
@@ -316,6 +390,43 @@ impl HarvestSignalBridge {
             Ok(false) => Ok(RouteOutcome::Duplicate),
             Err(error) => error_outcome(&error),
         }
+    }
+}
+
+/// The site host of a client: the host of a subdomain site. A cloud id
+/// site and a san-mateo connection give `None`.
+fn client_host(info: &BackendInfo) -> Option<SiteHost> {
+    if info.mode != BackendMode::ApiToken {
+        return None;
+    }
+    SiteHost::parse(&info.site).ok()
+}
+
+/// Makes the signal of a delivery. The id and the key come from a read of
+/// the issue on the site of the client, not from the payload.
+///
+/// The status depends on `site_checked`: `true` when the bridge knows its
+/// site host and the delivery names that host. Then the delivery comes from
+/// the site of the bridge. The signal gets the status that the payload
+/// reports, together with the time of the payload. An issue can pass a
+/// status in a few seconds, and the bridge can get the delivery after the
+/// next move. The reported status still ends a wait for it
+/// (R2C-harvest-4). Else, or when the payload has no status, the signal
+/// gets the status of the read. A bridge with no site host loses a brief
+/// status in that case, so give each bridge its site host.
+fn signal_of(delivery: &Delivery, current: &Issue, site_checked: bool) -> IssueSignal {
+    let reported = delivery
+        .event
+        .issue()
+        .and_then(|issue| issue.fields.status.clone())
+        .filter(|_| site_checked);
+    IssueSignal {
+        delivery_id: delivery.meta.id.clone(),
+        event: delivery.event.name().to_owned(),
+        issue_id: current.id.clone(),
+        issue_key: Some(current.key.clone()),
+        status: reported.or_else(|| current.status()),
+        timestamp_ms: delivery.timestamp.map(|t| t.epoch_ms()),
     }
 }
 
@@ -366,6 +477,10 @@ pub fn wants(event: &JiraEvent) -> bool {
 
 /// Pure: the routes in a property value, kept only when allowed and the tag verifies.
 ///
+/// `bindings` are the bindings of the issue that the bridge read: its id
+/// and its labels. A v2 tag verifies when it is the tag of one of them. A
+/// v1 tag binds no issue, so it verifies only with `accept_v1`.
+///
 /// Each item is a route and the result of its checks:
 ///
 /// - [`RouteOutcome::BadTag`]: the tag does not verify. This check comes
@@ -384,7 +499,32 @@ pub fn routes_from_property(
     value: &Value,
     key: &RouteKey,
     allowed: &BTreeSet<String>,
+    bindings: &[RouteBinding],
+    accept_v1: bool,
 ) -> Vec<(SignalRoute, RouteOutcome)> {
+    route_entries(value)
+        .into_iter()
+        .map(|(route, tag)| {
+            let verified = bindings
+                .iter()
+                .any(|binding| route.verify(key, binding, tag))
+                || (accept_v1 && route.verify_v1(key, tag));
+            let outcome = if !verified {
+                RouteOutcome::BadTag
+            } else if !allowed.contains(&route.workflow_name) {
+                RouteOutcome::NotAllowed
+            } else {
+                RouteOutcome::Signalled
+            };
+            (route, outcome)
+        })
+        .collect()
+}
+
+/// The route entries of a property value, with their tag text. An entry
+/// with no `wf`, `id` or `tag` string, or with a bad name or id, is left
+/// out.
+fn route_entries(value: &Value) -> Vec<(SignalRoute, &str)> {
     let Some(entries) = value.get("routes").and_then(Value::as_array) else {
         return Vec::new();
     };
@@ -394,15 +534,7 @@ pub fn routes_from_property(
             let name = entry.get("wf")?.as_str()?;
             let id = entry.get("id")?.as_str()?;
             let tag = entry.get("tag")?.as_str()?;
-            let route = SignalRoute::new(name, id).ok()?;
-            let outcome = if !route.verify(key, tag) {
-                RouteOutcome::BadTag
-            } else if !allowed.contains(&route.workflow_name) {
-                RouteOutcome::NotAllowed
-            } else {
-                RouteOutcome::Signalled
-            };
-            Some((route, outcome))
+            Some((SignalRoute::new(name, id).ok()?, tag))
         })
         .collect()
 }
@@ -452,36 +584,69 @@ mod tests {
         assert!(!wants(&event(&json!({"webhookEvent": "sprint_started"}))));
     }
 
+    fn bindings() -> Vec<RouteBinding> {
+        vec![
+            RouteBinding::Issue(IssueId::parse("99291").unwrap()),
+            RouteBinding::MarkerLabel("autumn-tracked".into()),
+            RouteBinding::MarkerLabel("autumn-idem-x".into()),
+        ]
+    }
+
     #[test]
     fn routes_need_tag_and_allowlist() {
         let key = key();
+        let issue = RouteBinding::Issue(IssueId::parse("99291").unwrap());
+        let marker = RouteBinding::MarkerLabel("autumn-idem-x".into());
         let good = SignalRoute::new("incident_flow", "A-1").unwrap();
         let other = SignalRoute::new("other_flow", "B-2").unwrap();
         let forged = SignalRoute::new("incident_flow", "A-9").unwrap();
         let allowed: BTreeSet<String> = ["incident_flow".to_owned()].into();
         let value = json!({"routes": [
-            good.property_entry(&key),
-            other.property_entry(&key),
-            {"wf": "incident_flow", "id": "A-9", "tag": good.tag(&key)},
+            good.property_entry(&key, &issue),
+            other.property_entry(&key, &marker),
+            {"wf": "incident_flow", "id": "A-9", "tag": good.tag(&key, &issue)},
             {"wf": "incident_flow", "id": "A-1"},
-            {"wf": "a b", "id": "A-1", "tag": good.tag(&key)},
-            {"wf": 7, "id": "A-1", "tag": good.tag(&key)},
+            {"wf": "a b", "id": "A-1", "tag": good.tag(&key, &issue)},
+            {"wf": 7, "id": "A-1", "tag": good.tag(&key, &issue)},
             "not an object"
         ]});
         assert_eq!(
-            routes_from_property(&value, &key, &allowed),
+            routes_from_property(&value, &key, &allowed, &bindings(), false),
             vec![
-                (good, RouteOutcome::Signalled),
+                (good.clone(), RouteOutcome::Signalled),
                 (other, RouteOutcome::NotAllowed),
                 (forged, RouteOutcome::BadTag),
             ]
         );
+        // A copy on another issue: no binding of that issue verifies.
+        let elsewhere = [
+            RouteBinding::Issue(IssueId::parse("99292").unwrap()),
+            RouteBinding::MarkerLabel("autumn-tracked".into()),
+        ];
+        assert!(
+            routes_from_property(&value, &key, &allowed, &elsewhere, false)
+                .iter()
+                .all(|(_, outcome)| *outcome == RouteOutcome::BadTag)
+        );
+        // A v1 tag verifies only with the opt-in.
+        let v1 = json!({"routes": [
+            {"wf": "incident_flow", "id": "A-1", "tag": "df60e928addb470f158ced8d9f527e82"}
+        ]});
+        assert_eq!(
+            routes_from_property(&v1, &key, &allowed, &bindings(), false),
+            vec![(good.clone(), RouteOutcome::BadTag)]
+        );
+        assert_eq!(
+            routes_from_property(&v1, &key, &allowed, &[], true),
+            vec![(good, RouteOutcome::Signalled)]
+        );
         // An empty allowlist allows no name. A bad tag is still a bad tag.
         let none = BTreeSet::new();
-        let outcomes: Vec<RouteOutcome> = routes_from_property(&value, &key, &none)
-            .into_iter()
-            .map(|(_, outcome)| outcome)
-            .collect();
+        let outcomes: Vec<RouteOutcome> =
+            routes_from_property(&value, &key, &none, &bindings(), false)
+                .into_iter()
+                .map(|(_, outcome)| outcome)
+                .collect();
         assert_eq!(
             outcomes,
             vec![
@@ -493,12 +658,15 @@ mod tests {
         // Another key makes every tag bad.
         let other_key = RouteKey::new(Secret::new("j".repeat(32))).unwrap();
         assert!(
-            routes_from_property(&value, &other_key, &allowed)
+            routes_from_property(&value, &other_key, &allowed, &bindings(), true)
                 .iter()
                 .all(|(_, outcome)| *outcome == RouteOutcome::BadTag)
         );
         for empty in [json!(null), json!({}), json!({"routes": {}}), json!([])] {
-            assert_eq!(routes_from_property(&empty, &key, &allowed), vec![]);
+            assert_eq!(
+                routes_from_property(&empty, &key, &allowed, &bindings(), true),
+                vec![]
+            );
         }
     }
 
@@ -554,15 +722,17 @@ mod tests {
         }
         let bridge = include_str!("bridge.rs");
         let code = bridge.split("#[cfg(test)]").next().unwrap();
-        assert!(code.contains("route.verify(key, tag)"));
+        assert!(code.contains("route.verify(key, binding, tag)"));
+        assert!(code.contains("route.verify_v1(key, tag)"));
         assert!(!code.contains("tag =="));
         assert!(!code.contains("== tag"));
         // The behaviour: a tag that differs in one char fails.
         let route = SignalRoute::new("incident_flow", "A-1").unwrap();
-        let tag = route.tag(&key());
+        let binding = RouteBinding::MarkerLabel("autumn-idem-x".into());
+        let tag = route.tag(&key(), &binding);
         let mut flipped = tag.clone().into_bytes();
         flipped[0] = if flipped[0] == b'a' { b'b' } else { b'a' };
-        assert!(!route.verify(&key(), std::str::from_utf8(&flipped).unwrap()));
-        assert!(route.verify(&key(), &tag));
+        assert!(!route.verify(&key(), &binding, std::str::from_utf8(&flipped).unwrap()));
+        assert!(route.verify(&key(), &binding, &tag));
     }
 }

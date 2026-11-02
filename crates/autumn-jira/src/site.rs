@@ -8,7 +8,7 @@ use std::fmt;
 use san_mateo::Secret;
 
 use crate::error::{JiraError, Result};
-use crate::ids::{CloudId, SiteName};
+use crate::ids::{CloudId, SiteHost, SiteName};
 
 /// A Jira Cloud site. Only the two fixed host shapes exist.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,6 +26,18 @@ impl JiraSite {
         match self {
             Self::Subdomain(name) => format!("https://{name}.atlassian.net"),
             Self::CloudId(id) => format!("https://api.atlassian.com/ex/jira/{id}"),
+        }
+    }
+
+    /// Returns the host of the site: `acme.atlassian.net`. A webhook
+    /// delivery names this host in `issue.self`
+    /// ([`crate::webhook::Delivery::site`]). A cloud id site gives `None`,
+    /// because the cloud id does not tell the host.
+    #[must_use]
+    pub fn host(&self) -> Option<SiteHost> {
+        match self {
+            Self::Subdomain(name) => SiteHost::parse(&format!("{name}.atlassian.net")).ok(),
+            Self::CloudId(_) => None,
         }
     }
 

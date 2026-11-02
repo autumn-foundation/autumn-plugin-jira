@@ -195,4 +195,12 @@ boot_fails JIRA_API_TOKEN
 echo "autumn_app: the real path reads the AUTUMN_JIRA__ env vars"
 boot_fails SMOKE_JIRA_TOKEN AUTUMN_JIRA__API_TOKEN__TOKEN_ENV=SMOKE_JIRA_TOKEN
 
+# AUTUMN_ENV selects the profile file of the real path, as it selects the
+# profile of autumn. A copy of the app dir gets autumn-staging.toml, which
+# names another token env var. So the error must name that env var.
+echo "autumn_app: AUTUMN_ENV selects the profile file of the real path"
+cp -R "$app_dir" "$work/staging"
+printf '[jira.api_token]\ntoken_env = "STAGING_JIRA_TOKEN"\n' >"$work/staging/autumn-staging.toml"
+boot_fails STAGING_JIRA_TOKEN AUTUMN_ENV=staging AUTUMN_MANIFEST_DIR="$work/staging"
+
 echo "autumn_app: OK"

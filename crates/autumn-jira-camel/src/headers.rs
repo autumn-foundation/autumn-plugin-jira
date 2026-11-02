@@ -38,6 +38,11 @@ pub(crate) struct Marked {
     pub(crate) key: IdempotencyKey,
     /// What the previous attempt did, as far as the route can know it.
     pub(crate) previous: Previous,
+    /// `true` when `HarvestActivityAttempt` is 1 and the message is no
+    /// camel redelivery. Then no earlier call used the key, because
+    /// harvest gives each activity its own key. With no attempt header,
+    /// the route cannot know this, so the value is `false`.
+    pub(crate) harvest_first: bool,
 }
 
 /// Returns a header value. The match is exact first and then with no
@@ -100,6 +105,33 @@ pub(crate) fn marked(
         }
         Some(_) => return Err(bad_header(HEADER_HARVEST_KEY, "must be a non-empty string")),
     };
+    let retried = retried(message)?;
+    let previous = if retried {
+        Previous::Unknown
+    } else {
+        Previous::First
+    };
+    // `retried` checks the attempt header. So a header with no retry is 1.
+    let harvest_first = !retried && header(message, HEADER_HARVEST_ATTEMPT).is_some();
+    Ok(Some(Marked {
+        key,
+        previous,
+        harvest_first,
+    }))
+}
+
+/// Returns `true` when an earlier try of this step can have sent the
+/// write: a harvest attempt above 1, or a camel redelivery.
+///
+/// `transitionToStatus` reads it with no key header too. On such a try,
+/// it only reads the status, because a second send can run the
+/// transition two times.
+///
+/// # Errors
+///
+/// `ValidationError` for a `HarvestActivityAttempt` header that is not a
+/// whole number from 1.
+pub(crate) fn retried(message: &Message) -> Result<bool, CamelError> {
     let attempt = match header(message, HEADER_HARVEST_ATTEMPT) {
         None => Some(1),
         Some(Value::Number(n)) => n.as_u64(),
@@ -108,12 +140,7 @@ pub(crate) fn marked(
     }
     .filter(|n| *n >= 1)
     .ok_or_else(|| bad_header(HEADER_HARVEST_ATTEMPT, "must be a whole number from 1"))?;
-    let previous = if attempt > 1 || redelivered(message) {
-        Previous::Unknown
-    } else {
-        Previous::First
-    };
-    Ok(Some(Marked { key, previous }))
+    Ok(attempt > 1 || redelivered(message))
 }
 
 /// Returns `true` when the message is a camel redelivery.
@@ -124,7 +151,8 @@ pub(crate) fn marked(
 ///
 /// A camel redelivery header can also come from an earlier step that camel
 /// sent again. The step cannot see the difference, so it also does a
-/// lookup only, or fails for an unmarked write.
+/// lookup only, or fails for an unmarked write. A `transitionToStatus`
+/// only reads the status.
 fn redelivered(message: &Message) -> bool {
     let flag = match header(message, HEADER_REDELIVERED) {
         None | Some(Value::Bool(false)) => false,
@@ -335,6 +363,9 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(first.previous, Previous::First);
+        // With no attempt header, the route cannot know that no earlier
+        // call used the key.
+        assert!(!first.harvest_first);
         // The case of the name does not matter.
         let again = marked(
             &message(&[
@@ -347,6 +378,7 @@ mod tests {
         .unwrap();
         assert_eq!(again.key, first.key, "the key is stable across attempts");
         assert_eq!(again.previous, Previous::Unknown);
+        assert!(!again.harvest_first);
         let one = marked(
             &message(&[
                 (HEADER_HARVEST_KEY, json!("k-1")),
@@ -357,6 +389,7 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(one.previous, Previous::First);
+        assert!(one.harvest_first);
         for bad in [json!(0), json!(1.5), json!("two"), json!([2])] {
             let m = message(&[
                 (HEADER_HARVEST_KEY, json!("k-1")),
@@ -388,6 +421,7 @@ mod tests {
             let m = message(&[key.clone(), first.clone(), redelivery.clone()]);
             let marked = marked(&m, &o).unwrap().unwrap();
             assert_eq!(marked.previous, Previous::Unknown, "{redelivery:?}");
+            assert!(!marked.harvest_first, "{redelivery:?}");
             // With no key, the write fails and names the key header.
             let err = super::marked(&message(std::slice::from_ref(&redelivery)), &o).unwrap_err();
             assert!(err.to_string().contains(HEADER_HARVEST_KEY), "{err}");
@@ -400,7 +434,9 @@ mod tests {
             (HEADER_REDELIVERY_COUNTER, json!("0")),
         ] {
             let m = message(&[key.clone(), first.clone(), none.clone()]);
-            assert_eq!(marked(&m, &o).unwrap().unwrap().previous, Previous::First);
+            let got = marked(&m, &o).unwrap().unwrap();
+            assert_eq!(got.previous, Previous::First);
+            assert!(got.harvest_first, "{none:?}");
             assert_eq!(
                 marked(&message(std::slice::from_ref(&none)), &o).unwrap(),
                 None

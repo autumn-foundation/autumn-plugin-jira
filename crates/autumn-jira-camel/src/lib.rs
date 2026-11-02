@@ -70,10 +70,19 @@
 //! camel redelivery of a write with no key header fails with a
 //! `ValidationError`, and the component sends nothing. Thus a camel
 //! `retry(..)` never sends a `createIssue` or an `addComment` two times.
+//!
+//! A `transitionToStatus` on a camel redelivery, or on a harvest attempt
+//! above 1, only reads the status. At the target, it gives
+//! `already_there`. Else it fails with `jira outcome_unknown`, which is not
+//! retryable. The earlier try can have run the transition. Then an
+//! automation can have moved the issue on, so a second send can run the
+//! transition two times.
+//!
 //! Do not use camel redelivery on a route that a harvest activity calls:
 //! harvest is the one layer that retries. A redelivery of an earlier step
-//! also sets these headers, so a later `jira:` write in that exchange
-//! also does a lookup only.
+//! also sets these headers. So a later `jira:` write in that exchange
+//! also does a lookup only, or reads the status only. The rule fails
+//! closed: it never sends a write two times.
 //!
 //! # Errors
 //!

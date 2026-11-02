@@ -12,7 +12,9 @@
 mod common;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
+use autumn_jira::san_mateo::transport::{HttpRequest, HttpResponse, HttpTransport, TransportError};
 use autumn_jira_camel::{
     HEADER_ISSUE_ID, HEADER_ISSUE_KEY, HEADER_JQL, HEADER_NEXT_TOKEN, HEADER_OUTCOME,
     HEADER_STATUS, JiraComponent, SCHEME, uri_options,
@@ -570,10 +572,13 @@ async fn key_header_uses_the_idempotent_path() {
     .unwrap();
     assert_eq!(reply(&ex)["outcome"], json!("created"));
     let id = reply(&ex)["id"].clone();
+    // Attempt 1 of harvest sends with no lookup. With no attempt header,
+    // the producer does not know that no earlier call used the key, so it
+    // looks up the marker first and finds the comment.
     let ex = send(
         &camel,
         "direct:comment",
-        attempt(json!("Looking"), "wf-1/a-2", json!(1)),
+        json_with(json!("Looking"), &[(KEY, json!("wf-1/a-2"))]),
     )
     .await
     .unwrap();
@@ -612,6 +617,58 @@ async fn key_header_uses_the_idempotent_path() {
         assert!(validation(&err).contains(KEY), "{bad}: {err}");
     }
     assert_eq!(fake.count(FakeOp::CreateIssue), 2);
+    assert_eq!(fake.count(FakeOp::AddComment), 1);
+    stop(camel).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_first_attempt_comments_on_a_busy_issue() {
+    let fake = FakeJira::new();
+    // A lookup reads at most one page. The issue has more comments than
+    // one page holds.
+    let component = JiraComponent::new(client_with_max_pages(&fake, 1));
+    let camel = start(component, MARKED).await.unwrap();
+    send(&camel, "direct:create", json(json!({"summary": "Busy"})))
+        .await
+        .unwrap();
+    for n in 0..150 {
+        fake.human_comment("OPS-1", &format!("note {n}"), "ann")
+            .unwrap();
+    }
+    // Harvest attempt 1, no camel redelivery: no earlier call used the
+    // key. The producer sends with no lookup first, so the page cap of
+    // the lookup does not stop the comment (R2A-write-safety-3).
+    let ex = send(
+        &camel,
+        "direct:comment",
+        attempt(json!("Escalated"), "wf-9/a-1", json!(1)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(reply(&ex)["outcome"], json!("created"));
+    assert_eq!(fake.count(FakeOp::AddComment), 1);
+    // A camel redelivery of attempt 1 keeps the lookup: the lookup stops
+    // at the page cap, and the producer sends nothing.
+    for redelivery in [
+        (camel_api::HEADER_REDELIVERED, json!(true)),
+        (camel_api::HEADER_REDELIVERY_COUNTER, json!(1)),
+    ] {
+        let message = json_with(
+            json!("Again"),
+            &[(KEY, json!("wf-9/a-2")), (ATTEMPT, json!(1)), redelivery],
+        );
+        let err = send(&camel, "direct:comment", message).await.unwrap_err();
+        assert!(err.to_string().contains("page_limit"), "{err}");
+    }
+    // Harvest attempt 2 keeps the lookup too.
+    let err = send(
+        &camel,
+        "direct:comment",
+        attempt(json!("Again"), "wf-9/a-2", json!(2)),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("page_limit"), "{err}");
     assert_eq!(fake.count(FakeOp::AddComment), 1);
     stop(camel).await;
 }
@@ -1091,6 +1148,148 @@ async fn camel_redelivery_never_resends_unmarked_writes() {
     stop(camel).await;
 }
 
+// --- R2A-write-safety-4: a transition after a try that can have run ------
+
+/// A transport over the fake. After the first transition POST, each GET
+/// fails with a network error until the test clears `broken`.
+#[derive(Clone)]
+struct LostReads {
+    fake: FakeJira,
+    broken: Arc<AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl HttpTransport for LostReads {
+    async fn send(&self, request: HttpRequest) -> Result<HttpResponse, TransportError> {
+        if request.method == "GET" && self.broken.load(Ordering::SeqCst) {
+            return Err(TransportError::Connect("lost".to_owned()));
+        }
+        let post = request.method == "POST" && request.url.contains("/transitions");
+        let reply = self.fake.send(request).await;
+        if post {
+            self.broken.store(true, Ordering::SeqCst);
+        }
+        reply
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn redelivered_transition_does_not_resend_after_the_issue_moved_on() {
+    let fake = FakeJira::new();
+    two_issues(&fake).await;
+    // Try 1 commits the move to In Progress, and the reply is lost. Each
+    // status read after it fails, so the try fails.
+    fake.fault(FakeOp::DoTransition, Fault::NetworkAfterCommit);
+    let broken = Arc::new(AtomicBool::new(false));
+    let transport = LostReads {
+        fake: fake.clone(),
+        broken: Arc::clone(&broken),
+    };
+    // Before the redelivery, an automation moves the issue on to Done and
+    // back to To Do. A transition to In Progress exists again.
+    let automation = {
+        let fake = fake.clone();
+        move |_: &CamelError| {
+            if broken.swap(false, Ordering::SeqCst) {
+                fake.human_transition("OPS-1", "Done", "ann").unwrap();
+                fake.human_transition("OPS-1", "To Do", "ann").unwrap();
+            }
+            true
+        }
+    };
+    let camel = start_redelivering(
+        JiraComponent::new(client_on(Arc::new(transport))),
+        "jira:transitionToStatus?issueKey=OPS-1&status=category:indeterminate",
+        2,
+        automation,
+    )
+    .await
+    .unwrap();
+    let err = send(&camel, "direct:in", Message::default()).await.err();
+    assert_eq!(
+        fake.count(FakeOp::DoTransition),
+        1,
+        "one transition POST: {err:?}"
+    );
+    let err = err.expect("a redelivery off the target fails");
+    assert!(validation(&err).contains("outcome_unknown"), "{err}");
+    let status = &fake.issue("OPS-1").unwrap()["fields"]["status"]["name"];
+    assert_eq!(status, &json!("To Do"));
+    stop(camel).await;
+}
+
+/// An empty message with the harvest attempt header.
+fn on_attempt(attempt: serde_json::Value) -> Message {
+    let mut message = Message::default();
+    message.set_header(ATTEMPT, attempt);
+    message
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_harvest_retry_of_a_transition_reads_only() {
+    let fake = FakeJira::new();
+    two_issues(&fake).await;
+    let camel = start(
+        component(&fake),
+        &[
+            (
+                "direct:move",
+                "jira:transitionToStatus?issueKey=OPS-1&status=category:indeterminate",
+            ),
+            (
+                "direct:stay",
+                "jira:transitionToStatus?issueKey=OPS-1&status=category:new",
+            ),
+        ],
+    )
+    .await
+    .unwrap();
+    // Attempt 2 comes after an attempt that can have run. Off the target,
+    // it sends nothing and fails with outcome_unknown, which is final.
+    let err = send(&camel, "direct:move", on_attempt(json!(2)))
+        .await
+        .unwrap_err();
+    assert!(validation(&err).contains("outcome_unknown"), "{err}");
+    assert!(!harvest_camel_retries(&err), "{err}");
+    let err = send(&camel, "direct:move", on_attempt(json!("3")))
+        .await
+        .unwrap_err();
+    assert!(validation(&err).contains("outcome_unknown"), "{err}");
+    assert_eq!(fake.count(FakeOp::DoTransition), 0);
+    // At the target, attempt 2 gives already_there.
+    let ex = send(&camel, "direct:stay", on_attempt(json!(2)))
+        .await
+        .unwrap();
+    assert_eq!(reply(&ex)["outcome"], json!("already_there"));
+    // A bad attempt header fails, and nothing is sent.
+    for bad in [json!(0), json!("two"), json!(true)] {
+        let err = send(&camel, "direct:move", on_attempt(bad.clone()))
+            .await
+            .unwrap_err();
+        assert!(validation(&err).contains(ATTEMPT), "{bad}: {err}");
+    }
+    assert_eq!(fake.count(FakeOp::DoTransition), 0);
+    // Attempt 1 sends the transition.
+    let ex = send(&camel, "direct:move", on_attempt(json!(1)))
+        .await
+        .unwrap();
+    assert_eq!(reply(&ex)["outcome"], json!("moved"));
+    assert_eq!(fake.count(FakeOp::DoTransition), 1);
+    stop(camel).await;
+}
+
+/// `true` when harvest-camel retries the activity after this error. Only
+/// `Io` and a retryable HTTP status make a retry.
+const fn harvest_camel_retries(error: &CamelError) -> bool {
+    match error {
+        CamelError::Io(_) => true,
+        CamelError::HttpOperationFailed { status_code, .. } => {
+            !(400 <= *status_code && *status_code < 500) || matches!(*status_code, 408 | 425 | 429)
+        }
+        _ => false,
+    }
+}
+
 // --- R7-api-docs-2: the out header of an earlier step --------------------
 
 /// Starts one route `from` with the `jira:` steps `to`, in order. A
@@ -1206,13 +1405,15 @@ async fn retry_attempt_lookup_waits_for_index_lag() {
     assert_eq!(settle.default_value.as_deref(), Some("10000"));
 
     let fake = FakeJira::new();
-    fake.index_lag(std::time::Duration::from_secs(1));
+    // The lag is 3 s, so a runner stall of up to about 2 s still gives a
+    // first miss. The settle wait is longer than the lag.
+    fake.index_lag(std::time::Duration::from_secs(3));
     fake.fault(FakeOp::CreateIssue, Fault::StatusAfterCommit(503));
     let camel = start(
         component(&fake),
         &[(
             "direct:create",
-            "jira:createIssue?project=OPS&issueType=Task&settleMs=1500",
+            "jira:createIssue?project=OPS&issueType=Task&settleMs=3500",
         )],
     )
     .await
@@ -1227,8 +1428,13 @@ async fn retry_attempt_lookup_waits_for_index_lag() {
     .await
     .unwrap_err();
     assert!(matches!(err, CamelError::Io(_)), "{err:?}");
-    // Attempt 2 at once: the first lookup misses, and the lookup after the
-    // settle wait finds the issue.
+    // A slow runner can stall between the attempts. The first lookup of
+    // attempt 2 must still miss, else the test passes with no settle wait
+    // (R2E-tests-guards-3).
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    let searches = fake.count(FakeOp::Search);
+    // Attempt 2: the first lookup misses, and the lookup after the settle
+    // wait finds the issue.
     let ex = send(
         &camel,
         "direct:create",
@@ -1236,6 +1442,11 @@ async fn retry_attempt_lookup_waits_for_index_lag() {
     )
     .await
     .unwrap();
+    assert_eq!(
+        fake.count(FakeOp::Search) - searches,
+        2,
+        "a miss, the settle wait, then a hit"
+    );
     assert_eq!(reply(&ex)["outcome"], json!("found"));
     assert_eq!(reply(&ex)["key"], json!("OPS-1"));
     assert_eq!(fake.count(FakeOp::CreateIssue), 1);

@@ -13,7 +13,8 @@ use async_trait::async_trait;
 use san_mateo::store::ConnectionFilter;
 use san_mateo::{ConnectionKey, ProxyRequest, SanMateo};
 use serde_json::{Map, Value, json};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, PoisonError};
+use tokio::time::Instant;
 
 use tokio::sync::RwLock;
 
@@ -35,6 +36,9 @@ pub(crate) const CLOUD_ID_KEY: &str = "cloudId";
 const TRANSPORT_INVALID: &str = "the upstream request is not valid: ";
 /// The discovery path on `https://api.atlassian.com`.
 const RESOURCES_PATH: &str = "/oauth/token/accessible-resources";
+
+/// The shortest time between two checks of a stored cloud id.
+pub const CLOUD_ID_RECHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// The san-mateo connection that a [`SanMateoBackend`] uses.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,18 +93,21 @@ enum Source {
 /// Sends each attempt through a san-mateo connection.
 ///
 /// A stored cloud id can be stale: san-mateo keeps the metadata when a
-/// tenant connects the same connection to another site. So after the
-/// first 401 or 404 reply under a stored cloud id, the backend reads
-/// `accessible-resources` one time. Then the token can fail to cover the
-/// stored id. In that case the backend discovers the site again and stores
-/// the new id. The next attempt uses the new id. The backend never sends
-/// the attempt again.
+/// tenant connects the same connection to another site. So after a 401 or
+/// 404 reply under a stored cloud id, the backend reads
+/// `accessible-resources`. It does this at most one time in each
+/// [`CLOUD_ID_RECHECK_INTERVAL`], so ordinary 404 replies do not each make
+/// a call. A site move while the process runs is seen at the first 401 or
+/// 404 after the interval. When the token does not cover the stored id,
+/// the backend picks the site again and stores the new id in the metadata.
+/// The next attempt uses the new id. The backend never sends the attempt
+/// again.
 pub struct SanMateoBackend {
     san: SanMateo,
     target: SanMateoTarget,
     prefix: RwLock<Option<(String, Source)>>,
-    /// `true` when `accessible-resources` showed the stored id.
-    confirmed: AtomicBool,
+    /// The time of the last check or discovery that showed the stored id.
+    checked: Mutex<Option<Instant>>,
 }
 
 impl fmt::Debug for SanMateoBackend {
@@ -193,7 +200,7 @@ impl SanMateoBackend {
             san,
             target,
             prefix: RwLock::new(None),
-            confirmed: AtomicBool::new(false),
+            checked: Mutex::new(None),
         }
     }
 
@@ -265,20 +272,38 @@ impl SanMateoBackend {
         Ok(resolved)
     }
 
-    /// Checks a stored cloud id after a 401 or a 404 reply, one time.
+    /// Sets the time of the last check. `None` lets the next 401 or 404
+    /// check at once.
+    fn set_checked(&self, at: Option<Instant>) {
+        *self.checked.lock().unwrap_or_else(PoisonError::into_inner) = at;
+    }
+
+    /// Returns `true` and starts a check when no check ran in the last
+    /// [`CLOUD_ID_RECHECK_INTERVAL`].
+    fn start_check(&self) -> bool {
+        let mut checked = self.checked.lock().unwrap_or_else(PoisonError::into_inner);
+        if checked.is_some_and(|at| at.elapsed() < CLOUD_ID_RECHECK_INTERVAL) {
+            return false;
+        }
+        *checked = Some(Instant::now());
+        true
+    }
+
+    /// Checks a stored cloud id after a 401 or a 404 reply, at most one
+    /// time in each [`CLOUD_ID_RECHECK_INTERVAL`].
     ///
-    /// When `accessible-resources` shows the id, the id is confirmed. Else
-    /// the backend picks the site again, stores the new id, and resets the
-    /// prefix. A failed check changes nothing.
+    /// When `accessible-resources` shows the id, nothing changes. Else the
+    /// backend picks the site again, stores the new id in the metadata, and
+    /// resets the prefix. A failed check changes nothing, and the next 401
+    /// or 404 checks again.
     async fn recheck(&self, prefix: &str) {
-        if self.confirmed.swap(true, Ordering::SeqCst) {
+        if !self.start_check() {
             return;
         }
         let resources = match self.resources().await {
             Ok(resources) => resources,
             Err(e) => {
-                // A later 401 or 404 checks again.
-                self.confirmed.store(false, Ordering::SeqCst);
+                self.set_checked(None);
                 tracing::warn!(code = e.code(), "jira: the cloud id check failed");
                 return;
             }
@@ -299,7 +324,7 @@ impl SanMateoBackend {
                 );
             }
             Err(e) => {
-                self.confirmed.store(false, Ordering::SeqCst);
+                self.set_checked(None);
                 tracing::warn!(code = e.code(), "jira: the cloud id check failed");
             }
         }
@@ -327,11 +352,12 @@ impl SanMateoBackend {
     }
 
     /// Reads `accessible-resources`, picks the site, and stores the id. A
-    /// discovered id is confirmed.
+    /// discovery counts as a check, so the next check comes after the
+    /// interval.
     async fn discover(&self) -> Result<CloudId> {
         let resources = self.resources().await?;
         let id = self.store(&resources).await?;
-        self.confirmed.store(true, Ordering::SeqCst);
+        self.set_checked(Some(Instant::now()));
         Ok(id)
     }
 

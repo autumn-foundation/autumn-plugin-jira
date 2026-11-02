@@ -257,6 +257,40 @@ impl JiraClient {
         {
             return Ok(CommentOutcome::Found(found));
         }
+        self.send_marked_comment(issue, body, key).await
+    }
+
+    /// Adds a comment for a key on the first attempt of a host: no earlier
+    /// call used the key. The client skips the lookup before the POST, so
+    /// a busy issue does not give `PageLimit` when nothing can have been
+    /// sent. After a 5xx or a lost reply, the client looks up the marker,
+    /// as [`Self::add_comment_idempotent`] does. A `PageLimit` of that
+    /// lookup gives `OutcomeUnknown` with the marker.
+    ///
+    /// Call it only when no earlier call or attempt used `key`. For a
+    /// retry, call [`Self::add_comment_idempotent`] or the lookup.
+    ///
+    /// # Errors
+    ///
+    /// `OutcomeUnknown` with the marker when the lookup finds nothing. The
+    /// typed errors of the calls.
+    pub async fn add_comment_idempotent_first(
+        &self,
+        issue: impl Into<IssueRef> + Send,
+        body: &Adf,
+        key: &IdempotencyKey,
+    ) -> Result<CommentOutcome> {
+        self.send_marked_comment(issue.into(), body, key).await
+    }
+
+    /// Sends the marked comment, then looks up the marker after a 5xx or a
+    /// lost reply.
+    async fn send_marked_comment(
+        &self,
+        issue: IssueRef,
+        body: &Adf,
+        key: &IdempotencyKey,
+    ) -> Result<CommentOutcome> {
         let marker = key.comment_marker();
         let request = comment_request(&issue, &body.clone().with_paragraph(&marker));
         let cause = match self.run(OpClass::MarkedWrite, &request).await {
@@ -288,7 +322,10 @@ impl JiraClient {
     /// can type or quote the marker, but a person is not the author of the
     /// client comments. The lookup reads the newest comments first, 100 for
     /// each page, at most `max_pages` pages. Other comments can come
-    /// between two attempts, so the lookup does not stop at one page.
+    /// between two attempts, so the lookup does not stop at one page. When
+    /// the total drops between two pages, a comment was deleted, and the
+    /// next page starts that many places back. So a delete does not move
+    /// the marker past the cursor.
     ///
     /// # Errors
     ///
@@ -306,6 +343,7 @@ impl JiraClient {
         let max = self.settings.max_pages;
         let mut start = 0_u64;
         let mut pages = 0_u32;
+        let mut last_total: Option<u64> = None;
         loop {
             let request = ApiRequest::new(Op::ListComments, Method::Get, path.clone())
                 .query("orderBy", "-created")
@@ -321,7 +359,17 @@ impl JiraClient {
             {
                 return Ok(Some(found));
             }
-            let next = policy::offset_next(start, returned, page.total);
+            // A delete between two pages moves each older comment one place
+            // to the head, past the cursor. When the total drops by `d`, the
+            // next page starts `d` places back. A new comment moves the
+            // comments the other way, so that skips nothing.
+            let dropped = last_total.map_or(0, |t| t.saturating_sub(page.total));
+            last_total = Some(page.total);
+            let next = if dropped > 0 {
+                Some(start.saturating_sub(dropped))
+            } else {
+                policy::offset_next(start, returned, page.total)
+            };
             match policy::token_page_step(pages, max, false, next.is_some(), false) {
                 policy::PageStep::Fetch => {
                     if let Some(n) = next {
@@ -349,11 +397,16 @@ impl JiraClient {
     /// on two conditions. The issue is still at the status of the first
     /// attempt. The transition is not global and not looped. Such a
     /// transition is not valid after a commit, so Jira rejects a second
-    /// send. Else the call
-    /// stops with `OutcomeUnknown`: an automation can have moved the issue
-    /// on, or a global transition can run two times. A 400 or a 409 after
-    /// a "maybe sent" attempt makes the client read the status once more:
-    /// at the target, it returns `Moved`.
+    /// send. Else the call stops with `OutcomeUnknown`: an automation can
+    /// have moved the issue on, or a global transition can run two times.
+    ///
+    /// After a 5xx or a "maybe sent" attempt, each stop that is not at the
+    /// target is `OutcomeUnknown` with no marker. That error is not
+    /// retryable, so a host does not start a new call that sends again. A
+    /// 400 or a 409 after such an attempt makes the client read the status
+    /// once more: at the target, it returns `Moved`. A host that retries
+    /// after its own attempt can have run calls
+    /// [`Self::resume_transition_to_status`].
     ///
     /// # Errors
     ///
@@ -367,12 +420,33 @@ impl JiraClient {
         fields: &TransitionFields,
     ) -> Result<TransitionOutcome> {
         let issue = issue.into();
+        // The cause of the last "maybe sent" attempt.
+        let mut unknown: Option<UnknownCause> = None;
+        let result = self
+            .transition_loop(&issue, target, fields, &mut unknown)
+            .await;
+        match (result, unknown) {
+            // An attempt can have run: no stop after it is retryable.
+            (Err(e), Some(cause)) if !matches!(e, JiraError::OutcomeUnknown { .. }) => {
+                Err(transition_unknown(cause))
+            }
+            (result, _) => result,
+        }
+    }
+
+    /// The attempts of [`Self::transition_to_status_with`]. It sets
+    /// `unknown` to the cause of each "maybe sent" attempt.
+    async fn transition_loop(
+        &self,
+        issue: &IssueRef,
+        target: &StatusTarget,
+        fields: &TransitionFields,
+        unknown: &mut Option<UnknownCause>,
+    ) -> Result<TransitionOutcome> {
         let status_only = FieldSet::new([FieldId::known("status")]);
         let mut attempt = 1_u32;
-        // The status before the first attempt, and the cause of the last
-        // "maybe sent" attempt.
+        // The status before the first attempt.
         let mut origin = None;
-        let mut unknown: Option<UnknownCause> = None;
         loop {
             let current = self.get_issue_with(issue.clone(), &status_only).await?;
             let status = current.status();
@@ -380,7 +454,7 @@ impl JiraClient {
             if let Some(status) = status.filter(|s| target.matches(s)) {
                 return Ok(TransitionOutcome::AlreadyThere(status));
             }
-            if let Some(cause) = unknown
+            if let Some(cause) = *unknown
                 && status_id != origin
             {
                 return Err(transition_unknown(cause));
@@ -393,18 +467,22 @@ impl JiraClient {
                     available: list.iter().map(|t| t.name.clone()).collect(),
                 });
             };
-            if let Some(cause) = unknown
-                && (transition.is_global || transition.looped)
+            // A missing flag counts as `true`: the safe side.
+            if let Some(cause) = *unknown
+                && (transition.is_global != Some(false) || transition.looped != Some(false))
             {
                 return Err(transition_unknown(cause));
             }
-            let request = transition_request(&issue, &transition.id, fields);
+            let request = transition_request(issue, &transition.id, fields);
             let sent = self.backend.send(request).await;
             let maybe = matches!(
                 call::classify(&sent),
                 policy::Outcome::ServerError | policy::Outcome::MaybeSent
             )
             .then(|| call::unknown_cause(&sent));
+            // A 400 or a 409 now: an earlier attempt can have moved the issue.
+            let earlier = unknown.is_some();
+            *unknown = maybe.or(*unknown);
             match self.judge(OpClass::CheckedWrite, Op::DoTransition, attempt, sent) {
                 Next::Done(_) => {
                     return Ok(TransitionOutcome::Moved {
@@ -413,15 +491,13 @@ impl JiraClient {
                     });
                 }
                 Next::Wait(wait) => {
-                    unknown = maybe.or(unknown);
                     tokio::time::sleep(wait).await;
                     attempt += 1;
                 }
                 Next::Confirm(cause) => return Err(transition_unknown(cause)),
                 Next::Fail(error @ (JiraError::Validation { .. } | JiraError::Conflict { .. }))
-                    if unknown.is_some() =>
+                    if earlier =>
                 {
-                    // An earlier attempt can have moved the issue.
                     let now = self.get_issue_with(issue.clone(), &status_only).await?;
                     return now
                         .status()
@@ -434,6 +510,39 @@ impl JiraClient {
                         });
                 }
                 Next::Fail(error) => return Err(error),
+            }
+        }
+    }
+
+    /// Continues a transition after a host attempt that can have run, for
+    /// example a harvest retry after a timeout or after `outcome_unknown`.
+    ///
+    /// The call reads the status and sends nothing. At the target, it
+    /// returns `AlreadyThere`: the call cannot tell if the earlier attempt
+    /// or another actor moved the issue. Else it stops with
+    /// `OutcomeUnknown` with `cause`, because a new send can run the
+    /// transition a second time. A failed read also gives that error.
+    ///
+    /// # Errors
+    ///
+    /// `OutcomeUnknown` with no marker and `cause` when the issue is not at
+    /// the target, or when the read fails.
+    pub async fn resume_transition_to_status(
+        &self,
+        issue: impl Into<IssueRef> + Send,
+        target: &StatusTarget,
+        cause: UnknownCause,
+    ) -> Result<TransitionOutcome> {
+        let status_only = FieldSet::new([FieldId::known("status")]);
+        match self.get_issue_with(issue.into(), &status_only).await {
+            Ok(current) => current
+                .status()
+                .filter(|s| target.matches(s))
+                .map(TransitionOutcome::AlreadyThere)
+                .ok_or_else(|| transition_unknown(cause)),
+            Err(e) => {
+                tracing::warn!(code = e.code(), "jira: a resumed status read failed");
+                Err(transition_unknown(cause))
             }
         }
     }

@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use autumn_jira::client::{CommentOutcome, CreateOutcome, IssuePage, TransitionOutcome};
-use autumn_jira::error::Op;
+use autumn_jira::error::{Op, UnknownCause};
 use autumn_jira::ids::{IssueRef, PageToken};
 use autumn_jira::policy::{self, PageStep, host_may_send};
 use autumn_jira::request::{EditOptions, NewIssue, SearchRequest};
@@ -315,15 +315,29 @@ impl Producer {
         Ok(Reply::for_issue(&issue, body, None))
     }
 
-    /// `transitionToStatus`: a checked write, so a retry is safe.
+    /// `transitionToStatus`.
+    ///
+    /// On the first try, the client reads the status and sends the
+    /// transition. A harvest attempt above 1 or a camel redelivery comes
+    /// after a try that can have sent it. A second send can run the
+    /// transition two times, for example after an automation moved the
+    /// issue on. So such a try only reads the status. At the target, it
+    /// gives `already_there`. Else it fails with `jira outcome_unknown`,
+    /// which is not retryable (R2A-write-safety-4).
     async fn transition(&self, read: In<'_>, raw: input::Raw) -> Result<Reply, Failure> {
         let fields = input::transition(raw)?;
         let issue = headers::issue(read.message, read.own, &self.options)?;
         let target = headers::status(read.message, &self.options)?;
-        let outcome = self
-            .client
-            .transition_to_status_with(issue.clone(), &target, &fields)
-            .await?;
+        let outcome = if headers::retried(read.message)? {
+            // The route cannot see why the earlier try failed.
+            self.client
+                .resume_transition_to_status(issue.clone(), &target, UnknownCause::Timeout)
+                .await?
+        } else {
+            self.client
+                .transition_to_status_with(issue.clone(), &target, &fields)
+                .await?
+        };
         let (kind, status) = match outcome {
             TransitionOutcome::AlreadyThere(status) => (ALREADY_THERE, status),
             TransitionOutcome::Moved { to, .. } => (MOVED, to),
@@ -337,6 +351,13 @@ impl Producer {
     }
 
     /// `addComment`: a plain comment without a key, else a marked comment.
+    ///
+    /// On harvest attempt 1 with no camel redelivery, no earlier call used
+    /// the key. So the client sends with no lookup first
+    /// (`add_comment_idempotent_first`). Then the page cap of a lookup on a
+    /// busy issue does not stop the comment (R2A-write-safety-3).
+    /// With no attempt header, or with `resendAfterNegativeLookup=true` on
+    /// a retry, the client looks up the marker before it sends.
     async fn comment(&self, read: In<'_>, raw: input::Raw) -> Result<Reply, Failure> {
         let text: Adf = input::comment(raw)?;
         let issue = headers::issue(read.message, read.own, &self.options)?;
@@ -354,20 +375,21 @@ impl Producer {
                 None => Err(outcome_unknown(Operation::AddComment)),
             };
         }
-        Ok(
-            match self
-                .client
+        let outcome = if marked.harvest_first {
+            self.client
+                .add_comment_idempotent_first(issue.clone(), &text, &marked.key)
+                .await?
+        } else {
+            self.client
                 .add_comment_idempotent(issue.clone(), &text, &marked.key)
                 .await?
-            {
-                CommentOutcome::Created(comment) => {
-                    Reply::comment(&issue, comment.id.as_str(), CREATED)
-                }
-                CommentOutcome::Found(comment) => {
-                    Reply::comment(&issue, comment.id.as_str(), FOUND)
-                }
-            },
-        )
+        };
+        Ok(match outcome {
+            CommentOutcome::Created(comment) => {
+                Reply::comment(&issue, comment.id.as_str(), CREATED)
+            }
+            CommentOutcome::Found(comment) => Reply::comment(&issue, comment.id.as_str(), FOUND),
+        })
     }
 
     /// `search`: at most `maxPages` pages. When more pages exist, the reply

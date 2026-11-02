@@ -33,9 +33,22 @@ impl HandlerError {
 }
 
 impl From<JiraError> for HandlerError {
-    /// `JiraError::is_retryable` picks the variant (R3).
+    /// `JiraError::is_retryable` picks the variant (R3), with one
+    /// exception. `OutcomeUnknown` with a marker (`outcome_pending`) is
+    /// retryable, but it gives `Permanent`. A 503 makes Jira send the
+    /// delivery again, and the sink then calls the idempotent write again.
+    /// Its lookup before the POST reads a search index that can lag, so it
+    /// can miss the first write and send it a second time. A sink that
+    /// must resolve the outcome looks up the marker only (plan 7.2).
     fn from(error: JiraError) -> Self {
-        if error.is_retryable() {
+        let pending = matches!(
+            error,
+            JiraError::OutcomeUnknown {
+                marker: Some(_),
+                ..
+            }
+        );
+        if error.is_retryable() && !pending {
             Self::Transient(error.to_string())
         } else {
             Self::Permanent(error.to_string())
@@ -79,10 +92,13 @@ mod tests {
             cause: UnknownCause::Network,
             marker: Some(MarkerRef::label("autumn-idem-x".to_owned())),
         };
-        assert!(matches!(
-            HandlerError::from(pending),
-            HandlerError::Transient(_)
-        ));
+        // A redelivery calls the write again, so `outcome_pending` is
+        // permanent for a sink, though `is_retryable` is `true`.
+        assert!(pending.is_retryable());
+        assert_eq!(
+            HandlerError::from(pending.clone()),
+            HandlerError::Permanent(pending.to_string())
+        );
         let missing = JiraError::NotFoundOrForbidden { op: Op::GetIssue };
         assert_eq!(
             HandlerError::from(missing.clone()),

@@ -528,17 +528,23 @@ async fn hung_handlers_have_a_bound() {
     );
 }
 
-/// R10-plugin-ecosystem-3: the plugin stops a task at `abandon_after_ms`,
-/// and the slot is free again. The health details show the live tasks.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_hung_task_stops_at_abandon_after_ms() {
-    let (started, live) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+/// A stop of a busy runner between two steps of a test. A test with a
+/// wall-clock window must pass with it.
+const RUNNER_STALL: Duration = Duration::from_millis(120);
+
+/// A plugin with one handler slot and an `on_event` closure that never
+/// ends. The handler timeout is 10 ms.
+fn one_hung_slot(
+    abandon_after_ms: u64,
+    started: &Arc<AtomicUsize>,
+    live: &Arc<AtomicUsize>,
+) -> JiraPlugin {
     let mut config = JiraConfig::default();
     config.webhook.handler_timeout_ms = 10;
-    config.webhook.abandon_after_ms = 100;
+    config.webhook.abandon_after_ms = abandon_after_ms;
     config.webhook.max_handler_tasks = 1;
-    let (s, l) = (Arc::clone(&started), Arc::clone(&live));
-    let plugin = JiraPlugin::with_config(config)
+    let (s, l) = (Arc::clone(started), Arc::clone(live));
+    JiraPlugin::with_config(config)
         .client(client_on(Arc::new(FakeJira::new())))
         .on_event(move |_delivery: Arc<Delivery>, _state: AppState| {
             let (started, live) = (Arc::clone(&s), Arc::clone(&l));
@@ -549,22 +555,68 @@ async fn a_hung_task_stops_at_abandon_after_ms() {
                 std::future::pending::<()>().await;
                 Ok(())
             }
-        });
-    let client = app(plugin);
+        })
+}
+
+/// The longest wait for a state that a wall-clock timer of the plugin sets.
+const SETTLE: Duration = Duration::from_secs(10);
+
+/// R10-plugin-ecosystem-3: a full slot starts no task, and the health
+/// details show the live task. `abandon_after_ms` is long, so a stall of
+/// the runner cannot free the slot during the test (R2E-tests-guards-1).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_full_slot_starts_no_task() {
+    let (started, live) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let client = app(one_hung_slot(60_000, &started, &live));
     deliver(&client, "a-1", &fresh()).await.assert_status(503);
-    // The one slot is full: no new task.
+    tokio::time::sleep(RUNNER_STALL).await;
     deliver(&client, "a-2", &fresh()).await.assert_status(503);
     assert_eq!(started.load(Ordering::SeqCst), 1);
-    tokio::time::sleep(Duration::from_millis(400)).await;
-    assert_eq!(live.load(Ordering::SeqCst), 0, "the task stopped");
-    // The slot is free again.
-    deliver(&client, "a-3", &fresh()).await.assert_status(503);
-    assert_eq!(started.load(Ordering::SeqCst), 2);
+    tokio::time::sleep(RUNNER_STALL).await;
     // autumn caches the health report, so the test reads it one time.
     let health = json_of(&client.get("/actuator/health").send().await);
     let details = &health["components"]["jira"]["details"];
     assert_eq!(details["handler_tasks"], json!(1), "{health}");
-    assert_eq!(details["webhook"]["timed_out"], json!(3), "{health}");
+    assert_eq!(details["webhook"]["timed_out"], json!(2), "{health}");
+    assert_eq!(live.load(Ordering::SeqCst), 1);
+}
+
+/// R10-plugin-ecosystem-3: the plugin stops a task at `abandon_after_ms`,
+/// and the slot is free again. The test waits for each state with a long
+/// limit, so a stall of the runner does not change the result
+/// (R2E-tests-guards-1).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hung_task_stops_at_abandon_after_ms() {
+    let (started, live) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let client = app(one_hung_slot(100, &started, &live));
+    deliver(&client, "b-0", &fresh()).await.assert_status(503);
+    tokio::time::sleep(RUNNER_STALL).await;
+    let deadline = tokio::time::Instant::now() + SETTLE;
+    while live.load(Ordering::SeqCst) != 0 || started.load(Ordering::SeqCst) == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the task did not stop"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // The slot is free again: a delivery starts a second task. The slot
+    // is free a moment after the task stops, so the test tries again.
+    let mut sent = 1_u64;
+    while started.load(Ordering::SeqCst) < 2 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the slot is not free"
+        );
+        deliver(&client, &format!("b-{sent}"), &fresh())
+            .await
+            .assert_status(503);
+        sent += 1;
+    }
+    assert_eq!(started.load(Ordering::SeqCst), 2);
+    tokio::time::sleep(RUNNER_STALL).await;
+    let health = json_of(&client.get("/actuator/health").send().await);
+    let details = &health["components"]["jira"]["details"];
+    assert_eq!(details["webhook"]["timed_out"], json!(sent), "{health}");
 }
 
 /// R10-plugin-ecosystem-7: autumn stops the route at its request timeout

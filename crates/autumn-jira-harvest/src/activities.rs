@@ -20,7 +20,7 @@ use autumn_harvest::info::ActivityInfo;
 use autumn_harvest::policy::RetryPolicy;
 use autumn_harvest::prelude::activity;
 use autumn_jira::client::{CommentOutcome, CreateOutcome, DeleteOutcome, TransitionOutcome};
-use autumn_jira::error::Op;
+use autumn_jira::error::{Op, UnknownCause};
 use autumn_jira::ids::{CommentId, FieldId, PageToken, TransitionId};
 use autumn_jira::model::{IssueRefs, IssueSummary, StatusSummary};
 use autumn_jira::policy::{Previous, host_may_send};
@@ -39,7 +39,7 @@ use crate::failure::{
     OUTCOME_PENDING_ERROR, OUTCOME_UNKNOWN_ERROR, SETTLE_SECS, config_failure, failure_for,
     marked_write_failure, previous_attempt,
 };
-use crate::route::{ROUTES_PROPERTY, RouteKey, SignalRoute, TRACKED_LABEL};
+use crate::route::{ROUTES_PROPERTY, RouteBinding, RouteKey, SignalRoute, TRACKED_LABEL};
 
 /// The name of the activity that reads one issue.
 pub const GET_ISSUE: &str = "jira_get_issue";
@@ -87,6 +87,10 @@ pub const LONG_WRITE_START_TO_CLOSE: Duration = Duration::from_secs(2_520);
 /// comments between two attempts than the cap holds. Then the lookup stops
 /// with `PageLimit` and does not report "not found", so no attempt sends the
 /// comment again. The activity fails, and it never writes a duplicate.
+///
+/// The cap applies only to a lookup after a possible send. Attempt 1 sends
+/// with no lookup before the POST, so an issue with many comments still
+/// gets the comment (R2A-write-safety-3).
 pub const COMMENT_LOOKUP_PAGES: u32 = 3;
 
 /// The `start_to_close` of `jira_add_comment`: 70 minutes.
@@ -179,8 +183,13 @@ fn field_set(fields: Option<&[FieldId]>) -> FieldSet {
 /// Merges `route` into the route property. `None` when the property has
 /// the entry already, so no PUT is needed. An entry of the same run with
 /// another tag is replaced. Other entries stay.
-fn merge_route(current: Option<&Value>, route: &SignalRoute, key: &RouteKey) -> Option<Value> {
-    let entry = route.property_entry(key);
+fn merge_route(
+    current: Option<&Value>,
+    route: &SignalRoute,
+    key: &RouteKey,
+    binding: &RouteBinding,
+) -> Option<Value> {
+    let entry = route.property_entry(key, binding);
     let mut entries: Vec<Value> = current
         .and_then(|value| value.get("routes"))
         .and_then(Value::as_array)
@@ -310,7 +319,8 @@ impl CreateIssueInput {
         ctx: &ActivityContext,
     ) -> Result<CreateIssueOutput, ActivityFailure> {
         let key = activity_key(ctx)?;
-        let issue = self.new_issue(ctx)?;
+        let marker = key.marker_label(&client.settings().marker_label_prefix);
+        let issue = self.new_issue(ctx, marker)?;
         let settle = settle(self.settle_secs);
         if !host_may_send(previous_attempt(ctx), self.resend_after_negative_lookup) {
             return match client.find_by_idempotency_key(&self.project, &key).await {
@@ -330,8 +340,14 @@ impl CreateIssueInput {
         }
     }
 
-    /// Builds the create body, with the route when there is one.
-    fn new_issue(&self, ctx: &ActivityContext) -> Result<NewIssue, ActivityFailure> {
+    /// Builds the create body, with the route when there is one. The route
+    /// tag binds `marker`: the marker label that the client adds to the
+    /// create body (R2F-fixcheck-a-3).
+    fn new_issue(
+        &self,
+        ctx: &ActivityContext,
+        marker: String,
+    ) -> Result<NewIssue, ActivityFailure> {
         let mut issue = NewIssue::new(
             self.project.clone(),
             self.issue_type.clone(),
@@ -349,9 +365,10 @@ impl CreateIssueInput {
         }
         if let Some(route) = &self.route {
             let key = route_key(ctx)?;
+            let binding = RouteBinding::MarkerLabel(marker);
             issue = issue.labels([TRACKED_LABEL]).property(
                 ROUTES_PROPERTY,
-                json!({"routes": [route.property_entry(key)]}),
+                json!({"routes": [route.property_entry(key, &binding)]}),
             );
         }
         Ok(issue)
@@ -614,25 +631,53 @@ impl TransitionInput {
         }
     }
 
-    /// Moves the issue. The client reads the status before each attempt,
-    /// so a retry after a lost reply is safe.
+    /// Moves the issue.
+    ///
+    /// Attempt 1, and an attempt after a failure that tells "not sent", call
+    /// `transition_to_status_with`. The other attempts come after an attempt
+    /// that can have sent the transition. A second send can run the
+    /// transition two times, so such an attempt only reads the status
+    /// (`resume_transition_to_status`). At the target, it gives
+    /// `AlreadyThere`. Else it fails with `jira.outcome_unknown`, which is
+    /// not retryable (R2A-write-safety-1).
     ///
     /// # Errors
     ///
     /// The failure of [`crate::failure_for`], for example
-    /// `jira.transition_not_available`.
+    /// `jira.transition_not_available` or `jira.outcome_unknown`.
     pub async fn run(
         &self,
         client: &JiraClient,
         ctx: &ActivityContext,
     ) -> Result<TransitionOutput, ActivityFailure> {
-        let _ = ctx;
-        let mut fields = TransitionFields::default();
-        fields.fields.clone_from(&self.fields);
-        let outcome = client
-            .transition_to_status_with(self.issue.clone(), &self.target, &fields)
-            .await
-            .map_err(|e| failure_for(&e))?;
+        let outcome = match previous_attempt(ctx) {
+            Previous::First | Previous::NotSent => {
+                let mut fields = TransitionFields::default();
+                fields.fields.clone_from(&self.fields);
+                client
+                    .transition_to_status_with(self.issue.clone(), &self.target, &fields)
+                    .await
+            }
+            Previous::MaybeSent => {
+                client
+                    .resume_transition_to_status(
+                        self.issue.clone(),
+                        &self.target,
+                        UnknownCause::Network,
+                    )
+                    .await
+            }
+            Previous::Unknown => {
+                client
+                    .resume_transition_to_status(
+                        self.issue.clone(),
+                        &self.target,
+                        UnknownCause::Timeout,
+                    )
+                    .await
+            }
+        }
+        .map_err(|e| failure_for(&e))?;
         Ok(match outcome {
             TransitionOutcome::AlreadyThere(status) => TransitionOutput {
                 outcome: TransitionKind::AlreadyThere,
@@ -716,10 +761,24 @@ impl AddCommentInput {
                 Err(e) => Err(lookup_failure(&e, settle)),
             };
         }
-        match client
-            .add_comment_idempotent(self.issue.clone(), &Adf::text(&self.text), &key)
-            .await
-        {
+        let body = Adf::text(&self.text);
+        // On attempt 1, and after an attempt that tells "not sent", no
+        // earlier attempt sent the comment. So the pre-lookup can find
+        // nothing, and its page cap must not stop the send (R2A-write-safety-3).
+        // The opt-in resend after a possible send keeps the pre-lookup.
+        let sent = match previous_attempt(ctx) {
+            Previous::First | Previous::NotSent => {
+                client
+                    .add_comment_idempotent_first(self.issue.clone(), &body, &key)
+                    .await
+            }
+            Previous::MaybeSent | Previous::Unknown => {
+                client
+                    .add_comment_idempotent(self.issue.clone(), &body, &key)
+                    .await
+            }
+        };
+        match sent {
             Ok(CommentOutcome::Created(comment)) => Ok(CommentOutput {
                 id: comment.id,
                 outcome: CreateKind::Created,
@@ -859,7 +918,9 @@ impl WatchIssueInput {
             .get_issue_property(self.issue.clone(), ROUTES_PROPERTY)
             .await
             .map_err(|e| failure_for(&e))?;
-        if let Some(merged) = merge_route(current.as_ref(), &self.route, key) {
+        // The tag binds the id of the issue that the watch read.
+        let binding = RouteBinding::Issue(issue.id.clone());
+        if let Some(merged) = merge_route(current.as_ref(), &self.route, key, &binding) {
             client
                 .set_issue_property(self.issue.clone(), ROUTES_PROPERTY, &merged)
                 .await

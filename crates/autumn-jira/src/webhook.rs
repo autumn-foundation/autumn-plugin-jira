@@ -14,7 +14,7 @@ use sha2::Sha256;
 use crate::adf::Adf;
 use crate::error::{JiraError, Result};
 use crate::ids::{
-    AccountId, CommentId, IssueId, IssueKey, ProjectKey, StatusId, WebhookDeliveryId,
+    AccountId, CommentId, IssueId, IssueKey, ProjectKey, SiteHost, StatusId, WebhookDeliveryId,
 };
 use crate::model::StatusSummary;
 use crate::model::wire::StatusWire;
@@ -74,6 +74,15 @@ impl Delivery {
             timestamp: parsed.timestamp,
             actor: parsed.actor,
         }
+    }
+}
+
+impl Delivery {
+    /// Returns the site of the delivery: [`JiraEvent::site`]. Compare it
+    /// with [`crate::JiraSite::host`] of the site that the sink serves.
+    #[must_use]
+    pub fn site(&self) -> Option<&SiteHost> {
+        self.event.site()
     }
 }
 
@@ -178,6 +187,9 @@ pub struct WebhookIssue {
     pub key: Option<IssueKey>,
     /// The fields in the payload.
     pub fields: WebhookFields,
+    /// The host of `self`, the site that sent the event. `None` when the
+    /// payload has no `self` or a bad one.
+    pub site: Option<SiteHost>,
 }
 
 /// The fields of a payload issue. Each is `None` when the payload has none.
@@ -212,6 +224,9 @@ pub struct WebhookComment {
     /// The account id of `updateAuthor`: the person who changed the
     /// comment last.
     pub update_author: Option<AccountId>,
+    /// The host of `self`. `None` when the payload has no `self` or a bad
+    /// one.
+    pub site: Option<SiteHost>,
 }
 
 /// One changelog item.
@@ -274,6 +289,21 @@ impl JiraEvent {
         }
     }
 
+    /// Returns the site of the event: the host of `issue.self` and of
+    /// `comment.self`. `None` when the payload names no site, or names two
+    /// sites. One secret can serve two sites by mistake, so a sink that
+    /// serves one site refuses a delivery whose site is not its own.
+    #[must_use]
+    pub fn site(&self) -> Option<&SiteHost> {
+        let issue = self.issue().and_then(|i| i.site.as_ref());
+        let comment = self.comment().and_then(|c| c.site.as_ref());
+        match (issue, comment) {
+            (Some(a), Some(b)) if a != b => None,
+            (Some(a), _) => Some(a),
+            (None, b) => b,
+        }
+    }
+
     /// Returns the status change of an issue event, from the changelog item
     /// with field `status`.
     #[must_use]
@@ -293,6 +323,12 @@ impl JiraEvent {
 
     /// Returns the comment of the event: the comment of a comment event,
     /// or the comment of an `issue_commented` update.
+    ///
+    /// One comment add comes in two deliveries: a `comment_created` event
+    /// and a `jira:issue_updated` event with type `issue_commented`. The
+    /// two deliveries have different delivery ids, so a dedupe by delivery
+    /// id does not join them. A sink that acts once for each comment
+    /// dedupes by the comment id, or acts only on `CommentCreated`.
     #[must_use]
     pub const fn comment(&self) -> Option<&WebhookComment> {
         match self {
@@ -447,6 +483,14 @@ fn account(user: Option<&Value>) -> Option<AccountId> {
     text(user?.get("accountId")).map(AccountId::from_response)
 }
 
+/// Returns the host of the `self` URL of a payload object.
+fn self_host(object: &Value) -> Option<SiteHost> {
+    object
+        .get("self")
+        .and_then(Value::as_str)
+        .and_then(SiteHost::from_url)
+}
+
 /// Reads the payload issue. Only a numeric `id` is required.
 fn webhook_issue(issue: Option<&Value>) -> Result<WebhookIssue> {
     let issue = issue.ok_or_else(|| bad_body("an issue event needs an issue"))?;
@@ -476,6 +520,7 @@ fn webhook_issue(issue: Option<&Value>) -> Result<WebhookIssue> {
                 .map(ProjectKey::from_response),
             issue_type: text(field("issuetype").and_then(|t| t.get("name"))),
         },
+        site: self_host(issue),
     })
 }
 
@@ -496,6 +541,7 @@ fn webhook_comment(comment: Option<&Value>) -> Result<WebhookComment> {
         body,
         author: account(comment.get("author")),
         update_author: account(comment.get("updateAuthor")),
+        site: self_host(comment),
     })
 }
 

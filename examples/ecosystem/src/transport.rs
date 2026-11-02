@@ -12,6 +12,7 @@ use std::time::Duration;
 use autumn_jira::JiraClient;
 use autumn_jira::backend::{SanMateoBackend, SanMateoTarget};
 use autumn_jira::client::ClientSettings;
+use autumn_jira::ids::SiteHost;
 use autumn_jira::san_mateo::clock::{Entropy, OsEntropy};
 use autumn_jira::san_mateo::credentials::OAuth2Credentials;
 use autumn_jira::san_mateo::transport::HttpResponse;
@@ -36,6 +37,9 @@ pub const CHAT_INTEGRATION: &str = "team-chat";
 pub const CHAT_CONNECTION: &str = "team";
 /// The chat endpoint that the `notify` route calls.
 pub const CHAT_MESSAGES_URL: &str = "https://chat.example/v1/messages";
+/// The URL of the Jira site of the example. It is the `url` of the site in
+/// `accessible-resources`, and each delivery names it in `issue.self`.
+pub const SITE_URL: &str = "https://acme.atlassian.net";
 /// The project of the incidents.
 pub const PROJECT: &str = "OPS";
 /// The account id of the project lead. The escape hatch reads it.
@@ -190,9 +194,26 @@ fn connection(id: &str, integration: &str, credentials: Credentials) -> ImportCo
     }
 }
 
-/// The target of the Jira connection.
+/// The target of the Jira connection. The site URL picks the site in
+/// `accessible-resources`, so the discovery fails when the connection has
+/// no site with [`SITE_URL`].
 pub fn jira_target() -> SanMateoTarget {
-    SanMateoTarget::new(ENV, jira_key())
+    SanMateoTarget::new(ENV, jira_key()).site_url(SITE_URL)
+}
+
+/// The host of [`SITE_URL`], for the site check of the bridge.
+///
+/// A san-mateo client tells the bridge no host. With this host, the bridge
+/// refuses a delivery whose `issue.self` names another site
+/// (R2F-fixcheck-a-2). The signal of a delivery of its own site then holds
+/// the status of the payload, so a short status still ends a wait
+/// (R2C-harvest-4).
+///
+/// # Errors
+///
+/// [`SITE_URL`] has no good host.
+pub fn site_host() -> Result<SiteHost, BoxError> {
+    SiteHost::from_url(SITE_URL).ok_or_else(|| format!("no site host in {SITE_URL}").into())
 }
 
 /// Reads `accessible-resources` through san-mateo and stores the cloud id
