@@ -670,6 +670,15 @@ fn jql_subset() {
     );
     assert_eq!(keys("project = OPS ORDER BY updated DESC, status").len(), 5);
 
+    // Other sort fields.
+    assert_eq!(keys("project = OPS ORDER BY summary ASC")[0], bug);
+    assert_eq!(keys("project = OPS ORDER BY status DESC")[0], b);
+    assert_eq!(keys("project = OPS ORDER BY issuetype ASC")[0], bug);
+    assert_eq!(keys("project = OPS ORDER BY assignee DESC")[0], c);
+    assert_eq!(keys("project = OPS ORDER BY labels DESC")[0], odd);
+    assert_eq!(keys("project = OPS ORDER BY priority, key").len(), 5);
+    assert_eq!(keys("project in (OPS) AND project is not EMPTY").len(), 5);
+
     // The default order is newest first.
     assert_eq!(keys("project = OPS")[0], bug);
 
@@ -693,6 +702,8 @@ fn jql_subset() {
     assert_ne!(error("project = OPS AND"), "");
     assert_ne!(error("project = OPS extra"), "");
     assert!(error("project = NOPE").contains("NOPE"));
+    assert!(error("project in (OPS, NOPE)").contains("NOPE"));
+    assert!(error("project = OPS AND labels").contains("operator"));
 
     // Token pages.
     let (_, first) = search(
@@ -1795,4 +1806,354 @@ fn snapshot_shape() {
     assert!(fake.issue("OPS-99").is_none());
     assert_eq!(fake.issues().len(), 2);
     assert_eq!(fake.issues()[1]["key"], "OPS-2");
+}
+
+#[test]
+fn edit_paths_and_validation() {
+    let fake = FakeJira::new().with_webhook_secret("edits");
+    let (key, _) = create(&fake, "OPS", "edits", &[]);
+    assert_eq!(fake.take_deliveries().len(), 1);
+    let path = format!("/rest/api/3/issue/{key}");
+    let adf = json!({"type": "doc", "version": 1, "content": [
+        {"type": "paragraph", "content": [{"type": "text", "text": "new text"}]}]});
+
+    // Description, priority, a custom field and the reporter.
+    let edit = json!({"fields": {
+        "description": adf,
+        "priority": {"name": "High"},
+        "customfield_10020": 5,
+        "reporter": {"accountId": ANN},
+    }});
+    assert_eq!(api(&fake, "PUT", &path, Some(edit)).0, 204);
+    let (_, issue) = api(&fake, "GET", &path, None);
+    assert_eq!(issue["fields"]["priority"]["name"], "High");
+    assert_eq!(issue["fields"]["customfield_10020"], 5);
+    assert_eq!(issue["fields"]["reporter"]["accountId"], ANN);
+    let deliveries = fake.take_deliveries();
+    let body: Value = serde_json::from_slice(&deliveries[0].body).unwrap();
+    let fields: Vec<&str> = body["changelog"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["field"].as_str().unwrap())
+        .collect();
+    assert_eq!(fields, ["description", "priority", "customfield_10020"]);
+    assert_eq!(body["changelog"]["items"][0]["toString"], "new text");
+    assert_eq!(body["changelog"]["items"][2]["fieldtype"], "custom");
+
+    // Update ops: set, a comment add, and null values.
+    let edit = json!({"update": {
+        "description": [{"set": null}],
+        "assignee": [{"set": {"accountId": BOT}}],
+        "priority": [{"set": {"id": "5"}}],
+        "comment": [{"add": {"body": adf}}],
+    }});
+    assert_eq!(api(&fake, "PUT", &path, Some(edit)).0, 204);
+    let (_, issue) = api(&fake, "GET", &path, None);
+    assert!(issue["fields"]["description"].is_null());
+    assert_eq!(issue["fields"]["priority"]["name"], "Lowest");
+    assert_eq!(issue["fields"]["comment"]["total"], 1);
+    assert_eq!(
+        api(
+            &fake,
+            "PUT",
+            &path,
+            Some(json!({"fields": {"assignee": null}}))
+        )
+        .0,
+        204
+    );
+    let events: Vec<String> = fake
+        .take_deliveries()
+        .iter()
+        .map(|d| {
+            serde_json::from_slice::<Value>(&d.body).unwrap()["webhookEvent"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(
+        events,
+        ["jira:issue_updated", "jira:issue_updated"],
+        "an embedded comment has no own delivery"
+    );
+    assert_eq!(
+        api(
+            &fake,
+            "PUT",
+            &path,
+            Some(json!({"fields": {"summary": "edits"}}))
+        )
+        .0,
+        204
+    );
+    assert!(fake.take_deliveries().is_empty(), "no change, no delivery");
+
+    // Each bad edit gives 400 with the field name.
+    let bad_edits = [
+        (json!({"fields": {"summary": ""}}), "summary"),
+        (json!({"fields": {"summary": 5}}), "summary"),
+        (json!({"fields": {"description": "plain"}}), "description"),
+        (json!({"fields": {"labels": "a"}}), "labels"),
+        (json!({"fields": {"labels": [1]}}), "labels"),
+        (json!({"fields": {"assignee": "ann"}}), "assignee"),
+        (json!({"fields": {"reporter": null}}), "reporter"),
+        (
+            json!({"fields": {"priority": {"name": "Urgent"}}}),
+            "priority",
+        ),
+        (json!({"fields": {"project": {"key": "OPS"}}}), "project"),
+        (json!({"fields": "x"}), "fields"),
+        (json!({"update": "x"}), "update"),
+        (json!({"update": {"labels": {"add": "a"}}}), "labels"),
+        (json!({"update": {"labels": ["add"]}}), "labels"),
+        (
+            json!({"update": {"labels": [{"add": "two words"}]}}),
+            "labels",
+        ),
+        (
+            json!({"update": {"comment": [{"add": {"body": "plain"}}]}}),
+            "comment",
+        ),
+        (json!({"update": {"comment": [{"set": "x"}]}}), "comment"),
+        (json!({"update": {"summary": [{"append": "x"}]}}), "summary"),
+    ];
+    for (body, field) in bad_edits {
+        let (status, err) = api(&fake, "PUT", &path, Some(body.clone()));
+        assert_eq!(status, 400, "{body}");
+        assert!(err["errors"][field].is_string(), "{body}: {err}");
+    }
+    let raw = call(&fake, "PUT", &format!("{SITE}{path}"), Some(b"[".to_vec()));
+    assert_eq!(raw.status, 400);
+
+    // Create with update ops, bad properties, and bad JSON.
+    let (status, created) = api(
+        &fake,
+        "POST",
+        "/rest/api/3/issue",
+        Some(
+            json!({"fields": {"project": {"key": "OPS"}, "issuetype": {"id": "10001"}, "summary": "ops"},
+            "update": {"labels": [{"add": "via-update"}], "comment": [{"add": {"body": adf}}]}}),
+        ),
+    );
+    assert_eq!(status, 201);
+    let made = created["key"].as_str().unwrap();
+    assert_eq!(
+        fake.issue(made).unwrap()["fields"]["labels"],
+        json!(["via-update"])
+    );
+    assert_eq!(fake.issue(made).unwrap()["fields"]["comment"]["total"], 1);
+    for properties in [
+        json!("x"),
+        json!([{"key": "only"}]),
+        json!([{"key": "", "value": 1}]),
+    ] {
+        let body = json!({"fields": {"project": {"key": "OPS"}, "issuetype": {"id": "10001"}, "summary": "p"},
+            "properties": properties});
+        let (status, err) = api(&fake, "POST", "/rest/api/3/issue", Some(body));
+        assert_eq!(status, 400);
+        assert!(err["errors"]["properties"].is_string());
+    }
+    let raw = call(
+        &fake,
+        "POST",
+        &format!("{SITE}/rest/api/3/issue"),
+        Some(b"{".to_vec()),
+    );
+    assert_eq!(raw.status, 400);
+
+    // Properties: key and size limits, a missing issue.
+    let long = "k".repeat(256);
+    assert_eq!(
+        api(
+            &fake,
+            "PUT",
+            &format!("{path}/properties/{long}"),
+            Some(json!(1))
+        )
+        .0,
+        400
+    );
+    let big = json!("x".repeat(40_000));
+    assert_eq!(
+        api(&fake, "PUT", &format!("{path}/properties/big"), Some(big)).0,
+        400
+    );
+    assert_eq!(
+        api(&fake, "GET", "/rest/api/3/issue/OPS-99/properties/x", None).0,
+        404
+    );
+    assert_eq!(
+        api(&fake, "GET", "/rest/api/3/issue/OPS-99/transitions", None).0,
+        404
+    );
+    assert_eq!(
+        api(
+            &fake,
+            "POST",
+            "/rest/api/3/issue/OPS-99/comment",
+            Some(json!({"body": adf}))
+        )
+        .0,
+        404
+    );
+
+    // Transitions: a number id, a resolution where none belongs, bad JSON.
+    let t = |body: Value| common::transition_raw(&fake, &key, body);
+    let (status, err) =
+        t(json!({"transition": {"id": "21"}, "fields": {"resolution": {"name": "Done"}}}));
+    assert_eq!(status, 400);
+    assert!(err["errors"]["resolution"].is_string());
+    assert_eq!(t(json!({"transition": {"id": 21}})).0, 204);
+    assert_eq!(t(json!({"transition": {"id": "31"}, "fields": {"resolution": {"id": "10002"}, "labels": ["fixed"]}})).0, 204);
+    let (_, issue) = api(&fake, "GET", &path, None);
+    assert_eq!(issue["fields"]["resolution"]["name"], "Duplicate");
+    assert_eq!(issue["fields"]["labels"], json!(["fixed"]));
+    assert_eq!(t(json!({"transition": {"id": true}})).0, 400);
+    let raw = call(
+        &fake,
+        "POST",
+        &format!("{SITE}{path}/transitions"),
+        Some(b"x".to_vec()),
+    );
+    assert_eq!(raw.status, 400);
+
+    // Bodies that are not objects.
+    for url in [
+        "/rest/api/3/issue/OPS-1/comment",
+        "/rest/api/3/search/jql",
+        "/rest/api/3/search/approximate-count",
+    ] {
+        let raw = call(
+            &fake,
+            "POST",
+            &format!("{SITE}{url}"),
+            Some(b"[1]".to_vec()),
+        );
+        assert_eq!(raw.status, 400, "{url}");
+    }
+    assert_eq!(api(&fake, "DELETE", "/rest/api/3/search/jql", None).0, 405);
+    assert_eq!(
+        call(&fake, "GET", "https://auth.atlassian.com/authorize", None).status,
+        404
+    );
+    assert_eq!(
+        call(&fake, "GET", "https://api.atlassian.com/other", None).status,
+        404
+    );
+
+    // Public helpers.
+    let project = FakeProject::new("NEW", "10200", "New").lead("acct-lead");
+    assert_eq!(project.key(), "NEW");
+    let replaced = FakeJira::default()
+        .with_project(FakeProject::new("OPS", "10000", "Ops two").issue_type("10001", "Task"))
+        .with_project(project);
+    let (_, ops) = api(&replaced, "GET", "/rest/api/3/project/OPS", None);
+    assert_eq!(ops["name"], "Ops two");
+    assert_eq!(ops["issueTypes"].as_array().unwrap().len(), 1);
+    let (_, lead) = api(
+        &replaced,
+        "GET",
+        "/rest/api/3/project/NEW?expand=lead",
+        None,
+    );
+    assert_eq!(lead["lead"]["accountId"], "acct-lead");
+    assert_eq!(lead["lead"]["displayName"], "acct-lead");
+    assert!(format!("{replaced:?}").contains("acme"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn delayed_writes_on_other_ops() {
+    let fake = FakeJira::new().with_oauth("cid", "csecret", "at-0", "rt-0");
+    let (key, _) = create(&fake, "OPS", "late edit", &[]);
+    fake.fault(
+        FakeOp::EditIssue,
+        Fault::TimeoutThenCommit(Duration::from_secs(1)),
+    );
+    let edit = bearer("PUT", &format!("{GATEWAY}/rest/api/3/issue/{key}"), "at-0")
+        .header("content-type", "application/json")
+        .body(
+            json!({"fields": {"summary": "edited late"}})
+                .to_string()
+                .into_bytes(),
+        );
+    assert_eq!(send_with(&fake, edit).await, Err(TransportError::Timeout));
+    fake.fault(
+        FakeOp::Token,
+        Fault::TimeoutThenCommit(Duration::from_secs(1)),
+    );
+    let refresh = HttpRequest::new("POST", "https://auth.atlassian.com/oauth/token")
+        .header("content-type", "application/json")
+        .body(
+            json!({"grant_type": "refresh_token", "client_id": "cid",
+            "client_secret": "csecret", "refresh_token": "rt-0"})
+            .to_string()
+            .into_bytes(),
+        );
+    assert_eq!(
+        send_with(&fake, refresh).await,
+        Err(TransportError::Timeout)
+    );
+    assert_eq!(fake.token_refreshes(), 0);
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert_eq!(
+        fake.issue(&key).unwrap()["fields"]["summary"],
+        "edited late"
+    );
+    assert_eq!(
+        fake.token_refreshes(),
+        1,
+        "the refresh happened, the reply was lost"
+    );
+    // A 4xx reply under BadJson stays as it is.
+    fake.fault(FakeOp::GetIssue, Fault::BadJson);
+    assert_eq!(api(&fake, "GET", "/rest/api/3/issue/OPS-99", None).0, 404);
+}
+
+#[test]
+fn no_secret_in_debug_or_logs() {
+    let fake = FakeJira::new()
+        .with_basic_auth("me@example.com", "basic-secret-1")
+        .with_oauth(
+            "cid",
+            "client-secret-2",
+            "access-secret-3",
+            "refresh-secret-4",
+        )
+        .with_webhook_secret("webhook-secret-5");
+    let mine = HttpRequest::new("GET", format!("{SITE}/rest/api/3/myself?x=1")).header(
+        "authorization",
+        common::basic_header("me@example.com", "basic-secret-1"),
+    );
+    assert_eq!(fake.handle(&mine).unwrap().status, 200);
+    let gw = bearer(
+        "GET",
+        &format!("{GATEWAY}/rest/api/3/myself"),
+        "access-secret-3",
+    );
+    assert_eq!(fake.handle(&gw).unwrap().status, 200);
+    let body = json!({"fields": {"project": {"key": "OPS"}, "issuetype": {"id": "10001"}, "summary": "x"}});
+    let make = HttpRequest::new("POST", format!("{SITE}/rest/api/3/issue"))
+        .header(
+            "authorization",
+            common::basic_header("me@example.com", "basic-secret-1"),
+        )
+        .body(body.to_string().into_bytes());
+    assert_eq!(fake.handle(&make).unwrap().status, 201);
+    let text = format!(
+        "{fake:?} {:?} {:?} {:?}",
+        fake.requests(),
+        fake.take_deliveries(),
+        fake.snapshot()
+    );
+    for secret in [
+        "basic-secret-1",
+        "client-secret-2",
+        "access-secret-3",
+        "refresh-secret-4",
+        "webhook-secret-5",
+    ] {
+        assert!(!text.contains(secret), "{secret} leaks");
+    }
 }
