@@ -39,6 +39,10 @@ A free-form base URL or a followed redirect is an SSRF path.
   make a call. A failed check also counts, so a failure that lasts makes
   at most one call in each interval. When the id is not listed any more,
   the backend stores the new id (plan V55, V101, V119).
+- `JiraBackend::refresh_site` reads the site at once, with no wait for the
+  interval. Its default makes no call. `SanMateoBackend` runs the discovery
+  when the target has no cloud id. The plugin calls it in
+  `JiraService::refresh_default` (plan V123).
 - `resolve_cloud_id` keeps entries with a Jira scope. It fails on zero
   matches, and on more than one match without a site URL.
 - A backend failure is `NotSent { transient }`, `MaybeSent` or `Auth`. Each

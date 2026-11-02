@@ -286,7 +286,9 @@ tenant connects to another site, call `JiraService::forget(id)`. The next
 `for_connection(id)` then reads the site again. A client also checks its
 stored cloud id again after a 401 or a 404, at most one time in each
 `CLOUD_ID_RECHECK_INTERVAL` (300 s). So the default client finds a new
-site within that time.
+site within that time. To read the site of the default client at once,
+call `JiraService::refresh_default()`. It gives the new cloud id, or `None`
+for a fixed site.
 
 Other settings, with their defaults:
 
