@@ -33,3 +33,13 @@ impl JiraHealth {
         self.failed.store(true, Ordering::SeqCst);
     }
 }
+
+impl autumn_web::actuator::HealthIndicator for JiraHealth {
+    fn check(
+        &self,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = autumn_web::actuator::HealthCheckOutput> + Send + '_>,
+    > {
+        Box::pin(async { autumn_web::actuator::HealthCheckOutput::down() })
+    }
+}
