@@ -1,0 +1,16 @@
+# The prod profile of the autumn_app example. autumn reads it after
+# autumn.toml when the profile is prod.
+#
+# In prod, autumn needs a webhook secret of 32 bytes or more in
+# JIRA_WEBHOOK_SECRET, AUTUMN_SECURITY__SIGNING_SECRET and
+# AUTUMN_SECURITY__TRUSTED_HOSTS__HOSTS.
+
+[health]
+detailed = false
+
+# autumn refuses the memory replay store in prod, because each replica has
+# its own store, so a copy of a delivery can reach a second replica. This
+# example runs one replica, so it allows the memory store. With more than
+# one replica, set backend = "redis" and [security.webhooks.replay.redis].
+[security.webhooks.replay]
+allow_memory_in_production = true
