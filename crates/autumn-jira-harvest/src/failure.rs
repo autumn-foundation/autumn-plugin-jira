@@ -38,6 +38,16 @@ pub const WORKFLOW_ERROR: &str = "jira.workflow";
 /// seconds. The search index of Jira can lag, so the next lookup waits.
 pub const SETTLE_SECS: u64 = 30;
 
+/// A non-retryable [`CONFIG_ERROR`] failure.
+pub(crate) fn config_failure(message: &str) -> ActivityFailure {
+    ActivityFailure::non_retryable(CONFIG_ERROR, message)
+}
+
+/// A non-retryable [`INVALID_INPUT_ERROR`] failure.
+pub(crate) fn invalid_input(message: &str) -> ActivityFailure {
+    ActivityFailure::non_retryable(INVALID_INPUT_ERROR, message)
+}
+
 /// The `jira.<code>` of a rate limit.
 const RATE_LIMITED_ERROR: &str = "jira.rate_limited";
 

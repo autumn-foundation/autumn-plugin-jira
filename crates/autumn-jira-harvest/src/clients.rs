@@ -10,7 +10,11 @@ use std::fmt;
 use autumn_harvest::context::ActivityContext;
 use autumn_harvest::failure::ActivityFailure;
 use autumn_jira::JiraClient;
+use autumn_jira::backend::SanMateoTarget;
+use san_mateo::{ConnectionKey, SanMateo};
 use serde::{Deserialize, Serialize};
+
+use crate::failure::{config_failure, invalid_input};
 
 /// The clients of a worker: one default client and named clients.
 ///
@@ -25,7 +29,7 @@ pub struct JiraClients {
 impl JiraClients {
     /// Makes the set with its default client.
     #[must_use]
-    pub fn new(default: JiraClient) -> Self {
+    pub const fn new(default: JiraClient) -> Self {
         Self {
             default,
             named: BTreeMap::new(),
@@ -77,7 +81,7 @@ pub enum ClientRef {
     },
 }
 
-/// Named and Default read ctx.state::<JiraClients>(). Connection reads ctx.state::<SanMateo>().
+/// `Named` and `Default` read `ctx.state::<JiraClients>()`. `Connection` reads `ctx.state::<SanMateo>()`.
 /// The result is always `.durable()`.
 ///
 /// # Errors
@@ -89,8 +93,47 @@ pub fn client_for(
     ctx: &ActivityContext,
     client: &ClientRef,
 ) -> Result<JiraClient, ActivityFailure> {
-    let _ = (ctx, client);
-    Err(ActivityFailure::retryable("", ""))
+    let resolved = match client {
+        ClientRef::Default => clients(ctx)?.default.clone(),
+        ClientRef::Named { name } => {
+            clients(ctx)?.named.get(name).cloned().ok_or_else(|| {
+                config_failure("the JiraClients state has no client with this name")
+            })?
+        }
+        ClientRef::Connection {
+            environment,
+            integration,
+            connection_id,
+        } => {
+            for part in [environment, integration, connection_id] {
+                if !is_connection_part(part) {
+                    return Err(invalid_input(
+                        "each part of a connection client is 1 to 200 printable chars with no space",
+                    ));
+                }
+            }
+            let san = ctx.state::<SanMateo>().ok_or_else(|| {
+                config_failure("the harvest state has no SanMateo for a connection client")
+            })?;
+            let target = SanMateoTarget::new(
+                environment.as_str(),
+                ConnectionKey::new(integration.as_str(), connection_id.as_str()),
+            );
+            JiraClient::san_mateo(san.clone(), target)
+        }
+    };
+    Ok(resolved.durable())
+}
+
+/// Returns the [`JiraClients`] of the state.
+fn clients(ctx: &ActivityContext) -> Result<&JiraClients, ActivityFailure> {
+    ctx.state::<JiraClients>()
+        .ok_or_else(|| config_failure("the harvest state has no JiraClients"))
+}
+
+/// Returns `true` for 1 to 200 printable ASCII chars with no space.
+fn is_connection_part(text: &str) -> bool {
+    !text.is_empty() && text.len() <= 200 && text.bytes().all(|b| b.is_ascii_graphic())
 }
 
 #[cfg(test)]
