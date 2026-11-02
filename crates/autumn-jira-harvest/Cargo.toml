@@ -1,0 +1,40 @@
+[package]
+name = "autumn-jira-harvest"
+description = "autumn-harvest activities for Jira: safe create, transition, comment; a durable wait for a status; a webhook-to-signal bridge"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+keywords = ["jira", "harvest", "workflow", "durable", "autumn"]
+categories = ["asynchronous", "api-bindings"]
+
+[dependencies]
+autumn-jira.workspace = true
+# The macros expand to `::autumn_harvest::...`. Do not rename this dependency.
+autumn-harvest.workspace = true
+san-mateo.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+deadpool.workspace = true
+diesel-async.workspace = true
+hmac.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+autumn-harvest = { workspace = true, features = ["testing"] }
+autumn-jira-fake.workspace = true
+proptest.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+
+[[example]]
+name = "harvest_workflow"
+test = true
+
+[lints]
+workspace = true

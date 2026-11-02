@@ -1,0 +1,36 @@
+[package]
+name = "autumn-jira-camel"
+description = "A rust-camel `jira:` producer component: create, get, edit, transition, comment and search Jira issues from camel routes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+keywords = ["jira", "camel", "eip", "integration", "harvest"]
+categories = ["asynchronous", "api-bindings"]
+
+[dependencies]
+autumn-jira.workspace = true
+camel-api.workspace = true
+camel-component-api.workspace = true
+async-trait.workspace = true
+serde_json.workspace = true
+# The settle wait of a lookup-only createIssue is a tokio timer.
+tokio.workspace = true
+tower.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+autumn-jira-fake.workspace = true
+camel-builder.workspace = true
+camel-component-direct.workspace = true
+camel-core.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+
+[[example]]
+name = "camel_route"
+test = true
+
+[lints]
+workspace = true

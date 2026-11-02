@@ -1,0 +1,694 @@
+{
+  "generator": "scripts/extract-jira-schemas.py",
+  "schemas": {
+    "AvatarUrlsBean": {
+      "16x16": {
+        "type": "string"
+      },
+      "24x24": {
+        "type": "string"
+      },
+      "32x32": {
+        "type": "string"
+      },
+      "48x48": {
+        "type": "string"
+      }
+    },
+    "Comment": {
+      "author": {
+        "ref": "UserDetails",
+        "type": "object"
+      },
+      "body": {
+        "type": "any"
+      },
+      "created": {
+        "type": "string"
+      },
+      "id": {
+        "type": "string"
+      },
+      "jsdAuthorCanSeeRequest": {
+        "type": "boolean"
+      },
+      "jsdPublic": {
+        "type": "boolean"
+      },
+      "properties": {
+        "items": {
+          "ref": "EntityProperty",
+          "type": "object"
+        },
+        "type": "array"
+      },
+      "renderedBody": {
+        "type": "string"
+      },
+      "self": {
+        "type": "string"
+      },
+      "updateAuthor": {
+        "ref": "UserDetails",
+        "type": "object"
+      },
+      "updated": {
+        "type": "string"
+      },
+      "visibility": {
+        "ref": "Visibility",
+        "type": "object"
+      }
+    },
+    "CreatedIssue": {
+      "id": {
+        "type": "string"
+      },
+      "key": {
+        "type": "string"
+      },
+      "self": {
+        "type": "string"
+      },
+      "transition": {
+        "ref": "NestedResponse",
+        "type": "object"
+      },
+      "watchers": {
+        "ref": "NestedResponse",
+        "type": "object"
+      }
+    },
+    "EntityProperty": {
+      "key": {
+        "type": "string"
+      },
+      "value": {
+        "type": "any"
+      }
+    },
+    "ErrorCollection": {
+      "errorMessages": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "errors": {
+        "type": "object"
+      },
+      "status": {
+        "type": "integer"
+      }
+    },
+    "IssueBean": {
+      "changelog": {
+        "type": "object"
+      },
+      "editmeta": {
+        "type": "object"
+      },
+      "expand": {
+        "type": "string"
+      },
+      "fields": {
+        "type": "object"
+      },
+      "fieldsToInclude": {
+        "type": "object"
+      },
+      "id": {
+        "type": "string"
+      },
+      "key": {
+        "type": "string"
+      },
+      "names": {
+        "type": "object"
+      },
+      "operations": {
+        "type": "object"
+      },
+      "properties": {
+        "type": "object"
+      },
+      "renderedFields": {
+        "type": "object"
+      },
+      "schema": {
+        "type": "object"
+      },
+      "self": {
+        "type": "string"
+      },
+      "transitions": {
+        "items": {
+          "ref": "IssueTransition",
+          "type": "object"
+        },
+        "type": "array"
+      },
+      "versionedRepresentations": {
+        "type": "object"
+      }
+    },
+    "IssueTransition": {
+      "expand": {
+        "type": "string"
+      },
+      "fields": {
+        "type": "object"
+      },
+      "hasScreen": {
+        "type": "boolean"
+      },
+      "id": {
+        "type": "string"
+      },
+      "isAvailable": {
+        "type": "boolean"
+      },
+      "isConditional": {
+        "type": "boolean"
+      },
+      "isGlobal": {
+        "type": "boolean"
+      },
+      "isInitial": {
+        "type": "boolean"
+      },
+      "looped": {
+        "type": "boolean"
+      },
+      "name": {
+        "type": "string"
+      },
+      "to": {
+        "ref": "StatusDetails",
+        "type": "object"
+      }
+    },
+    "IssueTypeDetails": {
+      "avatarId": {
+        "type": "integer"
+      },
+      "description": {
+        "type": "string"
+      },
+      "entityId": {
+        "type": "string"
+      },
+      "hierarchyLevel": {
+        "type": "integer"
+      },
+      "iconUrl": {
+        "type": "string"
+      },
+      "id": {
+        "type": "string"
+      },
+      "name": {
+        "type": "string"
+      },
+      "scope": {
+        "type": "object"
+      },
+      "self": {
+        "type": "string"
+      },
+      "subtask": {
+        "type": "boolean"
+      }
+    },
+    "IssueTypeIssueCreateMetadata": {
+      "avatarId": {
+        "type": "integer"
+      },
+      "description": {
+        "type": "string"
+      },
+      "entityId": {
+        "type": "string"
+      },
+      "expand": {
+        "type": "string"
+      },
+      "fields": {
+        "type": "object"
+      },
+      "hierarchyLevel": {
+        "type": "integer"
+      },
+      "iconUrl": {
+        "type": "string"
+      },
+      "id": {
+        "type": "string"
+      },
+      "name": {
+        "type": "string"
+      },
+      "scope": {
+        "type": "object"
+      },
+      "self": {
+        "type": "string"
+      },
+      "subtask": {
+        "type": "boolean"
+      }
+    },
+    "JQLCountResultsBean": {
+      "count": {
+        "type": "integer"
+      }
+    },
+    "NestedResponse": {
+      "errorCollection": {
+        "ref": "ErrorCollection",
+        "type": "object"
+      },
+      "status": {
+        "type": "integer"
+      },
+      "warningCollection": {
+        "type": "object"
+      }
+    },
+    "PageBeanProject": {
+      "isLast": {
+        "type": "boolean"
+      },
+      "maxResults": {
+        "type": "integer"
+      },
+      "nextPage": {
+        "type": "string"
+      },
+      "self": {
+        "type": "string"
+      },
+      "startAt": {
+        "type": "integer"
+      },
+      "total": {
+        "type": "integer"
+      },
+      "values": {
+        "items": {
+          "ref": "Project",
+          "type": "object"
+        },
+        "type": "array"
+      }
+    },
+    "PageOfComments": {
+      "comments": {
+        "items": {
+          "ref": "Comment",
+          "type": "object"
+        },
+        "type": "array"
+      },
+      "maxResults": {
+        "type": "integer"
+      },
+      "startAt": {
+        "type": "integer"
+      },
+      "total": {
+        "type": "integer"
+      }
+    },
+    "PageOfCreateMetaIssueTypes": {
+      "createMetaIssueType": {
+        "items": {
+          "ref": "IssueTypeIssueCreateMetadata",
+          "type": "object"
+        },
+        "type": "array"
+      },
+      "issueTypes": {
+        "items": {
+          "ref": "IssueTypeIssueCreateMetadata",
+          "type": "object"
+        },
+        "type": "array"
+      },
+      "maxResults": {
+        "type": "integer"
+      },
+      "startAt": {
+        "type": "integer"
+      },
+      "total": {
+        "type": "integer"
+      }
+    },
+    "Project": {
+      "archived": {
+        "type": "boolean"
+      },
+      "archivedBy": {
+        "ref": "User",
+        "type": "object"
+      },
+      "archivedDate": {
+        "type": "string"
+      },
+      "assigneeType": {
+        "type": "string"
+      },
+      "avatarUrls": {
+        "ref": "AvatarUrlsBean",
+        "type": "object"
+      },
+      "components": {
+        "items": {
+          "type": "object"
+        },
+        "type": "array"
+      },
+      "deleted": {
+        "type": "boolean"
+      },
+      "deletedBy": {
+        "ref": "User",
+        "type": "object"
+      },
+      "deletedDate": {
+        "type": "string"
+      },
+      "description": {
+        "type": "string"
+      },
+      "email": {
+        "type": "string"
+      },
+      "expand": {
+        "type": "string"
+      },
+      "favourite": {
+        "type": "boolean"
+      },
+      "id": {
+        "type": "string"
+      },
+      "insight": {
+        "type": "object"
+      },
+      "isPrivate": {
+        "type": "boolean"
+      },
+      "issueTypeHierarchy": {
+        "type": "object"
+      },
+      "issueTypes": {
+        "items": {
+          "ref": "IssueTypeDetails",
+          "type": "object"
+        },
+        "type": "array"
+      },
+      "key": {
+        "type": "string"
+      },
+      "landingPageInfo": {
+        "type": "object"
+      },
+      "lead": {
+        "ref": "User",
+        "type": "object"
+      },
+      "name": {
+        "type": "string"
+      },
+      "permissions": {
+        "type": "object"
+      },
+      "projectCategory": {
+        "type": "object"
+      },
+      "projectTypeKey": {
+        "type": "string"
+      },
+      "properties": {
+        "type": "object"
+      },
+      "retentionTillDate": {
+        "type": "string"
+      },
+      "roles": {
+        "type": "object"
+      },
+      "self": {
+        "type": "string"
+      },
+      "simplified": {
+        "type": "boolean"
+      },
+      "style": {
+        "type": "string"
+      },
+      "url": {
+        "type": "string"
+      },
+      "uuid": {
+        "type": "string"
+      },
+      "versions": {
+        "items": {
+          "type": "object"
+        },
+        "type": "array"
+      }
+    },
+    "SearchAndReconcileResults": {
+      "isLast": {
+        "type": "boolean"
+      },
+      "issues": {
+        "items": {
+          "ref": "IssueBean",
+          "type": "object"
+        },
+        "type": "array"
+      },
+      "names": {
+        "type": "object"
+      },
+      "nextPageToken": {
+        "type": "string"
+      },
+      "schema": {
+        "type": "object"
+      },
+      "warnings": {
+        "items": {
+          "type": "object"
+        },
+        "type": "array"
+      }
+    },
+    "ServerInformation": {
+      "baseUrl": {
+        "type": "string"
+      },
+      "buildDate": {
+        "type": "string"
+      },
+      "buildNumber": {
+        "type": "integer"
+      },
+      "deploymentType": {
+        "type": "string"
+      },
+      "displayUrl": {
+        "type": "string"
+      },
+      "displayUrlConfluence": {
+        "type": "string"
+      },
+      "displayUrlServicedeskHelpCenter": {
+        "type": "string"
+      },
+      "healthChecks": {
+        "items": {
+          "type": "object"
+        },
+        "type": "array"
+      },
+      "scmInfo": {
+        "type": "string"
+      },
+      "serverTime": {
+        "type": "string"
+      },
+      "serverTimeZone": {
+        "type": "string"
+      },
+      "serverTitle": {
+        "type": "string"
+      },
+      "version": {
+        "type": "string"
+      },
+      "versionNumbers": {
+        "items": {
+          "type": "integer"
+        },
+        "type": "array"
+      }
+    },
+    "StatusCategory": {
+      "colorName": {
+        "type": "string"
+      },
+      "id": {
+        "type": "integer"
+      },
+      "key": {
+        "type": "string"
+      },
+      "name": {
+        "type": "string"
+      },
+      "self": {
+        "type": "string"
+      }
+    },
+    "StatusDetails": {
+      "description": {
+        "type": "string"
+      },
+      "iconUrl": {
+        "type": "string"
+      },
+      "id": {
+        "type": "string"
+      },
+      "name": {
+        "type": "string"
+      },
+      "scope": {
+        "type": "object"
+      },
+      "self": {
+        "type": "string"
+      },
+      "statusCategory": {
+        "ref": "StatusCategory",
+        "type": "object"
+      }
+    },
+    "Transitions": {
+      "expand": {
+        "type": "string"
+      },
+      "transitions": {
+        "items": {
+          "ref": "IssueTransition",
+          "type": "object"
+        },
+        "type": "array"
+      }
+    },
+    "User": {
+      "accountId": {
+        "type": "string"
+      },
+      "accountType": {
+        "type": "string"
+      },
+      "active": {
+        "type": "boolean"
+      },
+      "appType": {
+        "type": "string"
+      },
+      "applicationRoles": {
+        "type": "object"
+      },
+      "avatarUrls": {
+        "ref": "AvatarUrlsBean",
+        "type": "object"
+      },
+      "displayName": {
+        "type": "string"
+      },
+      "emailAddress": {
+        "type": "string"
+      },
+      "expand": {
+        "type": "string"
+      },
+      "groups": {
+        "type": "object"
+      },
+      "guest": {
+        "type": "boolean"
+      },
+      "key": {
+        "type": "string"
+      },
+      "locale": {
+        "type": "string"
+      },
+      "name": {
+        "type": "string"
+      },
+      "self": {
+        "type": "string"
+      },
+      "timeZone": {
+        "type": "string"
+      }
+    },
+    "UserDetails": {
+      "accountId": {
+        "type": "string"
+      },
+      "accountType": {
+        "type": "string"
+      },
+      "active": {
+        "type": "boolean"
+      },
+      "avatarUrls": {
+        "ref": "AvatarUrlsBean",
+        "type": "object"
+      },
+      "displayName": {
+        "type": "string"
+      },
+      "emailAddress": {
+        "type": "string"
+      },
+      "key": {
+        "type": "string"
+      },
+      "name": {
+        "type": "string"
+      },
+      "self": {
+        "type": "string"
+      },
+      "timeZone": {
+        "type": "string"
+      }
+    },
+    "Visibility": {
+      "identifier": {
+        "nullable": true,
+        "type": "string"
+      },
+      "type": {
+        "type": "string"
+      },
+      "value": {
+        "type": "string"
+      }
+    }
+  },
+  "source": "Jira Cloud REST v3 OpenAPI spec (swagger-v3.v3.json)"
+}

@@ -1,0 +1,38 @@
+# Config of the autumn_app example. autumn reads this file from the
+# directory in AUTUMN_MANIFEST_DIR, else from the current directory.
+# It holds the names of env vars, never the secrets.
+
+[server]
+host = "127.0.0.1"
+port = 3000
+
+# The health report shows the details of each indicator. The prod profile
+# turns this off.
+[health]
+detailed = true
+
+# API token mode. The example uses FakeJira unless JIRA_SITE, JIRA_EMAIL
+# and JIRA_API_TOKEN are set.
+[jira.api_token]
+site = "acme"
+email_env = "JIRA_EMAIL"
+token_env = "JIRA_API_TOKEN"
+
+[jira.webhook]
+max_age_secs = 7200
+handler_timeout_ms = 8000
+
+# The webhook endpoint that fits Jira. The plugin checks it at the start
+# and prints this block when a field does not fit. autumn checks the
+# signature and the delivery id, and it exempts this path from CSRF.
+[[security.webhooks.endpoints]]
+name = "jira"
+path = "/jira/webhook"
+provider = "generic"
+secret_env = "JIRA_WEBHOOK_SECRET"
+signature_header = "X-Hub-Signature"
+signature_prefix = "sha256="
+delivery_id_header = "X-Atlassian-Webhook-Identifier"
+replay_protection = true
+replay_window_secs = 86400
+max_body_bytes = 27262976

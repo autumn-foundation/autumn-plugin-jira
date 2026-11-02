@@ -1,0 +1,268 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Each week (and on a manual run), the tests and the ecosystem example run
+  # with the newest compatible dependencies. That finds rot from new
+  # upstream releases.
+  schedule:
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: 1.99.0
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo fmt --manifest-path examples/ecosystem/Cargo.toml --check
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Docs build with no warnings
+        run: cargo doc --workspace --no-deps --all-features --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - name: Shell scripts
+        run: shellcheck scripts/*.sh
+
+  # The tests run once, under coverage. Each crate must reach 85% of its
+  # `src/` lines on its own.
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: jira
+          POSTGRES_PASSWORD: jira
+          POSTGRES_DB: jira_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U jira -d jira_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # The Postgres tests do not skip when CI is set.
+      JIRA_TEST_DATABASE_URL: postgres://jira:jira@127.0.0.1:5432/jira_test
+      DATABASE_URL: postgres://jira:jira@127.0.0.1:5432/jira_test
+      # Coverage makes the code slower. The examples scale their timeouts.
+      JIRA_EXAMPLE_TIME_FACTOR: "3"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Newest compatible dependencies (weekly and manual runs)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: cargo update
+      # After the weekly update, the lock can hold two versions of a shared
+      # crate. On other runs, this repeats the `deps` check.
+      - name: One version each of the shared crates
+        run: bash scripts/one-version.sh Cargo.toml
+      - name: Test with coverage
+        run: >-
+          cargo llvm-cov --workspace --all-targets --all-features
+          --json --summary-only --output-path cov.json
+          --ignore-filename-regex '(/tests/|/examples/)'
+      - name: Each crate has 85% or more of its lines covered
+        run: python3 scripts/coverage-gate.py cov.json 85
+      - name: Doc tests
+        run: cargo test --workspace --doc --all-features
+      # The fake answers with the shapes of the Jira spec (ADR 0007). Each
+      # week, read the current spec again and fail on a change.
+      - name: The Jira spec shapes did not change (weekly and manual runs)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: |
+          curl -fsSL --retry 4 -o "$RUNNER_TEMP/swagger-v3.json" \
+            https://developer.atlassian.com/cloud/jira/platform/swagger-v3.v3.json
+          python3 scripts/extract-jira-schemas.py "$RUNNER_TEMP/swagger-v3.json"
+          git diff --exit-code crates/autumn-jira-fake/tests/fixtures/schemas.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: cov.json
+
+  # Runs each example in the main workspace as a user does. Each example
+  # checks its result and exits with an error when it is wrong.
+  examples:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: jira
+          POSTGRES_PASSWORD: jira
+          POSTGRES_DB: jira_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U jira -d jira_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://jira:jira@127.0.0.1:5432/jira_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+      - name: "example: embedded"
+        run: cargo run --locked -p autumn-jira --example embedded
+      - name: "example: autumn_app (boot, dev and prod, SIGTERM)"
+        run: bash scripts/smoke-autumn-example.sh
+      - name: "example: harvest_workflow"
+        run: cargo run --locked -p autumn-jira-harvest --example harvest_workflow
+      - name: "example: harvest_workflow, two runs at the same time"
+        run: |
+          bin=target/debug/examples/harvest_workflow
+          "$bin" > a.log 2>&1 & a=$!
+          "$bin" > b.log 2>&1 & b=$!
+          ra=0; wait "$a" || ra=$?
+          rb=0; wait "$b" || rb=$?
+          cat a.log b.log
+          test "$ra" -eq 0 && test "$rb" -eq 0
+      - name: "example: camel_route"
+        run: cargo run --locked -p autumn-jira-camel --example camel_route
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.89.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo +1.89.0 check --workspace --all-targets --all-features --locked
+
+  # One version of each shared crate. Two versions give types that do not
+  # match. The root lock has no C builds (ADR 0008).
+  deps:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: One version each of the shared crates
+        run: bash scripts/one-version.sh Cargo.toml examples/ecosystem/Cargo.toml
+      - name: The root lock has no C builds and no harvest-camel
+        run: |
+          if grep -E '^name = "(harvest-camel|autumn-harvest-plugin|pq-src|libsqlite3-sys)"$' Cargo.lock; then
+            echo "::error::Cargo.lock holds a crate that belongs to examples/ecosystem only"
+            exit 1
+          fi
+
+  verus:
+    runs-on: ubuntu-latest
+    env:
+      # The same build as san-mateo: Verus from source at a pinned commit,
+      # z3 from PyPI.
+      VERUS_REV: 2c9bf54cfa6391ee3769f23d8d173b96a0b70560
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: ~/verus-src/source/target-verus
+          key: verus-${{ env.VERUS_REV }}
+      # Build Verus outside the repo: in the repo, cargo takes it as a
+      # member of this workspace.
+      - name: Build Verus
+        run: |
+          set -eu
+          mkdir -p "$HOME/verus-src" && cd "$HOME/verus-src"
+          git init -q
+          git fetch -q --depth 1 https://github.com/verus-lang/verus "$VERUS_REV"
+          git checkout -q FETCH_HEAD
+          pip download -q --no-deps z3-solver==4.16.0.0 -d /tmp/z3
+          python3 -m zipfile -e /tmp/z3/*.whl /tmp/z3/x
+          cp /tmp/z3/x/z3_solver-4.16.0.0.data/data/bin/z3 source/z3
+          chmod +x source/z3
+          cd source
+          rustup toolchain install
+          bash -c 'source ../tools/activate && vargo build --release'
+      - name: Verify the policy spec
+        run: |
+          VERUS_Z3_PATH="$HOME/verus-src/source/z3" \
+            "$HOME/verus-src/source/target-verus/release/verus" verus/policy.rs
+
+  # The ecosystem example is a separate workspace (ADR 0008). The root jobs
+  # do not see it, so this job has its own gates.
+  example-ecosystem:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: jira
+          POSTGRES_PASSWORD: jira
+          POSTGRES_DB: jira_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U jira -d jira_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://jira:jira@127.0.0.1:5432/jira_test
+      JIRA_TEST_DATABASE_URL: postgres://jira:jira@127.0.0.1:5432/jira_test
+      MANIFEST: examples/ecosystem/Cargo.toml
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.89.0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: examples/ecosystem -> target
+          key: ecosystem
+      - name: Newest compatible dependencies (weekly and manual runs)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: cargo update --manifest-path "$MANIFEST"
+      - name: The lock file is up to date
+        run: |
+          if ! err=$(cargo metadata --locked --format-version 1 --manifest-path "$MANIFEST" 2>&1 > /dev/null); then
+            printf '%s\n' "$err" >&2
+            if printf '%s' "$err" | grep -q "needs to be updated"; then
+              echo "::error::examples/ecosystem/Cargo.lock is out of date. Run: cargo update --manifest-path $MANIFEST -p autumn-jira -p autumn-plugin-jira -p autumn-jira-harvest -p autumn-jira-camel -p autumn-jira-fake"
+            fi
+            exit 1
+          fi
+      # After the weekly update, the lock can hold two versions of a shared
+      # crate. On other runs, this repeats the `deps` check.
+      - name: One version each of the shared crates
+        run: bash scripts/one-version.sh "$MANIFEST"
+      - run: cargo fmt --manifest-path "$MANIFEST" --check
+      - run: cargo clippy --locked --manifest-path "$MANIFEST" --all-targets -- -D warnings
+      - run: cargo test --locked --manifest-path "$MANIFEST"
+      - name: "example: ecosystem"
+        run: cargo run --locked --manifest-path "$MANIFEST"
+      - name: MSRV 1.89
+        run: cargo +1.89.0 check --locked --manifest-path "$MANIFEST" --all-targets

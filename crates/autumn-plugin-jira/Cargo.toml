@@ -1,0 +1,48 @@
+[package]
+name = "autumn-plugin-jira"
+description = "Jira Cloud plugin for autumn-web: a JiraService extractor, a health indicator and a signed webhook route with typed events"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+keywords = ["autumn", "jira", "plugin", "webhook", "atlassian"]
+categories = ["web-programming", "api-bindings"]
+
+[dependencies]
+autumn-jira.workspace = true
+autumn-jira-fake = { workspace = true, optional = true }
+# Keep this requirement equal to `AUTUMN_WEB_REQUIREMENT`. A unit test checks it.
+autumn-web = { workspace = true }
+autumn-plugin-san-mateo.workspace = true
+san-mateo.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+toml.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+autumn-jira-fake.workspace = true
+hmac.workspace = true
+reqwest.workspace = true
+sha2.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+tower.workspace = true
+tracing-subscriber.workspace = true
+
+[features]
+# Test helpers for apps: `testing::plugin_for(&FakeJira)`, `app_config()`, `deliver(..)`.
+testing = ["dep:autumn-jira-fake"]
+
+[[example]]
+name = "autumn_app"
+path = "examples/autumn_app/main.rs"
+test = true
+required-features = ["testing"]
+
+[lints]
+workspace = true
