@@ -25,6 +25,7 @@
 
 use std::path::{Path, PathBuf};
 
+use autumn_jira::policy::MAX_FUTURE_SKEW_MS;
 use serde::{Deserialize, Serialize};
 
 use crate::error::PluginError;
@@ -184,10 +185,21 @@ impl Default for JiraHttpConfig {
 pub struct JiraWebhookConfig {
     /// The name of the `[[security.webhooks.endpoints]]` entry.
     pub endpoint_name: String,
-    /// The oldest event that the route accepts, in seconds. It must not be
-    /// over the `replay_window_secs` of the endpoint.
+    /// The oldest event that the route accepts, in seconds.
+    ///
+    /// `max_age_secs` + `max_future_skew_secs` must be less than the
+    /// `replay_window_secs` of the endpoint. Else a copy can be fresh after
+    /// autumn forgets its delivery id, and the route accepts it again.
+    ///
+    /// Keep it at [`JIRA_RETRY_HORIZON_SECS`](crate::webhook_config::JIRA_RETRY_HORIZON_SECS)
+    /// (5400) or more. Jira sends a delivery again after a 503 with the
+    /// first timestamp, for up to about 90 minutes. A smaller value makes
+    /// that copy stale, and the route drops it with 200. The start warns.
     pub max_age_secs: u64,
     /// The most that an event time can be in the future, in seconds.
+    ///
+    /// The default and the upper bound are `policy::MAX_FUTURE_SKEW_MS`
+    /// (300 seconds).
     pub max_future_skew_secs: u64,
     /// The longest wait for each sink, in milliseconds. 1 or more.
     ///
@@ -214,7 +226,7 @@ impl Default for JiraWebhookConfig {
         Self {
             endpoint_name: ENDPOINT_NAME.to_owned(),
             max_age_secs: 7200,
-            max_future_skew_secs: 300,
+            max_future_skew_secs: MAX_FUTURE_SKEW_MS / 1000,
             handler_timeout_ms: 8000,
             max_handler_tasks: 64,
             abandon_after_ms: 300_000,
@@ -415,6 +427,12 @@ impl JiraConfig {
         }
         require_text(&self.webhook.endpoint_name, "[jira.webhook] endpoint_name")?;
         require_positive(self.webhook.max_age_secs, "[jira.webhook] max_age_secs")?;
+        if self.webhook.max_future_skew_secs.saturating_mul(1000) > MAX_FUTURE_SKEW_MS {
+            return Err(PluginError::config(format!(
+                "[jira.webhook] max_future_skew_secs must be {} or less (policy::MAX_FUTURE_SKEW_MS)",
+                MAX_FUTURE_SKEW_MS / 1000
+            )));
+        }
         require_positive(
             self.webhook.handler_timeout_ms,
             "[jira.webhook] handler_timeout_ms",

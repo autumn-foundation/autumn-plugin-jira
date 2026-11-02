@@ -21,6 +21,14 @@ pub const SIGNATURE_HEADER: &str = "X-Hub-Signature";
 pub const SIGNATURE_PREFIX: &str = "sha256=";
 /// The header that holds the Jira delivery id. It is the same on each retry.
 pub const DELIVERY_ID_HEADER: &str = "X-Atlassian-Webhook-Identifier";
+/// The longest time after the event in which Jira can send a delivery,
+/// in seconds: 90 minutes.
+///
+/// A Secondary-flow delivery can come about 15 minutes late. After a 503,
+/// Jira sends it again up to 5 times, with 5 to 15 minutes between two
+/// tries. Each copy has the first timestamp. A `max_age_secs` below this
+/// value makes a late copy stale, and the route drops it.
+pub const JIRA_RETRY_HORIZON_SECS: u64 = 5400;
 
 /// A `WebhookEndpointConfig` that passes the boot check.
 ///
@@ -84,8 +92,9 @@ fn endpoint_toml(name: &str, path: &str, secret_env: &str) -> String {
 ///
 /// It finds the entry with `name == settings.endpoint_name` and checks that
 /// it fits Jira and `webhook_path`. It returns the warnings to log. A body
-/// cap below [`MIN_MAX_BODY_BYTES`] is a warning only: the app owns that
-/// choice.
+/// cap below [`MIN_MAX_BODY_BYTES`] and a `max_age_secs` below
+/// [`JIRA_RETRY_HORIZON_SECS`] are warnings only: the app owns those
+/// choices.
 ///
 /// # Errors
 /// Returns [`PluginError::WebhookEndpoint`] with the TOML that fits when no
@@ -118,6 +127,12 @@ pub fn check_webhook_endpoint(
         return Err(fail(problem));
     }
     let mut warnings = Vec::new();
+    if settings.max_age_secs < JIRA_RETRY_HORIZON_SECS {
+        warnings.push(format!(
+            "[jira.webhook] max_age_secs = {}; Jira sends a delivery again after a 503 for up to {JIRA_RETRY_HORIZON_SECS} seconds with the first timestamp, so the route drops a late copy as stale; set max_age_secs = {JIRA_RETRY_HORIZON_SECS} or more",
+            settings.max_age_secs
+        ));
+    }
     if e.max_body_bytes < MIN_MAX_BODY_BYTES {
         warnings.push(format!(
             "the webhook endpoint {name:?} has max_body_bytes = {}; Jira sends payloads up to 25 MB, and autumn refuses a larger body with 400; set max_body_bytes = {RECOMMENDED_MAX_BODY_BYTES}",
@@ -180,10 +195,14 @@ fn problem(
                 "replay_protection is false; set it to true, or call JiraPlugin::allow_webhooks_without_replay_protection()".to_owned(),
             );
         }
-    } else if settings.max_age_secs > e.replay_window_secs {
+    } else if settings
+        .max_age_secs
+        .saturating_add(settings.max_future_skew_secs)
+        >= e.replay_window_secs
+    {
         return Some(format!(
-            "[jira.webhook] max_age_secs ({}) is over replay_window_secs ({}); a copy older than the window but younger than max_age_secs is not refused",
-            settings.max_age_secs, e.replay_window_secs
+            "[jira.webhook] max_age_secs ({}) + max_future_skew_secs ({}) is not less than replay_window_secs ({}); a copy that is still fresh after the window is not refused",
+            settings.max_age_secs, settings.max_future_skew_secs, e.replay_window_secs
         ));
     }
     None
