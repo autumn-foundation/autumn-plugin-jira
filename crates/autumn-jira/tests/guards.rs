@@ -2164,6 +2164,55 @@ fn no_ctx_now_in_harvest_sees_ctx_now() {
     assert_eq!(check::ctx_now_violations(p, good), NONE);
 }
 
+// --- Postgres tests share one runtime -----------------------------------
+
+/// The `#[tokio::test]` lines of a Postgres test file. A file is a
+/// Postgres test file when it has `fn database_url`.
+///
+/// autumn-harvest keeps one notify sender for each pool in a process-global
+/// list. When a sender stops, the next pool that registers starts it again
+/// on its own runtime. That can be the runtime of another test. The sender
+/// then opens connections of the first pool on that runtime. When the other
+/// test ends, its runtime stops, and those connections close in the middle
+/// of a transaction. One runtime for the whole binary stops this.
+fn pg_runtime_violations(path: &str, text: &str) -> Vec<String> {
+    if !text.contains("fn database_url") {
+        return Vec::new();
+    }
+    text.lines()
+        .enumerate()
+        .filter(|(_, line)| line.trim_start().starts_with("#[tokio::test"))
+        .map(|(n, _)| {
+            format!(
+                "{path}:{}: use the shared runtime, not #[tokio::test]",
+                n + 1
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn postgres_tests_share_one_runtime() {
+    let mut files = files_under(&root().join("crates/autumn-jira-harvest/tests"), &["rs"]);
+    files.extend(files_under(&root().join("examples/ecosystem/src"), &["rs"]));
+    assert_files(
+        "postgres_tests_share_one_runtime",
+        &files,
+        pg_runtime_violations,
+    );
+}
+
+#[test]
+fn postgres_tests_share_one_runtime_sees_a_test_runtime() {
+    let p = "crates/autumn-jira-harvest/tests/bridge_pg.rs";
+    let bad = "fn database_url() {}\n#[tokio::test(flavor = \"multi_thread\")]\nasync fn t() {}";
+    assert_eq!(pg_runtime_violations(p, bad).len(), 1);
+    let good = "fn database_url() {}\n#[test]\nfn t() { runtime().block_on(async {}); }";
+    assert!(pg_runtime_violations(p, good).is_empty());
+    let other = "#[tokio::test]\nasync fn t() {}";
+    assert!(pg_runtime_violations(p, other).is_empty());
+}
+
 // --- AC30: no exactly-once claim -----------------------------------------
 
 #[test]
