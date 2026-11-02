@@ -77,10 +77,10 @@ impl JiraPlugin {
     ///
     /// The prefix is a builder value, not a config key: autumn mounts the
     /// routes before the config loads.
-    #[must_use]
     ///
     /// The plugin adds a leading `/` and removes a trailing `/`. `""` and
     /// `"/"` put the webhook route at `/webhook`.
+    #[must_use]
     pub fn prefix(mut self, prefix: &str) -> Self {
         let trimmed = prefix.trim().trim_matches('/');
         self.prefix = if trimmed.is_empty() {
@@ -92,6 +92,10 @@ impl JiraPlugin {
     }
 
     /// Mounts the webhook route at [`webhook_path`](Self::webhook_path).
+    ///
+    /// The start then checks the `[[security.webhooks.endpoints]]` entry in
+    /// each role that serves HTTP. The `Worker` role serves no user routes,
+    /// so it skips the check.
     #[must_use]
     pub const fn webhook_route(mut self) -> Self {
         self.webhook_route = true;
