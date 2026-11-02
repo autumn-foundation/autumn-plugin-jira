@@ -29,11 +29,14 @@ pub enum RouteOutcome {
     BadTag,
 }
 
-/// Pure: does this delivery need routing? jira:issue_created, or jira:issue_updated with a status change (B4, W26).
+/// Pure: does this delivery need routing? `jira:issue_created`, or `jira:issue_updated` with a status change (B4, W26).
 #[must_use]
 pub fn wants(event: &JiraEvent) -> bool {
-    let _ = event;
-    false
+    match event {
+        JiraEvent::IssueCreated(_) => true,
+        JiraEvent::IssueUpdated(_) => event.status_change().is_some(),
+        _ => false,
+    }
 }
 
 /// Pure: the routes in a property value, kept only when allowed and the tag verifies.
@@ -56,8 +59,26 @@ pub fn routes_from_property(
     key: &RouteKey,
     allowed: &BTreeSet<String>,
 ) -> Vec<(SignalRoute, RouteOutcome)> {
-    let _ = (value, key, allowed, SignalRoute::new("", ""));
-    Vec::new()
+    let Some(entries) = value.get("routes").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let name = entry.get("wf")?.as_str()?;
+            let id = entry.get("id")?.as_str()?;
+            let tag = entry.get("tag")?.as_str()?;
+            let route = SignalRoute::new(name, id).ok()?;
+            let outcome = if !route.verify(key, tag) {
+                RouteOutcome::BadTag
+            } else if !allowed.contains(&route.workflow_name) {
+                RouteOutcome::NotAllowed
+            } else {
+                RouteOutcome::Signalled
+            };
+            Some((route, outcome))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -124,8 +145,8 @@ mod tests {
         assert_eq!(
             routes_from_property(&value, &key, &allowed),
             vec![
-                (good.clone(), RouteOutcome::Signalled),
-                (other.clone(), RouteOutcome::NotAllowed),
+                (good, RouteOutcome::Signalled),
+                (other, RouteOutcome::NotAllowed),
                 (forged, RouteOutcome::BadTag),
             ]
         );
@@ -151,7 +172,7 @@ mod tests {
                 .all(|(_, outcome)| *outcome == RouteOutcome::BadTag)
         );
         for empty in [json!(null), json!({}), json!({"routes": {}}), json!([])] {
-            assert!(routes_from_property(&empty, &key, &allowed).is_empty());
+            assert_eq!(routes_from_property(&empty, &key, &allowed), vec![]);
         }
     }
 

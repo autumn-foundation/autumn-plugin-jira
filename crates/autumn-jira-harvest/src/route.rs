@@ -50,6 +50,12 @@ impl RouteKey {
     /// `JiraError::InvalidInput` when the secret has fewer than
     /// [`MIN_ROUTE_KEY_BYTES`] bytes. The error does not hold the secret.
     pub fn new(secret: Secret) -> Result<Self, JiraError> {
+        if secret.expose().len() < MIN_ROUTE_KEY_BYTES {
+            return Err(JiraError::InvalidInput {
+                what: "route key",
+                reason: format!("must have {MIN_ROUTE_KEY_BYTES} bytes or more"),
+            });
+        }
         Ok(Self(secret))
     }
 
@@ -114,8 +120,9 @@ fn decode_tag(tag: &str) -> Option<[u8; TAG_LEN / 2]> {
         return None;
     }
     let mut out = [0_u8; TAG_LEN / 2];
-    for (slot, pair) in out.iter_mut().zip(bytes.chunks_exact(2)) {
-        *slot = (hex_value(pair[0]) << 4) | hex_value(pair[1]);
+    let (pairs, _) = bytes.as_chunks::<2>();
+    for (slot, [high, low]) in out.iter_mut().zip(pairs) {
+        *slot = (hex_value(*high) << 4) | hex_value(*low);
     }
     Some(out)
 }
@@ -148,6 +155,19 @@ impl SignalRoute {
     /// `JiraError::InvalidInput` when a part breaks the rule. The error does
     /// not hold the value.
     pub fn new(workflow_name: &str, workflow_id: &str) -> Result<Self, JiraError> {
+        let rule = format!("must be 1 to {MAX_ROUTE_PART} chars of [A-Za-z0-9._:-]");
+        if !is_route_part(workflow_name) {
+            return Err(JiraError::InvalidInput {
+                what: "route workflow name",
+                reason: rule,
+            });
+        }
+        if !is_route_part(workflow_id) {
+            return Err(JiraError::InvalidInput {
+                what: "route workflow id",
+                reason: rule,
+            });
+        }
         Ok(Self {
             workflow_name: workflow_name.to_owned(),
             workflow_id: workflow_id.to_owned(),
@@ -157,8 +177,10 @@ impl SignalRoute {
     /// HMAC-SHA256(key, "v1\n" + name + "\n" + id), first 32 lower hex chars.
     #[must_use]
     pub fn tag(&self, key: &RouteKey) -> String {
-        let _ = (key.mac(self), is_route_part(""), encode_hex(&[]));
-        String::new()
+        key.mac(self).map_or_else(String::new, |mac| {
+            let full = mac.finalize().into_bytes();
+            encode_hex(&full[..TAG_LEN / 2])
+        })
     }
 
     /// Returns `true` when `tag` is the tag of this route. The check runs in
@@ -166,15 +188,16 @@ impl SignalRoute {
     /// lower hex chars fails before the MAC.
     #[must_use]
     pub fn verify(&self, key: &RouteKey, tag: &str) -> bool {
-        let _ = (key, tag, decode_tag(tag));
-        false
+        let (Some(expected), Some(mac)) = (decode_tag(tag), key.mac(self)) else {
+            return false;
+        };
+        mac.verify_truncated_left(&expected).is_ok()
     }
 
     /// Returns the property entry of this route: `{"wf", "id", "tag"}`.
     #[must_use]
     pub fn property_entry(&self, key: &RouteKey) -> Value {
-        let _ = key;
-        json!({})
+        json!({"wf": self.workflow_name, "id": self.workflow_id, "tag": self.tag(key)})
     }
 }
 
@@ -237,12 +260,9 @@ mod tests {
     fn tag_is_hmac_of_the_versioned_input() {
         let route = SignalRoute::new("incident_flow", "A-1").unwrap();
         let tag = route.tag(&key());
-        // HMAC-SHA256("kkkk...k" (32), "v1\nincident_flow\nA-1"), checked
-        // with: printf 'v1\nincident_flow\nA-1' | openssl dgst -sha256 -hmac kkk...k
-        let mut mac = HmacSha256::new_from_slice("k".repeat(32).as_bytes()).unwrap();
-        mac.update(b"v1\nincident_flow\nA-1");
-        let full = mac.finalize().into_bytes();
-        assert_eq!(tag, encode_hex(&full[..16]));
+        // The first 32 hex chars of HMAC-SHA256 with the key "k" x 32, from:
+        // printf 'v1\nincident_flow\nA-1' | openssl dgst -sha256 -hmac kkk...k
+        assert_eq!(tag, "df60e928addb470f158ced8d9f527e82");
         assert_eq!(tag.len(), TAG_LEN);
         assert!(tag.bytes().all(is_lower_hex));
         assert!(route.verify(&key(), &tag));
