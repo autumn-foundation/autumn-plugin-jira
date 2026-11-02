@@ -21,7 +21,7 @@ use tokio::sync::Semaphore;
 use crate::config::{JiraConfig, JiraHttpConfig, JiraMode, JiraWebhookConfig};
 use crate::error::PluginError;
 use crate::health::JiraHealth;
-use crate::runtime::{Cell, Counters, Handler, HandlerFuture, JiraRuntime, Runtime};
+use crate::runtime::{Cell, Counters, Handler, HandlerFuture, JiraRuntime, Runtime, slot_count};
 use crate::secrets::Secrets;
 use crate::service::{JiraService, Tenants};
 use crate::webhook;
@@ -382,9 +382,10 @@ impl JiraPlugin {
             handlers = self.handlers.len(),
             "jira started"
         );
-        let slots = Arc::new(Semaphore::new(
-            usize::try_from(config.webhook.max_handler_tasks).unwrap_or(Semaphore::MAX_PERMITS),
-        ));
+        let slots = Arc::new(Semaphore::new(slot_count(
+            config.webhook.max_handler_tasks,
+            Semaphore::MAX_PERMITS,
+        )));
         Ok(Arc::new(Runtime {
             service,
             health_client,
