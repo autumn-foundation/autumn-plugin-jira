@@ -514,3 +514,26 @@ async fn an_empty_transitions_list_names_no_transition() {
     assert!(sent.iter().all(|r| r.method == "GET"), "no POST");
     assert!(sent[0].url.contains("fields=status"), "{}", sent[0].url);
 }
+
+/// A reconnect can give the same connection another Atlassian user. The
+/// marker lookup compares the comment author with the account id. So
+/// `refresh_site` drops the cached account id, and the next call reads
+/// `GET /myself` again.
+#[tokio::test(start_paused = true)]
+async fn refresh_site_reads_the_account_id_again() {
+    let transport = MemoryTransport::new();
+    for account in ["acct-old", "acct-new"] {
+        transport.reply(
+            "GET",
+            &format!("{BASE}/myself"),
+            HttpResponse::json(200, &json!({"accountId": account})),
+        );
+    }
+    let client = memory_client(&transport);
+    assert_eq!(client.account_id().await.unwrap().as_str(), "acct-old");
+    assert_eq!(client.account_id().await.unwrap().as_str(), "acct-old");
+    assert_eq!(transport.requests().len(), 1, "the second call uses the cache");
+    client.refresh_site().await.unwrap();
+    assert_eq!(client.account_id().await.unwrap().as_str(), "acct-new");
+    assert_eq!(transport.requests().len(), 2);
+}
