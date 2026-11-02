@@ -113,9 +113,9 @@ row.
 Each row is one change from design v2. The section column names the part
 of this file that now shows the change. The waves of section 17.1 found
 the changes V1 to V53. Review round 1 found V54 to V96, and each of these
-rows names its finding id. Review round 2 found V97
-and the later rows. The wave and fixer reports give the full
-text.
+rows names its finding id. Review round 2 found V97 to V116. Review
+round 3, the last round, found V117 and the later rows. The wave and fixer
+reports give the full text.
 
 | # | Change | Reason | Section |
 |---|---|---|---|

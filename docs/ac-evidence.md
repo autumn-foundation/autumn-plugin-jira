@@ -6,7 +6,7 @@ section 16, and each example criterion (EX1 to EX8) of
 also records the spikes, the Verus result, the TDD steps, the review
 rounds and the mutation tests.
 
-Status: final, after review round 2. Wave 4 (WP7 ecosystem, WP8a guards
+Status: final, after review round 3, the last round. Wave 4 (WP7 ecosystem, WP8a guards
 and README) is done. Each row below names its tests. The mutation table
 M1 to M10 and the cargo-mutants run on `policy.rs` are done: see
 "Mutation tests".
@@ -27,11 +27,11 @@ a column with "test" in its header is a `fn` in the named file or module.
 |---|---|
 | ACs done | 40 of 40 done. |
 | Examples | EX1 to EX8 done. |
-| Tests | After review round 2: 517 pass, 0 fail, 18 ignored in the main workspace (`cargo test --workspace --all-features --locked --no-fail-fast`, with Postgres, 41 test binaries and doc-test runs). The ignored ones are the five live cases in `core/t/live.rs`, which never run in CI, the boot child `boot_child_server`, which runs only as a child process, and 12 doc snippets marked `ignore`. The ecosystem workspace: 19 pass, 0 fail, 1 ignored (`cargo test --locked --manifest-path examples/ecosystem/Cargo.toml`, with Postgres). |
-| Line coverage (`src/`) | After review round 2: `autumn-jira` 98.04%, `autumn-jira-fake` 98.98%, `autumn-plugin-jira` 95.77%, `autumn-jira-harvest` 96.56%, `autumn-jira-camel` 97.27% (`cargo llvm-cov --workspace --all-features --locked`, with Postgres, then `scripts/coverage-gate.py cov.json 85`; tests and examples left out). The CI gate is 85% for each crate. |
+| Tests | After review round 3: 530 pass, 0 fail, 18 ignored in the main workspace (`cargo test --workspace --all-features --locked --no-fail-fast`, with Postgres, 41 test binaries and doc-test runs). The ignored ones are the five live cases in `core/t/live.rs`, which never run in CI, the boot child `boot_child_server`, which runs only as a child process, and 12 doc snippets marked `ignore`. The ecosystem workspace: 20 pass, 0 fail, 1 ignored (`cargo test --locked --manifest-path examples/ecosystem/Cargo.toml`, with Postgres). |
+| Line coverage (`src/`) | After review round 3: `autumn-jira` 98.25%, `autumn-jira-fake` 98.98%, `autumn-plugin-jira` 95.77%, `autumn-jira-harvest` 96.60%, `autumn-jira-camel` 97.30% (`cargo llvm-cov --workspace --all-features --locked`, with Postgres, then `scripts/coverage-gate.py cov.json 85`; tests and examples left out). The CI gate is 85% for each crate. |
 | Verus | `verus/policy.rs`: 31 verified, 0 errors (CI run 41422883903, job `verus` 125202423323, head `8c278e7`). |
 | MSRV | 1.89: `cargo +1.89.0 check --workspace --all-targets --all-features --locked` passed in CI (run 41422883903, job `msrv` 125202423505, head `8c278e7`). Verified in CI only (plan R4). |
-| CI | Run 41422883903 on head `8c278e7`: all 7 jobs pass. The jobs are `lint`, `test` (with coverage), `examples`, `msrv`, `verus`, `deps` and `example-ecosystem` (job 125202423939). This record has no CI run of a later head. After review round 2, the local `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` and both test commands pass. |
+| CI | Run 41422883903 on head `8c278e7`: all 7 jobs pass. The jobs are `lint`, `test` (with coverage), `examples`, `msrv`, `verus`, `deps` and `example-ecosystem` (job 125202423939). This record has no CI run of a later head. After review round 3, the local `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` and both test commands pass. |
 
 ## Acceptance criteria: library
 
@@ -401,6 +401,54 @@ Notes on the open items of round 2:
   refuses a delivery of another site and counts it in `other_site`.
 - R2E-tests-guards-7 and R2E-tests-guards-8 were plausible. The fixes
   close the gaps in the guards, also where the old gap failed closed.
+
+### Round 3
+
+Round 3 ran over the commits `f3cd922..HEAD` of round 2, over 3 angles:
+
+| Angle | Topic |
+|---|---|
+| R3 write-safety | write safety |
+| R3 webhooks-site-auth | webhooks, the site and auth |
+| R3 tests-docs-guards | tests, docs and guards |
+
+Adversarial verifiers checked each finding. They refuted 0 of 8 and
+confirmed 8. One is high, four are medium and three are low. One fixer
+took all 8 findings. Each code fix has a RED commit with the failing test
+and a GREEN commit. R3-tests-docs-guards-3 is a gap in the tests only:
+its new tests pass on the code, and a mutation run shows that they catch
+the two changes of the finding. Plan section 2.1 (V117 to V122) gives the
+design change of each fix, with its finding id.
+
+This is the last review round. The review plan gives 2 to 3 rounds, so no
+round 4 follows. No finding of round 3 is open: 8 fixed, 0 partially
+fixed, 0 skipped.
+
+| Id | Severity | Verdict | Finding | Status | Tests | Commits |
+|---|---|---|---|---|---|---|
+| R3-write-safety-1 | high | confirmed | A failed pre-lookup of an opt-in comment resend gave `NotSent`, so the next attempt sent a second comment with no lookup. | fixed | `harvest/t/activities.rs::{an_opt_in_resend_after_a_failed_pre_lookup_looks_up_first, a_failed_pre_lookup_is_not_sent, add_comment_on_an_issue_with_301_comments_works_on_attempt_1}` | 56ee53a (RED), f47b906 (GREEN), 53183e0 (DOCS) |
+| R3-write-safety-2 | medium | confirmed | A read failure before the transition POST gave `sent = true`, so the next attempt only resumed and failed with `jira.outcome_unknown`. | fixed | `harvest/t/activities.rs::{a_failed_read_before_the_transition_is_not_sent, a_transition_after_a_maybe_sent_attempt_sends_nothing}` | 56ee53a (RED), f47b906 (GREEN) |
+| R3-webhooks-site-auth-1 | medium | confirmed | A failed cloud id check cleared the check time, so each 401 or 404 made one more `accessible-resources` call. | fixed | `core/t/san_mateo.rs::{a_failed_check_waits_for_the_interval, a_reconnect_after_confirmation_is_seen}` | 99f64b3 (RED), 4ba063e (GREEN), 53183e0 (DOCS) |
+| R3-webhooks-site-auth-2 | low | confirmed | `discover_cloud_id` kept the cached prefix, so the requests went to the old cloud id for up to 300 s. | fixed | `core/t/san_mateo.rs::discover_cloud_id_resets_the_cached_prefix` | 99f64b3 (RED), 4ba063e (GREEN) |
+| R3-tests-docs-guards-1 | medium | confirmed | The runtime guard did not read the crate examples, and the `harvest_workflow` Postgres tests ran on their own runtimes. | fixed | `core/t/guards.rs::{postgres_tests_share_one_runtime, postgres_tests_share_one_runtime_sees_a_test_runtime}`; ex: `harvest_workflow::{lifecycle_resolves_by_webhook, watch_resolves_by_poll, a_400_fails_with_one_post}` | ba615c9 (RED), fd7c3ba (GREEN) |
+| R3-tests-docs-guards-2 | medium | confirmed | The escape scan read `pub assume_specification` as a longer name and passed it. | fixed | u: `policy::the_spec_has_no_proof_escape` | 9819873 (RED), db1ce60 (GREEN) |
+| R3-tests-docs-guards-3 | low | confirmed | No test drove the wait loop for the last read at the deadline or for a rate-limited poll. | fixed | `harvest/t/wait.rs::{a_rate_limited_poll_makes_one_attempt, a_poll_that_ends_at_the_deadline_is_the_last_read}` | a218e99 (TEST: the code was right, and the tests passed at once) |
+| R3-tests-docs-guards-4 | low | confirmed | A `cargo update` after a shell keyword or a wrapper escaped the one-version check. | fixed | `core/t/guards.rs::{weekly_updates_get_the_one_version_check_sees_a_gap, weekly_updates_get_the_one_version_check}` | 4e1d14b (RED), 9a63956 (GREEN), 8d857e1 (DOCS) |
+
+Notes on round 3:
+
+- R3-write-safety-1: the fix keeps `add_comment_idempotent_first` for
+  attempt 1 and for a `NotSent` attempt (R2A-write-safety-3). The opt-in
+  resend now never ends with `sent = false`, so a `NotSent` comes only
+  after attempt 1 or another `NotSent`, and no earlier attempt can have
+  sent the comment.
+- R3-tests-docs-guards-3: the mutation run took place in a `git clone` in
+  the scratchpad with its own target dir, and the clone was deleted after
+  it. With `polled_last = true` set to `false` in `wait_loop`, only
+  `a_poll_that_ends_at_the_deadline_is_the_last_read` fails. With
+  `Some(wait_read_retry())` set to `None` in `poll`, only
+  `a_rate_limited_poll_makes_one_attempt` fails. Each run gave 24 pass and
+  1 fail in `harvest/t/wait.rs`.
 
 ## Mutation tests
 
