@@ -2696,6 +2696,19 @@ fn weekly_updates_get_the_one_version_check_sees_a_gap() {
                   \x20     - run: cargo update --manifest-path=\"$MANIFEST\"\n";
     let eco_cd = "jobs:\n  eco:\n    steps:\n\
                   \x20     - run: cd examples/ecosystem && cargo update\n";
+    // R3-tests-docs-guards-4: an update after a shell keyword or a wrapper.
+    let wrapped: Vec<String> = [
+        "if [ \"$WEEKLY\" = 1 ]; then cargo update; fi",
+        "for m in a; do cargo update; done",
+        "if false; then true; else cargo update; fi",
+        "env CARGO_TERM_COLOR=never cargo update",
+        "time cargo update",
+        "CARGO_TERM_COLOR=never cargo update",
+        "! cargo update",
+    ]
+    .iter()
+    .map(|line| format!("jobs:\n  w:\n    steps:\n      - run: {line}\n"))
+    .collect();
     for bad in [
         weekly.to_owned(),
         format!(
@@ -2707,8 +2720,15 @@ fn weekly_updates_get_the_one_version_check_sees_a_gap() {
         format!("{eco_eq}      - run: bash scripts/one-version.sh Cargo.toml\n"),
         eco_cd.to_owned(),
         format!("{eco_cd}      - run: bash scripts/one-version.sh Cargo.toml\n"),
-    ] {
+    ]
+    .into_iter()
+    .chain(wrapped.iter().cloned())
+    {
         assert_eq!(check::update_violations(&bad).len(), 1, "{bad}");
+    }
+    for line in &wrapped {
+        let good = format!("{line}      - run: bash scripts/one-version.sh Cargo.toml\n");
+        assert_eq!(check::update_violations(&good), NONE, "{good}");
     }
     for good in [
         format!("{weekly}      - run: bash scripts/one-version.sh Cargo.toml\n"),
