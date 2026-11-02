@@ -669,7 +669,108 @@ mod tests {
             assert!(!parsed.event.has_comment_marker());
             assert_eq!(parsed.event.status_change(), None);
         }
-        let marked = parse(&comment_payload("comment_created", "done\nautumn-ref: abc"));
+        let marked = parse(&comment_payload(
+            "comment_created",
+            &format!("done\n{FULL_MARKER}"),
+        ));
+        assert!(marked.event.has_comment_marker());
+    }
+
+    /// A full comment marker: `autumn-ref: ` and 26 lower base32 chars.
+    const FULL_MARKER: &str = "autumn-ref: 01jabcdefghijklmnopqrstuvw";
+
+    #[test]
+    fn v2_string_comment_body_is_read() {
+        // Real deliveries use the REST v2 shape: the body is wiki markup text.
+        let mut payload = comment_payload("comment_created", "x");
+        payload["comment"]["body"] = json!(format!("Disk full\n\n{FULL_MARKER}"));
+        let parsed = parse(&payload);
+        let JiraEvent::CommentCreated(e) = &parsed.event else {
+            panic!("{:?}", parsed.event);
+        };
+        let text = e.comment.body.as_ref().unwrap().to_plain_text();
+        assert!(text.starts_with("Disk full"), "{text}");
+        assert!(text.ends_with(FULL_MARKER), "{text}");
+        assert!(parsed.event.has_comment_marker());
+        // An ADF body still works.
+        let adf = parse(&comment_payload(
+            "comment_created",
+            &format!("done\n{FULL_MARKER}"),
+        ));
+        assert!(adf.event.has_comment_marker());
+    }
+
+    #[test]
+    fn issue_commented_update_keeps_the_comment() {
+        let mut payload = issue_payload("jira:issue_updated");
+        payload["issue_event_type_name"] = json!("issue_commented");
+        payload["changelog"] = json!(null);
+        payload["comment"] = json!({
+            "id": "10101",
+            "author": {"accountId": "712020:bot"},
+            "body": format!("Fixed\n\n{FULL_MARKER}"),
+        });
+        let parsed = parse(&payload);
+        assert!(parsed.event.has_comment_marker(), "{:?}", parsed.event);
+        let mut plain = payload.clone();
+        plain["comment"]["body"] = json!("a person writes");
+        assert!(!parse(&plain).event.has_comment_marker());
+    }
+
+    #[test]
+    fn comment_actor_follows_the_event() {
+        let bot = json!({"accountId": "712020:bot"});
+        let ann = json!({"accountId": "557058:ann"});
+        // A person edits a bot comment: the actor is the person.
+        let mut updated = comment_payload("comment_updated", "x");
+        updated["comment"]["author"] = bot.clone();
+        updated["comment"]["updateAuthor"] = ann.clone();
+        assert_eq!(
+            parse(&updated).actor.as_ref().map(AccountId::as_str),
+            Some("557058:ann")
+        );
+        // A bot edits a person comment: the actor is the bot.
+        let mut edited = comment_payload("comment_updated", "x");
+        edited["comment"]["author"] = ann.clone();
+        edited["comment"]["updateAuthor"] = bot.clone();
+        assert_eq!(
+            parse(&edited).actor.as_ref().map(AccountId::as_str),
+            Some("712020:bot")
+        );
+        // A delete does not tell who deleted: the author is not the actor.
+        let mut deleted = comment_payload("comment_deleted", "x");
+        deleted["comment"]["author"] = bot.clone();
+        assert_eq!(parse(&deleted).actor, None);
+        // A top-level `user` always wins.
+        deleted["user"] = ann;
+        assert_eq!(
+            parse(&deleted).actor.as_ref().map(AccountId::as_str),
+            Some("557058:ann")
+        );
+    }
+
+    #[test]
+    fn only_a_full_last_line_marker_counts() {
+        for text in [
+            // A person types the prefix.
+            "see autumn-ref: abc".to_owned(),
+            "autumn-ref: abc".to_owned(),
+            // A person quotes a bot comment, then replies below it.
+            format!("{FULL_MARKER}\nI do not agree"),
+            // Upper case is not the marker alphabet.
+            FULL_MARKER.to_uppercase(),
+            // 25 chars.
+            FULL_MARKER[..FULL_MARKER.len() - 1].to_owned(),
+            // 27 chars.
+            format!("{FULL_MARKER}a"),
+        ] {
+            let parsed = parse(&comment_payload("comment_created", &text));
+            assert!(!parsed.event.has_comment_marker(), "{text:?}");
+        }
+        let marked = parse(&comment_payload(
+            "comment_created",
+            &format!("done\n{FULL_MARKER}"),
+        ));
         assert!(marked.event.has_comment_marker());
     }
 

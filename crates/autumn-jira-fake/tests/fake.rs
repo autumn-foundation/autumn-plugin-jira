@@ -2157,3 +2157,54 @@ fn no_secret_in_debug_or_logs() {
         assert!(!text.contains(secret), "{secret} leaks");
     }
 }
+
+/// Real deliveries use the REST v2 shape (the Jira webhook page): text
+/// bodies and `/rest/api/2/` links. A comment also gives an
+/// `issue_commented` update.
+#[test]
+fn deliveries_use_the_v2_shape() {
+    let fake = FakeJira::new().with_webhook_secret("v2");
+    let (key, _) = create(&fake, "OPS", "v2 shape", &[]);
+    let path = format!("/rest/api/3/issue/{key}");
+    let adf = json!({"type": "doc", "version": 1, "content": [
+        {"type": "paragraph", "content": [{"type": "text", "text": "the text"}]}]});
+    assert_eq!(
+        api(
+            &fake,
+            "PUT",
+            &path,
+            Some(json!({"fields": {"description": adf}}))
+        )
+        .0,
+        204
+    );
+    drop(fake.take_deliveries());
+    fake.human_comment(&key, "looks good\nsecond line", "ann")
+        .unwrap();
+    let bodies: Vec<Value> = fake
+        .take_deliveries()
+        .iter()
+        .map(|d| serde_json::from_slice(&d.body).unwrap())
+        .collect();
+    let events: Vec<&str> = bodies
+        .iter()
+        .map(|b| b["webhookEvent"].as_str().unwrap())
+        .collect();
+    assert_eq!(events, ["jira:issue_updated", "comment_created"]);
+    let update = &bodies[0];
+    assert_eq!(update["issue_event_type_name"], "issue_commented");
+    assert_eq!(update["user"]["accountId"], ANN);
+    assert_eq!(update["comment"]["author"]["accountId"], ANN);
+    assert_eq!(update["comment"]["body"], "looks good\n\nsecond line");
+    assert_eq!(update["issue"]["fields"]["description"], "the text");
+    let created = &bodies[1];
+    assert_eq!(created["comment"]["body"], "looks good\n\nsecond line");
+    for body in &bodies {
+        let text = body.to_string();
+        assert!(!text.contains("/rest/api/3/"), "{text}");
+        assert!(text.contains("/rest/api/2/issue/"), "{text}");
+    }
+    // The REST v3 API still gives ADF.
+    let (_, page) = api(&fake, "GET", &format!("{path}/comment"), None);
+    assert_eq!(page["comments"][0]["body"]["type"], "doc");
+}
