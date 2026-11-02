@@ -241,3 +241,144 @@ fn fields(op: Operation, object: &Map<String, Value>) -> Result<Vec<(FieldId, Va
         Some(_) => Err(invalid(op, "fields must be a JSON object")),
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic, reason = "tests")]
+mod tests {
+    use camel_api::Value;
+    use serde_json::json;
+
+    use super::*;
+
+    const OP: Operation = Operation::CreateIssue;
+
+    async fn raw(body: Body) -> Result<Raw, CamelError> {
+        read(body, OP, 64).await
+    }
+
+    fn rule(err: &CamelError) -> String {
+        match err {
+            CamelError::ValidationError(m) => m.clone(),
+            other => panic!("expected ValidationError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn read_takes_json_text_and_bytes() {
+        assert_eq!(raw(Body::Empty).await.unwrap(), Raw::Empty);
+        assert_eq!(raw(Body::Json(Value::Null)).await.unwrap(), Raw::Empty);
+        assert_eq!(raw(Body::Text("null".into())).await.unwrap(), Raw::Empty);
+        assert_eq!(
+            raw(Body::Bytes(Vec::new().into())).await.unwrap(),
+            Raw::Empty
+        );
+        assert_eq!(
+            raw(Body::Text(r#"{"a":1}"#.into())).await.unwrap(),
+            Raw::Json(json!({"a": 1}))
+        );
+        assert_eq!(
+            raw(Body::Bytes(b"\"x\"".to_vec().into())).await.unwrap(),
+            Raw::Json(json!("x"))
+        );
+        assert_eq!(
+            raw(Body::Text("plain words".into())).await.unwrap(),
+            Raw::Text("plain words".into())
+        );
+        let err = raw(Body::Bytes(vec![0xff, 0xfe].into())).await.unwrap_err();
+        assert!(rule(&err).contains("UTF-8"), "{err}");
+        // The limit applies to each body kind.
+        let big = "x".repeat(65);
+        for body in [
+            Body::Json(json!(big)),
+            Body::Text(big.clone()),
+            Body::Bytes(big.clone().into_bytes().into()),
+        ] {
+            let err = raw(body).await.unwrap_err();
+            assert!(
+                matches!(err, CamelError::StreamLimitExceeded(64)),
+                "{err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn create_reads_each_key() {
+        let body = create(Raw::Json(json!({
+            "summary": "S",
+            "description": {"type": "doc", "version": 1, "content": []},
+            "labels": ["a", "b"],
+            "fields": {"customfield_10010": 3},
+        })))
+        .unwrap();
+        assert_eq!(body.summary, "S");
+        assert!(body.description.is_some());
+        assert_eq!(body.labels, ["a", "b"]);
+        assert_eq!(body.fields.len(), 1);
+        let body = create(Raw::Json(json!({"summary": "S", "description": null}))).unwrap();
+        assert_eq!(body.description, None);
+        for (bad, needle) in [
+            (json!({}), "needs a summary"),
+            (json!({"summary": " "}), "summary"),
+            (json!({"summary": "S", "description": {"type": "x"}}), "ADF"),
+            (json!({"summary": "S", "labels": [1]}), "labels"),
+            (json!({"summary": "S", "fields": []}), "fields"),
+            (json!({"summary": "S", "fields": {"Bad Id": 1}}), "field id"),
+        ] {
+            let err = create(Raw::Json(bad.clone())).unwrap_err();
+            assert!(rule(&err).contains(needle), "{bad}: {err}");
+        }
+        assert!(create(Raw::Empty).is_err());
+    }
+
+    #[test]
+    fn edit_needs_one_change() {
+        let edit = edit(Raw::Json(json!({"removeLabels": ["a"]}))).unwrap();
+        assert!(!edit.is_empty());
+        let err = super::edit(Raw::Json(json!({"setSummary": " "}))).unwrap_err();
+        assert!(rule(&err).contains("setSummary"), "{err}");
+        let err = super::edit(Raw::Text("x".into())).unwrap_err();
+        assert!(rule(&err).contains("editIssue"), "{err}");
+    }
+
+    #[test]
+    fn transition_takes_nothing_or_fields() {
+        assert_eq!(transition(Raw::Empty).unwrap(), TransitionFields::default());
+        assert_eq!(
+            transition(Raw::Json(json!({"fields": null}))).unwrap(),
+            TransitionFields::default()
+        );
+        let fields = transition(Raw::Json(
+            json!({"fields": {"resolution": {"name": "Done"}}}),
+        ))
+        .unwrap();
+        assert_eq!(
+            fields,
+            TransitionFields::default().field("resolution", json!({"name": "Done"}))
+        );
+        for bad in [json!({"fields": 1}), json!({"update": {}}), json!([1])] {
+            let err = transition(Raw::Json(bad.clone())).unwrap_err();
+            assert!(rule(&err).contains("transitionToStatus"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn comment_takes_text_or_a_string() {
+        assert_eq!(comment(Raw::Text("a".into())).unwrap(), Adf::text("a"));
+        assert_eq!(comment(Raw::Json(json!("b"))).unwrap(), Adf::text("b"));
+        assert_eq!(
+            comment(Raw::Json(json!({"text": "c"}))).unwrap(),
+            Adf::text("c")
+        );
+        for (bad, needle) in [
+            (Raw::Json(json!({})), "needs a text"),
+            (Raw::Json(json!({"text": 1})), "must be a string"),
+            (Raw::Json(json!({"body": "x"})), "unknown key"),
+            (Raw::Json(json!(1)), "or a string"),
+            (Raw::Empty, "or a string"),
+            (Raw::Text(" ".into()), "must not be empty"),
+        ] {
+            let err = comment(bad).unwrap_err();
+            assert!(rule(&err).contains(needle), "{needle}: {err}");
+        }
+    }
+}

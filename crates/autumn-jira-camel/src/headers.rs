@@ -245,3 +245,97 @@ fn overridden<T: Clone + PartialEq>(
     }
 }
 
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic, reason = "tests")]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn options(uri: &str) -> EndpointOptions {
+        EndpointOptions::parse(uri, &["default"]).unwrap()
+    }
+
+    fn message(headers: &[(&str, Value)]) -> Message {
+        let mut message = Message::default();
+        for (name, value) in headers {
+            message.set_header(*name, value.clone());
+        }
+        message
+    }
+
+    #[test]
+    fn marked_reads_the_key_and_the_attempt() {
+        let o = options("jira:createIssue?project=OPS&issueType=Task");
+        assert_eq!(marked(&message(&[]), &o).unwrap(), None);
+        // A null header counts as no header.
+        assert_eq!(
+            marked(&message(&[(HEADER_HARVEST_KEY, json!(null))]), &o).unwrap(),
+            None
+        );
+        let first = marked(&message(&[(HEADER_HARVEST_KEY, json!("k-1"))]), &o)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.previous, Previous::First);
+        // The case of the name does not matter.
+        let again = marked(
+            &message(&[
+                ("harvestidempotencykey", json!("k-1")),
+                ("harvestactivityattempt", json!(4)),
+            ]),
+            &o,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(again.key, first.key, "the key is stable across attempts");
+        assert_eq!(again.previous, Previous::Unknown);
+        let one = marked(
+            &message(&[
+                (HEADER_HARVEST_KEY, json!("k-1")),
+                (HEADER_HARVEST_ATTEMPT, json!("1")),
+            ]),
+            &o,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(one.previous, Previous::First);
+        for bad in [json!(0), json!(1.5), json!("two"), json!([2])] {
+            let m = message(&[
+                (HEADER_HARVEST_KEY, json!("k-1")),
+                (HEADER_HARVEST_ATTEMPT, bad.clone()),
+            ]);
+            let err = marked(&m, &o).unwrap_err();
+            assert!(
+                err.to_string().contains(HEADER_HARVEST_ATTEMPT),
+                "{bad}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_header_equal_to_the_option_passes() {
+        let o = options("jira:getIssue?issueKey=10001");
+        let m = message(&[(HEADER_ISSUE_KEY, json!(10001))]);
+        assert_eq!(issue(&m, &o).unwrap().to_string(), "10001");
+        let m = message(&[(HEADER_ISSUE_KEY, json!("10002"))]);
+        assert!(
+            issue(&m, &o)
+                .unwrap_err()
+                .to_string()
+                .contains("allowHeaderOverrides")
+        );
+        // A header that does not parse is also not allowed: no value leaks.
+        let m = message(&[(HEADER_ISSUE_KEY, json!("../secret"))]);
+        let err = issue(&m, &o).unwrap_err().to_string();
+        assert!(
+            err.contains("allowHeaderOverrides") && !err.contains("secret"),
+            "{err}"
+        );
+        let o = options("jira:transitionToStatus?issueKey=OPS-1&status=category:done");
+        let m = message(&[(HEADER_STATUS, json!("category:done"))]);
+        assert_eq!(status(&m, &o).unwrap(), StatusTarget::done());
+        let o = options("jira:search?jql=labels%20%3D%20a");
+        let m = message(&[(HEADER_JQL, json!("labels = a"))]);
+        assert_eq!(search_jql(&m, &o).unwrap().as_str(), "labels = a");
+    }
+}
