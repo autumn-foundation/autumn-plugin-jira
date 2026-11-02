@@ -1,7 +1,6 @@
-//! The outside world of the example: one `FakeJira` (Jira Cloud, the
-//! Atlassian OAuth server and the cloud id discovery), a `MemoryTransport`
-//! for our team chat API, and the one `SanMateo` that holds the credentials
-//! of both.
+//! The outside world of the example. One `FakeJira` is Jira Cloud, the
+//! Atlassian OAuth server and the cloud id discovery. A `MemoryTransport`
+//! is the team chat API. One `SanMateo` holds the credentials of both.
 //!
 //! san-mateo has one transport. `FakeJira` serves its own hosts and sends
 //! every other host to its fallback, the chat fake. So the example needs no
@@ -31,7 +30,7 @@ pub const ENV: &str = "ops";
 pub const JIRA_INTEGRATION: &str = "jira";
 /// The connection of the tenant `acme`.
 pub const JIRA_CONNECTION: &str = "acme";
-/// The integration and the provider of our team chat API.
+/// The integration and the provider of the team chat API.
 pub const CHAT_INTEGRATION: &str = "team-chat";
 /// The connection of the chat API.
 pub const CHAT_CONNECTION: &str = "team";

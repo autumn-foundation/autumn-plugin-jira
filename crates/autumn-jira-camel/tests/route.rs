@@ -991,8 +991,8 @@ async fn override_header_with_flag_works() {
         let err = send(&camel, "direct:search", message).await.unwrap_err();
         assert!(validation(&err).contains(HEADER_JQL), "{bad}: {err}");
     }
-    // With the project option, a JiraJql header is a conflict: the raw JQL
-    // would drop the project filter.
+    // With the project option, a JiraJql header is a conflict. The raw JQL
+    // has no project clause, so it drops the project filter.
     let message = json_with(json!(null), &[(HEADER_JQL, json!("labels = alert"))]);
     let err = send(&camel, "direct:search-project", message)
         .await

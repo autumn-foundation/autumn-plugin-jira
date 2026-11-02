@@ -214,9 +214,9 @@ pub(crate) fn status(
 /// Reads the query of `search`: the `project` option, or the `JiraJql`
 /// header or the `jql` option.
 ///
-/// A `JiraJql` header next to the `project` option fails, also with
-/// `allowHeaderOverrides`: the JQL is raw, so the component does not add a
-/// project clause to it, and the header would drop the project filter.
+/// A `JiraJql` header next to the `project` option always fails, also with
+/// `allowHeaderOverrides`. The header JQL is raw, and the component adds no
+/// project clause to it. So the header drops the project filter.
 ///
 /// # Errors
 ///

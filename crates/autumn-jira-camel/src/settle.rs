@@ -65,7 +65,7 @@ impl Future for Settle {
             });
         if spawned.is_err() {
             // No thread, so no wait. The lookup then comes early and can
-            // miss the issue. That fails closed: the write is not sent.
+            // miss the issue. That fails closed: the producer does not send the write.
             tracing::warn!("jira: no thread for the settle wait; the lookup does not wait");
             return Poll::Ready(());
         }
