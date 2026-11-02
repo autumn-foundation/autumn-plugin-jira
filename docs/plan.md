@@ -237,6 +237,8 @@ text.
 | V116 | A camel `addComment` on harvest attempt 1 with no camel redelivery calls `add_comment_idempotent_first`, as `jira_add_comment` does (V104). With no `HarvestActivityAttempt` header, on a camel redelivery or on an attempt above 1, it keeps the lookup before the send. | A busy issue got no comment from a camel route on attempt 1 (R2A-write-safety-3, the camel half). | 10, ADR 0003 |
 | V117 | An opt-in resend of `jira_add_comment` after a `MaybeSent` or `Unknown` attempt never ends with `sent = false`. A retryable failure that tells "not sent" there becomes `jira.outcome_pending`, so the next attempt looks up first again. Only a `NotSent` that follows attempt 1 or another `NotSent` calls `add_comment_idempotent_first`. | A pre-lookup 503 of the opt-in resend gave `NotSent`, and the next attempt sent a second comment with no lookup (R3-write-safety-1). | 7.2, 9.2 |
 | V118 | `jira_transition_to_status` maps the errors of `transition_to_status_with` with `marked_write_failure`: a status read or a transition list read that fails gives `sent = false`. After a "maybe sent" POST, the client turns each stop into `OutcomeUnknown`, so a read error comes before any POST. | A GetIssue 503 on attempt 1 gave `sent = true`, so attempt 2 only resumed and failed with `jira.outcome_unknown` (R3-write-safety-2). | 7.2, 9.2 |
+| V119 | A failed cloud id check of `SanMateoBackend` keeps its start time. The next check comes after `CLOUD_ID_RECHECK_INTERVAL`, also while the failure lasts. | A site URL that no site had, or a 429 of `accessible-resources`, made one more call for each 401 or 404 (R3-webhooks-site-auth-1). | 4.4, ADR 0002 |
+| V120 | `SanMateoBackend::discover_cloud_id` also resets the cached prefix when the target has no cloud id. The signature does not change. | An explicit discovery stored the new id, but the requests went to the old id for up to 300 s (R3-webhooks-site-auth-2). | 4.4 |
 
 ---
 
@@ -590,9 +592,11 @@ application/json`, `content-type: application/json` when a body exists,
   404 replies do not each make a call (V101). When the token covers the
   id, nothing changes. Else the backend picks the site again, stores the
   new id in the metadata, and uses it from the next attempt on. It never
-  sends the attempt again. A failed check changes nothing, and the next
-  401 or 404 checks again. A discovery counts as a check. A
-  `target.cloud_id` is never checked. So a site move while the process
+  sends the attempt again. A failed check changes nothing else, but it
+  counts as a check, so a failure that lasts makes at most one call in each
+  interval (V119). A discovery counts as a check. An explicit
+  `discover_cloud_id` also resets the cached prefix, so the next attempt
+  uses the new id (V120). A `target.cloud_id` is never checked. So a site move while the process
   runs is seen at the first 401 or 404 after the interval.
 - Residual case (V55): when the token covers the old and the new site and
   no `site_url` is set, the backend keeps the stored id. Only a credential

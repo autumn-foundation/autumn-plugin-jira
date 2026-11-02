@@ -106,7 +106,7 @@ pub struct SanMateoBackend {
     san: SanMateo,
     target: SanMateoTarget,
     prefix: RwLock<Option<(String, Source)>>,
-    /// The time of the last check or discovery that showed the stored id.
+    /// The start time of the last check or discovery, also a failed one.
     checked: Mutex<Option<Instant>>,
 }
 
@@ -213,6 +213,9 @@ impl SanMateoBackend {
     /// Reads `accessible-resources`, picks the site, stores `cloudId` in
     /// the connection metadata (merge), and returns it.
     ///
+    /// With no cloud id in the target, the next request uses the new id.
+    /// A cloud id of the target stays fixed (R3-webhooks-site-auth-2).
+    ///
     /// # Errors
     ///
     /// `JiraError::CloudId` when no site matches, or the provider is not
@@ -227,7 +230,13 @@ impl SanMateoBackend {
                 "only the atlassian provider has a cloud id to discover".to_owned(),
             ));
         }
-        self.discover().await
+        let id = self.discover().await?;
+        // No lock on `prefix` is held here: only `prefix()` holds it while
+        // it discovers, and it does not call this method.
+        if self.target.cloud_id.is_none() {
+            *self.prefix.write().await = Some((format!("/ex/jira/{id}"), Source::Stored));
+        }
+        Ok(id)
     }
 
     /// Returns the provider name of the integration.
@@ -272,10 +281,9 @@ impl SanMateoBackend {
         Ok(resolved)
     }
 
-    /// Sets the time of the last check. `None` lets the next 401 or 404
-    /// check at once.
-    fn set_checked(&self, at: Option<Instant>) {
-        *self.checked.lock().unwrap_or_else(PoisonError::into_inner) = at;
+    /// Sets the time of the last check.
+    fn set_checked(&self, at: Instant) {
+        *self.checked.lock().unwrap_or_else(PoisonError::into_inner) = Some(at);
     }
 
     /// Returns `true` and starts a check when no check ran in the last
@@ -294,8 +302,11 @@ impl SanMateoBackend {
     ///
     /// When `accessible-resources` shows the id, nothing changes. Else the
     /// backend picks the site again, stores the new id in the metadata, and
-    /// resets the prefix. A failed check changes nothing, and the next 401
-    /// or 404 checks again.
+    /// resets the prefix. A failed check changes nothing else, but it counts
+    /// as a check. So the next check comes after the interval. A failure
+    /// that lasts, for example a site URL that no site has or a rate limit
+    /// of `accessible-resources`, then makes at most one call in each
+    /// interval (R3-webhooks-site-auth-1).
     async fn recheck(&self, prefix: &str) {
         if !self.start_check() {
             return;
@@ -303,7 +314,6 @@ impl SanMateoBackend {
         let resources = match self.resources().await {
             Ok(resources) => resources,
             Err(e) => {
-                self.set_checked(None);
                 tracing::warn!(code = e.code(), "jira: the cloud id check failed");
                 return;
             }
@@ -324,7 +334,6 @@ impl SanMateoBackend {
                 );
             }
             Err(e) => {
-                self.set_checked(None);
                 tracing::warn!(code = e.code(), "jira: the cloud id check failed");
             }
         }
@@ -357,7 +366,7 @@ impl SanMateoBackend {
     async fn discover(&self) -> Result<CloudId> {
         let resources = self.resources().await?;
         let id = self.store(&resources).await?;
-        self.set_checked(Some(Instant::now()));
+        self.set_checked(Instant::now());
         Ok(id)
     }
 
