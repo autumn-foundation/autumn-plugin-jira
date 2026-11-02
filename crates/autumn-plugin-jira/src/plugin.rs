@@ -111,14 +111,18 @@ impl Default for JiraPlugin {
 }
 
 impl JiraPlugin {
-    /// A plugin that reads `[jira]` from the autumn config files and the env
-    /// at startup.
+    /// A plugin that reads `[jira]` at startup with [`JiraConfig::load`]:
+    /// `autumn.toml`, the profile file, `.env` and the `AUTUMN_JIRA__*` env
+    /// vars. A later source wins.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// A plugin with this config. It reads no files.
+    /// A plugin with this config, as given. It reads no file and no
+    /// `AUTUMN_JIRA__*` env var. To use the files and the env, use
+    /// [`new`](Self::new), or [`JiraConfig::load`] and then change the
+    /// values that you set in code.
     #[must_use]
     pub fn with_config(config: JiraConfig) -> Self {
         Self {
