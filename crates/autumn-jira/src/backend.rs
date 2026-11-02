@@ -234,15 +234,7 @@ pub fn resolve_cloud_id(
     resources: &[AccessibleResource],
     site_url: Option<&str>,
 ) -> Result<CloudId> {
-    let jira = resources.iter().filter(|r| {
-        r.scopes
-            .iter()
-            .any(|s| s.starts_with("read:jira-") || s.starts_with("write:jira-"))
-    });
-    let picked: Vec<&AccessibleResource> = match site_url {
-        Some(url) => jira.filter(|r| same_url(&r.url, url)).collect(),
-        None => jira.collect(),
-    };
+    let picked = jira_sites(resources, site_url);
     match picked.as_slice() {
         [one] => Ok(one.id.clone()),
         [] if site_url.is_some() => Err(JiraError::CloudId(
@@ -254,6 +246,24 @@ pub fn resolve_cloud_id(
         _ => Err(JiraError::CloudId(
             "accessible-resources has more than one Jira site; set site_url".to_owned(),
         )),
+    }
+}
+
+/// Returns the Jira entries of `accessible-resources`: an entry with a scope
+/// that starts with `read:jira-` or `write:jira-`. With `site_url`, only the
+/// entry with that URL.
+pub(crate) fn jira_sites<'a>(
+    resources: &'a [AccessibleResource],
+    site_url: Option<&str>,
+) -> Vec<&'a AccessibleResource> {
+    let jira = resources.iter().filter(|r| {
+        r.scopes
+            .iter()
+            .any(|s| s.starts_with("read:jira-") || s.starts_with("write:jira-"))
+    });
+    match site_url {
+        Some(url) => jira.filter(|r| same_url(&r.url, url)).collect(),
+        None => jira.collect(),
     }
 }
 

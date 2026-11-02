@@ -13,11 +13,13 @@ use async_trait::async_trait;
 use san_mateo::store::ConnectionFilter;
 use san_mateo::{ConnectionKey, ProxyRequest, SanMateo};
 use serde_json::{Map, Value, json};
-use tokio::sync::OnceCell;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use tokio::sync::RwLock;
 
 use super::{
     ApiRequest, ApiResponse, BackendError, BackendInfo, BackendMode, JiraBackend, backend_error,
-    invalid_before_send, resolve_cloud_id,
+    invalid_before_send, jira_sites, resolve_cloud_id,
 };
 use crate::error::{JiraError, Op, Result};
 use crate::ids::CloudId;
@@ -74,11 +76,30 @@ impl SanMateoTarget {
     }
 }
 
+/// Where the path prefix comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Source {
+    /// `jira-basic`, or the cloud id of the target. The backend never
+    /// changes it.
+    Fixed,
+    /// The `cloudId` of the connection metadata, or a discovery.
+    Stored,
+}
+
 /// Sends each attempt through a san-mateo connection.
+///
+/// A stored cloud id can be stale: san-mateo keeps the metadata when a
+/// tenant connects the same connection to another site. So after the
+/// first 401 or 404 reply under a stored cloud id, the backend reads
+/// `accessible-resources` one time. When the token does not cover the
+/// stored id, the backend discovers the site again, stores the new id,
+/// and uses it from the next attempt on. It never sends the attempt again.
 pub struct SanMateoBackend {
     san: SanMateo,
     target: SanMateoTarget,
-    prefix: OnceCell<String>,
+    prefix: RwLock<Option<(String, Source)>>,
+    /// `true` when `accessible-resources` showed the stored id.
+    confirmed: AtomicBool,
 }
 
 impl fmt::Debug for SanMateoBackend {
@@ -170,7 +191,8 @@ impl SanMateoBackend {
         Self {
             san,
             target,
-            prefix: OnceCell::new(),
+            prefix: RwLock::new(None),
+            confirmed: AtomicBool::new(false),
         }
     }
 
@@ -214,16 +236,72 @@ impl SanMateoBackend {
 
     /// Returns the path prefix: from the provider, the target, the
     /// metadata, or a discovery, in this order.
-    async fn resolve_prefix(&self) -> std::result::Result<String, BackendError> {
+    async fn resolve_prefix(&self) -> std::result::Result<(String, Source), BackendError> {
         let provider = self.provider().await?;
         if let Some(prefix) = prefix_for(&provider, self.target.cloud_id.as_ref())? {
-            return Ok(prefix);
+            return Ok((prefix, Source::Fixed));
         }
         let id = match self.metadata_cloud_id().await? {
             Some(id) => id,
             None => self.discover().await.map_err(|e| not_sent(&e))?,
         };
-        Ok(format!("/ex/jira/{id}"))
+        Ok((format!("/ex/jira/{id}"), Source::Stored))
+    }
+
+    /// Returns the cached path prefix. The first call resolves it.
+    async fn prefix(&self) -> std::result::Result<(String, Source), BackendError> {
+        let cached = self.prefix.read().await.clone();
+        if let Some(cached) = cached {
+            return Ok(cached);
+        }
+        let mut slot = self.prefix.write().await;
+        if let Some(cached) = slot.clone() {
+            return Ok(cached);
+        }
+        let resolved = self.resolve_prefix().await?;
+        *slot = Some(resolved.clone());
+        drop(slot);
+        Ok(resolved)
+    }
+
+    /// Checks a stored cloud id after a 401 or a 404 reply, one time.
+    ///
+    /// When `accessible-resources` shows the id, the id is confirmed. Else
+    /// the backend picks the site again, stores the new id, and resets the
+    /// prefix. A failed check changes nothing.
+    async fn recheck(&self, prefix: &str) {
+        if self.confirmed.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let resources = match self.resources().await {
+            Ok(resources) => resources,
+            Err(e) => {
+                // A later 401 or 404 checks again.
+                self.confirmed.store(false, Ordering::SeqCst);
+                tracing::warn!(code = e.code(), "jira: the cloud id check failed");
+                return;
+            }
+        };
+        let site_url = self.target.site_url.as_deref();
+        let listed = jira_sites(&resources, site_url)
+            .iter()
+            .any(|r| format!("/ex/jira/{}", r.id) == prefix);
+        if listed {
+            return;
+        }
+        match self.store(&resources).await {
+            Ok(id) => {
+                *self.prefix.write().await = Some((format!("/ex/jira/{id}"), Source::Stored));
+                tracing::warn!(
+                    site = %self.info().site,
+                    "jira: the token does not cover the stored cloud id; stored a new one"
+                );
+            }
+            Err(e) => {
+                self.confirmed.store(false, Ordering::SeqCst);
+                tracing::warn!(code = e.code(), "jira: the cloud id check failed");
+            }
+        }
     }
 
     /// Reads the cloud id from the connection metadata. A bad value counts
@@ -247,8 +325,17 @@ impl SanMateoBackend {
         }))
     }
 
-    /// Reads `accessible-resources`, picks the site, and stores the id.
+    /// Reads `accessible-resources`, picks the site, and stores the id. A
+    /// discovered id is confirmed.
     async fn discover(&self) -> Result<CloudId> {
+        let resources = self.resources().await?;
+        let id = self.store(&resources).await?;
+        self.confirmed.store(true, Ordering::SeqCst);
+        Ok(id)
+    }
+
+    /// Reads `accessible-resources`.
+    async fn resources(&self) -> Result<Vec<AccessibleResource>> {
         let env = &self.target.environment;
         let key = &self.target.connection;
         let mut request = ProxyRequest::get(RESOURCES_PATH);
@@ -267,8 +354,14 @@ impl SanMateoBackend {
         if !(200..=299).contains(&reply.status) {
             return Err(crate::client::status_error(Op::Discovery, &reply));
         }
-        let resources: Vec<AccessibleResource> = crate::model::decode(Op::Discovery, &reply.body)?;
-        let id = resolve_cloud_id(&resources, self.target.site_url.as_deref())?;
+        crate::model::decode(Op::Discovery, &reply.body)
+    }
+
+    /// Picks the site and stores its id in the connection metadata.
+    async fn store(&self, resources: &[AccessibleResource]) -> Result<CloudId> {
+        let env = &self.target.environment;
+        let key = &self.target.connection;
+        let id = resolve_cloud_id(resources, self.target.site_url.as_deref())?;
         let metadata = Map::from_iter([(CLOUD_ID_KEY.to_owned(), json!(id.as_str()))]);
         self.san
             .set_metadata(env, key, metadata, true)
@@ -282,10 +375,7 @@ impl SanMateoBackend {
 #[async_trait]
 impl JiraBackend for SanMateoBackend {
     async fn send(&self, request: ApiRequest) -> std::result::Result<ApiResponse, BackendError> {
-        let prefix = self
-            .prefix
-            .get_or_try_init(|| self.resolve_prefix())
-            .await?;
+        let (prefix, source) = self.prefix().await?;
         let mut proxy = ProxyRequest::new(
             request.method.as_str(),
             format!("{prefix}{}", request.path_and_query()),
@@ -305,6 +395,9 @@ impl JiraBackend for SanMateoBackend {
             .proxy(&self.target.environment, &self.target.connection, proxy)
             .await
             .map_err(|e| map_error(&e))?;
+        if source == Source::Stored && matches!(reply.status, 401 | 404) {
+            self.recheck(&prefix).await;
+        }
         Ok(ApiResponse {
             status: reply.status,
             headers: reply.headers,
