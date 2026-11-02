@@ -127,8 +127,10 @@ impl Counters {
 pub(crate) struct Runtime {
     /// The service in the app state.
     pub(crate) service: JiraService,
-    /// The client of the health check: one attempt for each call.
-    pub(crate) health_client: JiraClient,
+    /// The client of the health check: one attempt for each call. `None`
+    /// when `[jira.san_mateo]` names no `connection_id`: then there is no
+    /// default connection to probe.
+    pub(crate) health_client: Option<JiraClient>,
     /// `[jira.webhook]`.
     pub(crate) webhook: JiraWebhookConfig,
     /// `[jira.health]`.

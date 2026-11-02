@@ -291,6 +291,7 @@ impl JiraPlugin {
     ) -> Result<Arc<Runtime>, PluginError> {
         let config = self.resolve_config(state)?;
         let settings = client_settings(&config.http);
+        let mut probe = true;
         let (client, tenants, mode) = match (&self.client, config.mode()?) {
             (Some(_), Some(mode)) => {
                 return Err(PluginError::Conflict("client(..)", table(mode)));
@@ -321,14 +322,17 @@ impl JiraPlugin {
                     .filter(|id| !id.trim().is_empty())
                 {
                     Some(id) => tenants.client(id)?,
-                    None => tenants.no_connection(),
+                    None => {
+                        probe = false;
+                        tenants.no_connection()
+                    }
                 };
                 (client, Some(Arc::new(tenants)), JiraMode::SanMateo.as_str())
             }
         };
         let mut health_settings = client.settings().clone();
         health_settings.max_attempts = 1;
-        let health_client = client.clone().with_settings(health_settings);
+        let health_client = probe.then(|| client.clone().with_settings(health_settings));
         let service = JiraService::new(client, tenants);
         state.insert_extension(service.clone());
         let max_body_bytes = self

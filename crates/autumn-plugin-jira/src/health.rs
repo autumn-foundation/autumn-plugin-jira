@@ -7,13 +7,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
-use autumn_web::actuator::{HealthCheckOutput, HealthIndicator, IndicatorGroup};
+use autumn_jira::JiraClient;
+use autumn_web::actuator::{HealthCheckOutput, HealthIndicator, HealthStatus, IndicatorGroup};
 use autumn_web::reexports::chrono::{SecondsFormat, Utc};
 use serde_json::{Value, json};
 use tokio::time::Instant;
 
 use crate::config::JiraHealthConfig;
 use crate::runtime::{Cell, Runtime};
+
+/// The `reason` when there is no default connection to probe.
+const NO_DEFAULT_CONNECTION: &str =
+    "no default connection: [jira.san_mateo] has no connection_id; the app uses for_connection(id)";
 
 /// The result of the last call to Jira.
 #[derive(Debug, Clone)]
@@ -41,6 +46,10 @@ struct Probe {
 /// - A failed call, or a call that does not finish inside the timeout,
 ///   gives `DOWN`.
 /// - Before the start: `DOWN` with `reason = "not started"`.
+/// - In `san_mateo` mode with no `connection_id`, there is no default
+///   connection, and the app uses `for_connection(id)` only. The indicator
+///   then makes no call. It gives `UNKNOWN` with a `reason`, so
+///   `/actuator/health` does not fail.
 ///
 /// The details hold the mode, the site, the last HTTP status, the time of
 /// the last call, the webhook counters, `self_filter` and the
@@ -94,12 +103,20 @@ impl JiraHealth {
             return HealthCheckOutput::down()
                 .with_details(HashMap::from([("reason".to_owned(), json!(reason))]));
         };
-        let probe = self.probe(runtime).await;
+        let Some(client) = &runtime.health_client else {
+            let mut details = details(runtime);
+            details.insert("reason".to_owned(), json!(NO_DEFAULT_CONNECTION));
+            return HealthCheckOutput {
+                status: HealthStatus::Unknown,
+                details,
+            };
+        };
+        let probe = self.probe(runtime, client).await;
         output(runtime, &probe)
     }
 
     /// The cached probe, or a new call to Jira.
-    async fn probe(&self, runtime: &Runtime) -> Probe {
+    async fn probe(&self, runtime: &Runtime, client: &JiraClient) -> Probe {
         let ttl = Duration::from_secs(runtime.health.cache_secs);
         let cached = self
             .last
@@ -116,12 +133,11 @@ impl JiraHealth {
             Duration::from_millis((runtime.health.timeout_ms.saturating_mul(9) / 10).max(1));
         let at = Instant::now();
         let checked_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
-        let (up, status, error) =
-            match tokio::time::timeout(limit, runtime.health_client.myself()).await {
-                Ok(Ok(_)) => (true, Some(200), None),
-                Ok(Err(e)) => (false, e.status(), Some(e.code())),
-                Err(_) => (false, None, Some("timeout")),
-            };
+        let (up, status, error) = match tokio::time::timeout(limit, client.myself()).await {
+            Ok(Ok(_)) => (true, Some(200), None),
+            Ok(Err(e)) => (false, e.status(), Some(e.code())),
+            Err(_) => (false, None, Some("timeout")),
+        };
         let probe = Probe {
             at,
             up,
@@ -134,23 +150,29 @@ impl JiraHealth {
     }
 }
 
-/// The output of one probe, with the live counters.
-fn output(runtime: &Runtime, probe: &Probe) -> HealthCheckOutput {
+/// The details that do not come from a probe: the mode, the site, the
+/// live counters, `self_filter` and the body cap.
+fn details(runtime: &Runtime) -> HashMap<String, Value> {
     let info = runtime.service.info();
     let self_filter = if runtime.webhook.ignore_actor_account_ids.is_empty() {
         "off"
     } else {
         "on"
     };
-    let mut details: HashMap<String, Value> = HashMap::from([
+    HashMap::from([
         ("mode".to_owned(), json!(runtime.mode)),
         ("site".to_owned(), json!(info.site)),
-        ("status".to_owned(), json!(probe.status)),
-        ("checked_at".to_owned(), json!(probe.checked_at)),
         ("webhook".to_owned(), json!(runtime.counters.snapshot())),
         ("self_filter".to_owned(), json!(self_filter)),
         ("max_body_bytes".to_owned(), json!(runtime.max_body_bytes)),
-    ]);
+    ])
+}
+
+/// The output of one probe, with the live counters.
+fn output(runtime: &Runtime, probe: &Probe) -> HealthCheckOutput {
+    let mut details = details(runtime);
+    details.insert("status".to_owned(), json!(probe.status));
+    details.insert("checked_at".to_owned(), json!(probe.checked_at));
     if let Some(code) = probe.error {
         details.insert("error".to_owned(), json!(code));
     }
@@ -180,8 +202,6 @@ impl HealthIndicator for JiraHealth {
 #[allow(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
 mod tests {
     use std::sync::Arc;
-
-    use autumn_web::actuator::HealthStatus;
 
     use super::*;
 
