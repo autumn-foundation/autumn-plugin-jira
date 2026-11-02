@@ -72,7 +72,7 @@ pub fn api_token_config(email_env: &str, token_env: &str) -> JiraConfig {
     .unwrap()
 }
 
-/// The `[jira]` config in san_mateo mode.
+/// The `[jira]` config in `san_mateo` mode.
 pub fn san_mateo_config(connection: Option<&str>) -> JiraConfig {
     let connection = connection.map_or_else(String::new, |c| format!("connection_id = \"{c}\"\n"));
     JiraConfig::from_toml_str(&format!(

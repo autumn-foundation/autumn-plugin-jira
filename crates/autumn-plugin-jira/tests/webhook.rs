@@ -105,7 +105,7 @@ async fn missing_signature_is_400() {
         .send()
         .await
         .assert_status(400);
-    assert!(entries(&log).is_empty());
+    assert_eq!(entries(&log), Vec::<String>::new());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -125,7 +125,7 @@ async fn bad_signature_is_401() {
         .send()
         .await
         .assert_status(401);
-    assert!(entries(&log).is_empty());
+    assert_eq!(entries(&log), Vec::<String>::new());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -168,7 +168,7 @@ async fn ignored_cases_are_200_and_counted() {
         let r = deliver(&client, id, body).await;
         assert_eq!(r.status.as_u16(), 200, "{id}: {}", r.text());
     }
-    assert!(entries(&log).is_empty(), "{:?}", entries(&log));
+    assert_eq!(entries(&log), Vec::<String>::new());
     let c = counters(&client).await;
     for (name, want) in [
         ("ignored_stale", 1),
@@ -373,7 +373,7 @@ async fn over_cap_is_400() {
     deliver(&client, "big-2", &body.to_string().into_bytes())
         .await
         .assert_status(400);
-    assert!(entries(&log).is_empty());
+    assert_eq!(entries(&log), Vec::<String>::new());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -418,7 +418,10 @@ async fn the_route_reads_the_retry_and_flow_headers() {
         .send()
         .await
         .assert_status(200);
-    deliver(&client, "h-2", &body).await.assert_status(200);
+    // autumn also keys its replay store on the signature, so the second
+    // delivery has another body.
+    let other = issue_updated(Some(now_ms() + 1), "acct-ann");
+    deliver(&client, "h-2", &other).await.assert_status(200);
     assert_eq!(
         *seen.lock().unwrap(),
         [(2, "Secondary".to_owned()), (0, "Unknown".to_owned())]

@@ -147,7 +147,7 @@ impl JiraPlugin {
     /// Uses this transport in API token mode. Default: a `ReqwestTransport`
     /// with the `[jira.http] timeout_secs`. Tests give `FakeJira` here.
     ///
-    /// In san_mateo mode, San Mateo owns the transport. The start then
+    /// In `san_mateo` mode, San Mateo owns the transport. The start then
     /// fails with [`PluginError::Conflict`].
     #[must_use]
     pub fn transport(mut self, transport: Arc<dyn HttpTransport>) -> Self {
@@ -265,7 +265,7 @@ impl JiraPlugin {
     }
 
     /// `true` when the plugin mounts the webhook route.
-    fn mounts_route(&self) -> bool {
+    const fn mounts_route(&self) -> bool {
         self.webhook_route || !self.handlers.is_empty()
     }
 
@@ -390,16 +390,15 @@ impl JiraPlugin {
         let email = secrets.require(&api.email_env)?;
         let token = secrets.require(&api.token_env)?;
         let auth = BasicAuth::new(email.expose(), token)?;
-        let transport = match &self.transport {
-            Some(transport) => Arc::clone(transport),
-            None => {
-                let transport = ReqwestTransport::new(TransportConfig {
-                    timeout: Duration::from_secs(config.http.timeout_secs),
-                    ..TransportConfig::default()
-                })
-                .map_err(|e| PluginError::config(format!("the HTTP transport: {e}")))?;
-                Arc::new(transport)
-            }
+        let transport = if let Some(transport) = &self.transport {
+            Arc::clone(transport)
+        } else {
+            let transport = ReqwestTransport::new(TransportConfig {
+                timeout: Duration::from_secs(config.http.timeout_secs),
+                ..TransportConfig::default()
+            })
+            .map_err(|e| PluginError::config(format!("the HTTP transport: {e}")))?;
+            Arc::new(transport) as Arc<dyn HttpTransport>
         };
         Ok(JiraClient::api_token(site, auth, transport).with_settings(settings))
     }
@@ -602,13 +601,15 @@ mod tests {
 
     #[test]
     fn client_settings_follow_the_http_table() {
-        let mut http = JiraHttpConfig::default();
-        http.max_attempts = 3;
-        http.base_backoff_ms = 7;
-        http.max_backoff_ms = 70;
-        http.max_pages = 9;
-        http.lookup_attempts = 2;
-        http.lookup_delay_ms = 5;
+        let http = JiraHttpConfig {
+            max_attempts: 3,
+            base_backoff_ms: 7,
+            max_backoff_ms: 70,
+            max_pages: 9,
+            lookup_attempts: 2,
+            lookup_delay_ms: 5,
+            ..JiraHttpConfig::default()
+        };
         let s = client_settings(&http);
         assert_eq!(
             (

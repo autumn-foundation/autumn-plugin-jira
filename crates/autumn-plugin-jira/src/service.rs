@@ -56,7 +56,7 @@ impl std::fmt::Debug for JiraService {
 }
 
 impl JiraService {
-    /// Wraps a client. `tenants` is set in san_mateo mode.
+    /// Wraps a client. `tenants` is set in `san_mateo` mode.
     pub(crate) const fn new(client: JiraClient, tenants: Option<Arc<Tenants>>) -> Self {
         Self { client, tenants }
     }
@@ -91,7 +91,7 @@ impl JiraService {
     /// # Errors
     /// [`JiraError::InvalidInput`] for an id that is empty, longer than
     /// 200 chars, or has a space or a control char.
-    /// [`JiraError::Config`] when the plugin is not in san_mateo mode.
+    /// [`JiraError::Config`] when the plugin is not in `san_mateo` mode.
     pub fn for_connection(&self, connection_id: &str) -> Result<JiraClient, JiraError> {
         self.tenants
             .as_ref()
@@ -113,12 +113,12 @@ impl Deref for JiraService {
 impl FromRequestParts<AppState> for JiraService {
     type Rejection = AutumnError;
 
-    async fn from_request_parts(
+    fn from_request_parts(
         parts: &mut Parts,
         state: &AppState,
-    ) -> Result<Self, Self::Rejection> {
+    ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
         let _ = parts;
-        Self::require(state)
+        std::future::ready(Self::require(state))
     }
 }
 

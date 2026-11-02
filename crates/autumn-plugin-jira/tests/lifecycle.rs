@@ -76,6 +76,11 @@ async fn transport_in_san_mateo_mode_conflicts() {
     );
 }
 
+/// A route that needs the service.
+async fn who(jira: JiraService) -> AutumnResult<String> {
+    Ok(jira.account_id().await.http()?.to_string())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn service_is_503_before_start() {
     let state = AppState::for_test();
@@ -89,9 +94,6 @@ async fn service_is_503_before_start() {
     );
 
     // The extractor in a route of an app with no plugin.
-    async fn who(jira: JiraService) -> AutumnResult<String> {
-        Ok(jira.account_id().await.http()?.to_string())
-    }
     let client = TestApp::new()
         .merge(Router::new().route("/who", get(who)))
         .build();
