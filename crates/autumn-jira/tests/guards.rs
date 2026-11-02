@@ -672,58 +672,228 @@ mod check {
         name > 0 && text[name..].starts_with("=$?")
     }
 
-    /// AC38: CI hides no failure. No `continue-on-error`, and no `||`
-    /// after a command in a `run` script, except a status capture.
-    pub fn ci_violations(ci: &str) -> Vec<String> {
+    /// One `run:` script of a workflow step.
+    pub struct RunScript {
+        /// The job of the step.
+        pub job: String,
+        /// The `if:` value, when the step has one.
+        pub cond: Option<String>,
+        /// The step sets `shell: bash`. GitHub then runs `bash -eo
+        /// pipefail`, so a failed command before a pipe fails the step.
+        pub pipefail: bool,
+        /// The 1-based line number and the text of each script line.
+        pub lines: Vec<(usize, String)>,
+    }
+
+    fn yaml_indent(line: &str) -> usize {
+        line.len() - line.trim_start().len()
+    }
+
+    /// The `run:` scripts of the steps of a workflow. A step is a list
+    /// item: its keys are one level below the `- `. A block script (`|` or
+    /// `>`) holds the lines below its key that have more indent.
+    pub fn run_scripts(ci: &str) -> Vec<RunScript> {
         let lines: Vec<&str> = ci.lines().collect();
-        let indent = |l: &str| l.len() - l.trim_start().len();
         let mut out = Vec::new();
-        let mut check = |n: usize, line: &str| {
+        let mut job = String::new();
+        let mut in_jobs = false;
+        for (i, line) in lines.iter().enumerate() {
             let t = line.trim();
             if t.starts_with('#') {
-                return;
-            }
-            let mut rest = t;
-            while let Some(at) = rest.find("||") {
-                rest = &rest[at + 2..];
-                if !is_status_capture(rest.trim_start()) {
-                    out.push(format!("ci.yml:{}: `||` hides a failure: {t}", n + 1));
-                }
-            }
-        };
-        let mut i = 0;
-        let mut hidden = Vec::new();
-        while i < lines.len() {
-            let line = lines[i];
-            let t = line.trim_start();
-            if t.starts_with('#') {
-                i += 1;
                 continue;
             }
-            if t.contains("continue-on-error") {
-                hidden.push(format!("ci.yml:{}: {}", i + 1, t.trim()));
+            if yaml_indent(line) == 0 && !t.is_empty() {
+                in_jobs = t == "jobs:";
+            } else if in_jobs && yaml_indent(line) == 2 && t.ends_with(':') {
+                t.trim_end_matches(':').clone_into(&mut job);
             }
-            let item = t.strip_prefix("- ").unwrap_or(t);
-            if let Some(value) = item.strip_prefix("run:") {
-                let key_indent = line.len() - item.len();
-                let value = value.trim();
-                if value.starts_with('|') || value.starts_with('>') {
-                    let mut j = i + 1;
-                    while j < lines.len()
-                        && (lines[j].trim().is_empty() || indent(lines[j]) > key_indent)
-                    {
-                        check(j, lines[j]);
-                        j += 1;
-                    }
-                    i = j;
+            let Some(first) = t.strip_prefix("- ") else {
+                continue;
+            };
+            let dash = yaml_indent(line);
+            let keys_at = dash + 2;
+            let end = (i + 1..lines.len())
+                .find(|&j| !lines[j].trim().is_empty() && yaml_indent(lines[j]) <= dash)
+                .unwrap_or(lines.len());
+            let mut script = RunScript {
+                job: job.clone(),
+                cond: None,
+                pipefail: false,
+                lines: Vec::new(),
+            };
+            let mut j = i;
+            while j < end {
+                let text = if j == i { first } else { lines[j].trim() };
+                let is_key = j == i || yaml_indent(lines[j]) == keys_at;
+                j += 1;
+                if !is_key {
                     continue;
                 }
-                check(i, value);
+                if let Some(value) = text.strip_prefix("if:") {
+                    script.cond = Some(value.trim().to_owned());
+                } else if let Some(value) = text.strip_prefix("shell:") {
+                    script.pipefail = value.trim() == "bash";
+                } else if let Some(value) = text.strip_prefix("run:") {
+                    let value = value.trim();
+                    if value.starts_with('|') || value.starts_with('>') {
+                        while j < end
+                            && (lines[j].trim().is_empty() || yaml_indent(lines[j]) > keys_at)
+                        {
+                            script.lines.push((j + 1, lines[j].trim().to_owned()));
+                            j += 1;
+                        }
+                    } else {
+                        script.lines.push((j, value.to_owned()));
+                    }
+                }
             }
-            i += 1;
+            if !script.lines.is_empty() {
+                out.push(script);
+            }
         }
-        hidden.extend(out);
-        hidden
+        out
+    }
+
+    /// A shell line with the contents of each quoted string removed.
+    fn unquoted(line: &str) -> String {
+        let mut out = String::new();
+        let mut quote: Option<char> = None;
+        let mut escaped = false;
+        for c in line.chars() {
+            match quote {
+                Some('"') if escaped => escaped = false,
+                Some('"') if c == '\\' => escaped = true,
+                Some(q) if c == q => {
+                    quote = None;
+                    out.push(c);
+                }
+                Some(_) => {}
+                None => {
+                    if c == '"' || c == '\'' {
+                        quote = Some(c);
+                    }
+                    out.push(c);
+                }
+            }
+        }
+        out
+    }
+
+    /// A single `|` that is not part of `||`.
+    fn has_pipe(text: &str) -> bool {
+        let chars: Vec<char> = text.chars().collect();
+        (0..chars.len()).any(|i| {
+            chars[i] == '|' && chars.get(i + 1) != Some(&'|') && (i == 0 || chars[i - 1] != '|')
+        })
+    }
+
+    /// The ways that one script line hides a failure.
+    fn hidden_failures(n: usize, line: &str, pipefail: bool) -> Vec<String> {
+        let mut out = Vec::new();
+        let code = unquoted(line);
+        let mut rest = code.as_str();
+        while let Some(at) = rest.find("||") {
+            rest = &rest[at + 2..];
+            if !is_status_capture(rest.trim_start()) {
+                out.push(format!("ci.yml:{n}: `||` hides a failure: {line}"));
+            }
+        }
+        if code
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .windows(2)
+            .any(|w| w == ["set", "+e"])
+        {
+            out.push(format!("ci.yml:{n}: `set +e` hides a failure: {line}"));
+        }
+        if code
+            .split(';')
+            .skip(1)
+            .any(|part| matches!(part.trim(), "true" | ":"))
+        {
+            out.push(format!("ci.yml:{n}: `; true` hides a failure: {line}"));
+        }
+        let tested = ["if ", "elif ", "while ", "until ", "! "]
+            .iter()
+            .any(|p| code.starts_with(p));
+        if has_pipe(&code) && !pipefail && !tested {
+            out.push(format!(
+                "ci.yml:{n}: a pipe with no `pipefail` hides the failure of the first command: {line}"
+            ));
+        }
+        out
+    }
+
+    /// AC38: CI hides no failure. No `continue-on-error`, and in a `run`
+    /// script: no `||` except a status capture, no `set +e`, no `; true`,
+    /// and no pipe unless the step has `pipefail` or an `if` tests the
+    /// pipe.
+    pub fn ci_violations(ci: &str) -> Vec<String> {
+        let mut out: Vec<String> = ci
+            .lines()
+            .enumerate()
+            .filter(|(_, l)| {
+                let t = l.trim_start();
+                !t.starts_with('#') && t.contains("continue-on-error")
+            })
+            .map(|(n, l)| format!("ci.yml:{}: {}", n + 1, l.trim()))
+            .collect();
+        for script in run_scripts(ci) {
+            let pipefail = script.pipefail
+                || script
+                    .lines
+                    .iter()
+                    .any(|(_, l)| l.starts_with("set ") && l.contains("pipefail"));
+            for (n, line) in &script.lines {
+                if !line.starts_with('#') {
+                    out.extend(hidden_failures(*n, line, pipefail));
+                }
+            }
+        }
+        out
+    }
+
+    /// The words of a shell line, with the quotes removed.
+    fn shell_words(line: &str) -> Vec<&str> {
+        line.split_whitespace()
+            .map(|w| w.trim_matches(['"', '\'']))
+            .collect()
+    }
+
+    /// AC39: a `cargo update` changes the lock, so a later step of the same
+    /// job runs `scripts/one-version.sh` on the same manifest. The step has
+    /// no `if`, so it runs after each update.
+    pub fn update_violations(ci: &str) -> Vec<String> {
+        let scripts = run_scripts(ci);
+        let mut out = Vec::new();
+        for (i, script) in scripts.iter().enumerate() {
+            for (n, line) in &script.lines {
+                let words = shell_words(line);
+                if words.get(..2) != Some(&["cargo", "update"][..]) {
+                    continue;
+                }
+                let manifest = words
+                    .windows(2)
+                    .find(|w| w[0] == "--manifest-path")
+                    .map_or("Cargo.toml", |w| w[1]);
+                let checked = scripts[i + 1..]
+                    .iter()
+                    .filter(|s| s.job == script.job && s.cond.is_none())
+                    .flat_map(|s| s.lines.iter())
+                    .any(|(_, l)| {
+                        let words = shell_words(l);
+                        words.iter().any(|w| w.ends_with("scripts/one-version.sh"))
+                            && words.contains(&manifest)
+                    });
+                if !checked {
+                    out.push(format!(
+                        "ci.yml:{n}: job {}: no `scripts/one-version.sh {manifest}` after `cargo update`",
+                        script.job
+                    ));
+                }
+            }
+        }
+        out
     }
 
     /// AC39: the root lock has no crate that only the ecosystem example
@@ -1200,6 +1370,299 @@ mod check {
         }
         out
     }
+    // --- Docs and metadata -------------------------------------------------
+
+    /// Text in a path that only one agent session has. Such a path works on
+    /// one machine only, and it shows a session id. The parts are joined at
+    /// run time, so this file does not hold the paths.
+    fn session_markers() -> [String; 3] {
+        [
+            ["/tmp", "/claude-"].concat(),
+            ["scratch", "pad/"].concat(),
+            ["-home-", "user/"].concat(),
+        ]
+    }
+
+    /// No file of the repository holds a path of an agent session.
+    pub fn session_path_violations(path: &str, text: &str) -> Vec<String> {
+        let markers = session_markers();
+        text.lines()
+            .enumerate()
+            .filter(|(_, l)| markers.iter().any(|m| l.contains(m.as_str())))
+            .map(|(n, l)| format!("{path}:{}: a session path: {}", n + 1, l.trim()))
+            .collect()
+    }
+
+    /// The `key = value` lines of the `[package]` table of a manifest.
+    fn package_keys(manifest: &str) -> BTreeMap<String, String> {
+        let mut out = BTreeMap::new();
+        let mut in_package = false;
+        for line in manifest.lines() {
+            let t = strip_toml_comment(line).trim();
+            if t.starts_with('[') {
+                in_package = t == "[package]";
+                continue;
+            }
+            if let (true, Some((key, value))) = (in_package, t.split_once('=')) {
+                out.insert(key.trim().to_owned(), value.trim().to_owned());
+            }
+        }
+        out
+    }
+
+    /// The crates.io metadata of a crate that is published: `description`,
+    /// `readme`, one to five `keywords`, and `categories`. A crate with
+    /// `publish = false` needs none. It gives the `readme` value, so the
+    /// caller can check that the file exists.
+    pub fn publish_metadata_violations(
+        path: &str,
+        manifest: &str,
+    ) -> (Vec<String>, Option<String>) {
+        let keys = package_keys(manifest);
+        if keys.get("publish").is_some_and(|v| v == "false") {
+            return (Vec::new(), None);
+        }
+        let mut out = Vec::new();
+        for key in ["description", "readme", "keywords", "categories"] {
+            if !keys.contains_key(key) {
+                out.push(format!("{path}: [package] has no `{key}`"));
+            }
+        }
+        if let Some(words) = keys.get("keywords") {
+            let count = words.matches('"').count() / 2;
+            if !(1..=5).contains(&count) {
+                out.push(format!("{path}: {count} keywords; crates.io takes 1 to 5"));
+            }
+        }
+        let readme = keys.get("readme").map(|v| v.trim_matches('"').to_owned());
+        (out, readme)
+    }
+
+    /// The words of a text as one line: Markdown line breaks and comment
+    /// markers do not split a phrase.
+    fn flat(text: &str) -> String {
+        text.split_whitespace()
+            .filter(|w| !matches!(*w, "//" | "///" | "//!" | ">"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// The prose paragraphs of a Markdown text: (first line, text). Fenced
+    /// blocks, tables, headings and HTML lines are not prose. A list item
+    /// starts a new paragraph.
+    fn paragraphs(md: &str) -> Vec<(usize, String)> {
+        let mut out = Vec::new();
+        let mut current: Option<(usize, String)> = None;
+        let mut fenced = false;
+        for (n, line) in md.lines().enumerate() {
+            let t = line.trim();
+            let item = ["- ", "* "]
+                .iter()
+                .find_map(|p| t.strip_prefix(p))
+                .or_else(|| {
+                    let digits = t.chars().take_while(char::is_ascii_digit).count();
+                    (digits > 0)
+                        .then(|| t[digits..].strip_prefix(". "))
+                        .flatten()
+                });
+            let skip = fenced
+                || t.is_empty()
+                || t.starts_with("```")
+                || t.starts_with('|')
+                || t.starts_with('#')
+                || t.starts_with('<');
+            if t.starts_with("```") {
+                fenced = !fenced;
+            }
+            if skip || item.is_some() {
+                out.extend(current.take());
+            }
+            if skip {
+                continue;
+            }
+            let text = item.unwrap_or(t);
+            match &mut current {
+                Some((_, body)) => {
+                    body.push(' ');
+                    body.push_str(text);
+                }
+                None => current = Some((n + 1, text.to_owned())),
+            }
+        }
+        out.extend(current);
+        out
+    }
+
+    /// A paragraph with each code span as one word `X`, and each link as
+    /// its text.
+    fn plain(paragraph: &str) -> String {
+        let mut out = String::new();
+        let mut rest = paragraph;
+        while let Some(c) = rest.chars().next() {
+            if c == '`'
+                && let Some(end) = rest[1..].find('`')
+            {
+                out.push('X');
+                rest = &rest[end + 2..];
+            } else if c == ']'
+                && rest[1..].starts_with('(')
+                && let Some(end) = rest.find(')')
+            {
+                rest = &rest[end + 1..];
+            } else {
+                if c != '[' {
+                    out.push(c);
+                }
+                rest = &rest[c.len_utf8()..];
+            }
+        }
+        out
+    }
+
+    /// The sentences of a plain paragraph. A sentence ends at `.`, `!` or
+    /// `?` before a space. A `:` or `;` before a space and a capital
+    /// letter also ends one.
+    fn sentences(text: &str) -> Vec<String> {
+        let chars: Vec<char> = text.chars().collect();
+        let mut out = Vec::new();
+        let mut start = 0;
+        for i in 0..chars.len() {
+            let next = chars.get(i + 1).copied().unwrap_or(' ');
+            let after = chars.get(i + 2).copied().unwrap_or(' ');
+            let hard = matches!(chars[i], '.' | '!' | '?') && next == ' ';
+            let soft = matches!(chars[i], ':' | ';')
+                && next == ' '
+                && (after.is_uppercase() || after == '(');
+            if hard || soft {
+                out.push(chars[start..=i].iter().collect());
+                start = i + 1;
+            }
+        }
+        out.push(chars[start..].iter().collect());
+        out.into_iter()
+            .map(|s: String| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
+            .collect()
+    }
+
+    /// Words and phrases that ASD-STE100 does not allow: vague counts and
+    /// the passive forms that review R7 found.
+    const UNCLEAR: [&str; 3] = ["a few times", "is imported", "are validated"];
+
+    /// ASD-STE100 (CLAUDE.md): each sentence of the prose has 25 words or
+    /// fewer. A code span counts as one word. No phrase of [`UNCLEAR`].
+    pub fn prose_violations(path: &str, md: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for (line, paragraph) in paragraphs(md) {
+            let text = plain(&paragraph);
+            for sentence in sentences(&text) {
+                let words = sentence.split_whitespace().count();
+                if words > 25 {
+                    out.push(format!("{path}:{line}: {words} words: {sentence}"));
+                }
+            }
+            let lower = text.to_lowercase();
+            for phrase in UNCLEAR {
+                if lower.contains(phrase) {
+                    out.push(format!("{path}:{line}: unclear `{phrase}`: {text}"));
+                }
+            }
+        }
+        out
+    }
+
+    /// Claims that the code does not keep (review rounds R2 and R7), each
+    /// with the rule that is true.
+    const STALE_CLAIMS: [(&str, &str); 5] = [
+        (
+            "transition is never sent a second time",
+            "an opt-in can send a marked write again; a transition reads the status first",
+        ),
+        (
+            "the client never sends the write a second time",
+            "an opt-in can send a marked write again",
+        ),
+        (
+            "a failed sink gets 503",
+            "a `Permanent` error gets 200; `Transient`, a panic or a timeout gets 503",
+        ),
+        (
+            "the opt-in `resend_after_negative_lookup` sends",
+            "the opt-in is a harvest input field and a camel option, not a client call",
+        ),
+        (
+            "never loses an event",
+            "a crash after the replay store keeps the delivery id can lose a delivery",
+        ),
+    ];
+
+    /// The docs make no claim of [`STALE_CLAIMS`]. Each sentence that names
+    /// `allow_memory_in_production` gives its table,
+    /// `[security.webhooks.replay]`: autumn drops the key without an error
+    /// in an endpoint entry.
+    pub fn stale_claim_violations(path: &str, text: &str) -> Vec<String> {
+        let flat = flat(text);
+        let lower = flat.to_lowercase();
+        let mut out = Vec::new();
+        for (claim, truth) in STALE_CLAIMS {
+            if lower.contains(claim) {
+                out.push(format!("{path}: claims \"{claim}\". The rule: {truth}"));
+            }
+        }
+        for sentence in sentences(&flat) {
+            if sentence.contains("allow_memory_in_production")
+                && !sentence.contains("security.webhooks.replay")
+            {
+                out.push(format!(
+                    "{path}: `allow_memory_in_production` with no `[security.webhooks.replay]`: {sentence}"
+                ));
+            }
+        }
+        out
+    }
+
+    /// Each `The docs say "..."` of a text cites words that `corpus` has.
+    pub fn cited_doc_violations(path: &str, text: &str, corpus: &str) -> Vec<String> {
+        const MARK: &str = "The docs say \"";
+        let flat_text = flat(text);
+        let corpus = flat(corpus).to_lowercase();
+        let mut out = Vec::new();
+        for (at, _) in flat_text.match_indices(MARK) {
+            let rest = &flat_text[at + MARK.len()..];
+            let quote = rest.split('"').next().unwrap_or_default();
+            let words = quote.trim_end_matches(['.', ',']).to_lowercase();
+            if !corpus.contains(&words) {
+                out.push(format!(
+                    "{path}: cites \"{quote}\", which no other doc says"
+                ));
+            }
+        }
+        out
+    }
+
+    /// The names of the `pub fn` and `pub const fn` items of a Rust
+    /// source, outside test items.
+    pub fn public_fns(text: &str) -> Vec<String> {
+        code_only(text)
+            .lines()
+            .filter_map(|l| {
+                let rest = l
+                    .strip_prefix("pub const fn ")
+                    .or_else(|| l.strip_prefix("pub fn "))?;
+                Some(rest.chars().take_while(|c| is_ident(*c)).collect())
+            })
+            .collect()
+    }
+
+    /// AC18, AC40: ADR 0005 names each public function of the verified
+    /// core, so a reader sees what the core holds.
+    pub fn adr_policy_violations(policy: &str, adr: &str) -> Vec<String> {
+        public_fns(policy)
+            .into_iter()
+            .filter(|name| !adr.contains(&format!("`{name}`")))
+            .map(|name| format!("docs/adr/0005: does not name `{name}` of policy.rs"))
+            .collect()
+    }
 }
 
 /// The five library crates of the workspace.
@@ -1626,8 +2089,22 @@ fn no_continue_on_error_sees_hidden_failures() {
         "    steps:\n      - run: cargo test || true\n",
         "    steps:\n      - name: x\n        run: |\n          cargo build\n          cargo test || echo failed\n",
         "    steps:\n      - name: x\n        run: >-\n          cargo llvm-cov\n          --json || :\n",
+        "    steps:\n      - run: cargo test | tee log\n",
+        "    steps:\n      - run: |\n          set +e\n          cargo test\n",
+        "    steps:\n      - run: cargo test; true\n",
+        "    steps:\n      - name: x\n        run: |\n          out=$(cargo tree -d | grep -c x)\n",
     ] {
         assert_eq!(check::ci_violations(bad).len(), 1, "{bad}");
+    }
+    for piped in [
+        "    steps:\n      - name: x\n        shell: bash\n        run: cargo test | tee log\n",
+        "    steps:\n      - run: |\n          set -euo pipefail\n          cargo test | tee log\n",
+        "    steps:\n      - run: |\n          if printf '%s' \"$out\" | grep -q x; then exit 1; fi\n",
+        "    steps:\n      - run: grep -E '^(a|b) v' Cargo.lock\n",
+        "    steps:\n      - run: echo \"a | b; true\"\n",
+    ] {
+        let found = check::ci_violations(piped);
+        assert!(found.is_empty(), "{piped}: {found:?}");
     }
     let good = "    steps:\n\
                 \x20     - name: x\n\
@@ -1835,4 +2312,242 @@ fn adr_files_exist_sees_a_gap() {
         check::adr_references(&format!("See ADR 0003 and ADR {}. adr/0004-x.md", "0010")),
         [3, 10, 4]
     );
+}
+
+// --- AC39: a weekly update gets the one-version check --------------------
+
+#[test]
+fn weekly_updates_get_the_one_version_check() {
+    let found = check::update_violations(&read(".github/workflows/ci.yml"));
+    assert!(found.is_empty(), "{}", found.join("\n"));
+}
+
+#[test]
+fn weekly_updates_get_the_one_version_check_sees_a_gap() {
+    let weekly = "jobs:\n  test:\n    steps:\n\
+                  \x20     - name: weekly\n\
+                  \x20       if: github.event_name == 'schedule'\n\
+                  \x20       run: cargo update\n";
+    let eco = "jobs:\n  eco:\n    steps:\n\
+               \x20     - run: cargo update --manifest-path \"$MANIFEST\"\n";
+    for bad in [
+        weekly.to_owned(),
+        format!(
+            "{weekly}  other:\n    steps:\n      - run: bash scripts/one-version.sh Cargo.toml\n"
+        ),
+        format!("{weekly}      - if: false\n        run: bash scripts/one-version.sh Cargo.toml\n"),
+        format!("{eco}      - run: bash scripts/one-version.sh Cargo.toml\n"),
+    ] {
+        assert_eq!(check::update_violations(&bad).len(), 1, "{bad}");
+    }
+    for good in [
+        format!("{weekly}      - run: bash scripts/one-version.sh Cargo.toml\n"),
+        format!("{eco}      - run: bash scripts/one-version.sh \"$MANIFEST\"\n"),
+        "jobs:\n  lock:\n    steps:\n      - run: echo \"Run: cargo update -p a\"\n".to_owned(),
+    ] {
+        assert_eq!(check::update_violations(&good), NONE, "{good}");
+    }
+}
+
+// --- No path of an agent session -----------------------------------------
+
+#[test]
+fn no_session_paths() {
+    let exts = ["rs", "py", "sh", "toml", "yml", "yaml", "md", "json"];
+    assert_files(
+        "no_session_paths",
+        &files_under(&root(), &exts),
+        check::session_path_violations,
+    );
+}
+
+#[test]
+fn no_session_paths_sees_one() {
+    let p = "scripts/x.py";
+    for bad in [
+        format!(
+            "SPEC = \"{}/x/dl/spec.json\"",
+            ["/tmp", "/claude-0"].concat()
+        ),
+        format!("see {}dl/swagger.json", ["scratch", "pad/"].concat()),
+        format!("/root/.claude/projects/{}x", ["-home-", "user/"].concat()),
+    ] {
+        assert_eq!(check::session_path_violations(p, &bad).len(), 1, "{bad}");
+    }
+    let good = "Do mutation tests on a `git clone` in the scratchpad.\nSPEC = sys.argv[1]\n";
+    assert_eq!(check::session_path_violations(p, good), NONE);
+}
+
+// --- The crates.io metadata ----------------------------------------------
+
+#[test]
+fn published_crates_have_metadata() {
+    let mut found = Vec::new();
+    for krate in CRATES {
+        let path = format!("crates/{krate}/Cargo.toml");
+        let (problems, readme) = check::publish_metadata_violations(&path, &read(&path));
+        found.extend(problems);
+        if let Some(readme) = readme
+            && !root().join("crates").join(krate).join(&readme).is_file()
+        {
+            found.push(format!("{path}: the readme {readme} does not exist"));
+        }
+    }
+    assert!(found.is_empty(), "{}", found.join("\n"));
+}
+
+#[test]
+fn published_crates_have_metadata_sees_a_gap() {
+    let full = "[package]\nname = \"x\"\ndescription = \"d\"\nreadme = \"../../README.md\"\n\
+                keywords = [\"a\", \"b\"]\ncategories = [\"c\"]\n\n[dependencies]\nreadme = 1\n";
+    assert_eq!(check::publish_metadata_violations("x", full).0, NONE);
+    assert_eq!(
+        check::publish_metadata_violations("x", full).1.as_deref(),
+        Some("../../README.md")
+    );
+    let no_readme = full.replace("readme = \"../../README.md\"\n", "");
+    assert_eq!(
+        check::publish_metadata_violations("x", &no_readme).0.len(),
+        1
+    );
+    let six = full.replace(
+        "[\"a\", \"b\"]",
+        "[\"a\", \"b\", \"c\", \"d\", \"e\", \"f\"]",
+    );
+    assert_eq!(check::publish_metadata_violations("x", &six).0.len(), 1);
+    let private = "[package]\nname = \"x\"\npublish = false\n";
+    assert_eq!(check::publish_metadata_violations("x", private).0, NONE);
+}
+
+// --- ASD-STE100 prose ------------------------------------------------------
+
+/// The prose docs that the STE check reads. `docs/plan.md` and
+/// `docs/ac-evidence.md` hold long tables and lists of names, so the check
+/// leaves them out.
+fn prose_docs() -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = ["README.md", "CLAUDE.md", "docs/examples-plan.md"]
+        .iter()
+        .map(|f| root().join(f))
+        .collect();
+    files.extend(files_under(&root().join("docs/adr"), &["md"]));
+    files
+}
+
+#[test]
+fn docs_are_ste_prose() {
+    assert_files("docs_are_ste_prose", &prose_docs(), check::prose_violations);
+}
+
+#[test]
+fn docs_are_ste_prose_sees_a_long_sentence() {
+    let p = "README.md";
+    let long = "one two three four five six seven eight nine ten eleven twelve thirteen \
+                fourteen fifteen sixteen seventeen eighteen nineteen twenty twenty-one \
+                twenty-two twenty-three twenty-four twenty-five twenty-six.";
+    for bad in [
+        format!("Intro.\n{long}\n"),
+        format!("- {long}\n"),
+        "Jira retries the 409 a few times.\n".to_owned(),
+        "The connection `acme` is imported with a token.\n".to_owned(),
+    ] {
+        assert_eq!(check::prose_violations(p, &bad).len(), 1, "{bad}");
+    }
+    let short = "A short sentence. `one two three four five six seven eight nine ten \
+                 eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen \
+                 twenty twenty-one twenty-two twenty-three twenty-four` is one word.";
+    for good in [
+        format!("```text\n{long}\n```\n"),
+        format!("| {long} |\n"),
+        format!("# {long}\n"),
+        short.to_owned(),
+        "It has three parts: a client, a plugin and a fake. Each part: Short.\n".to_owned(),
+        "See [the long link text](https://example.com/a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p/q/r/s/t/u/v/w/x/y/z).\n"
+            .to_owned(),
+    ] {
+        assert_eq!(check::prose_violations(p, &good), NONE, "{good}");
+    }
+}
+
+// --- No stale claims in the docs -------------------------------------------
+
+/// The docs that the claim checks read.
+fn claim_docs() -> Vec<PathBuf> {
+    let mut files = prose_docs();
+    files.push(root().join("docs/plan.md"));
+    files
+}
+
+#[test]
+fn docs_make_no_stale_claims() {
+    assert_files(
+        "docs_make_no_stale_claims",
+        &claim_docs(),
+        check::stale_claim_violations,
+    );
+}
+
+#[test]
+fn docs_make_no_stale_claims_sees_each_claim() {
+    let p = "README.md";
+    for bad in [
+        "A create, a comment or a transition is never\nsent a second time after a lost reply.",
+        "After a 5xx, the client never sends the write a second time.",
+        "A failed sink gets 503, so Jira sends the delivery again.",
+        "The opt-in `resend_after_negative_lookup` sends a write again.",
+        "- Good: a handler fault never loses an event.",
+        "It refuses the memory store unless\n`allow_memory_in_production = true` is set.",
+    ] {
+        assert_eq!(check::stale_claim_violations(p, bad).len(), 1, "{bad}");
+    }
+    let good = "Set `[security.webhooks.replay] allow_memory_in_production = true`.\n\
+                A `Permanent` error gets 200. A `Transient` error gets 503.";
+    assert_eq!(check::stale_claim_violations(p, good), NONE);
+}
+
+#[test]
+fn adrs_cite_real_doc_text() {
+    let mut corpus = read("README.md");
+    for doc in claim_docs() {
+        corpus.push_str(&std::fs::read_to_string(doc).unwrap());
+    }
+    let mut found = Vec::new();
+    for adr in files_under(&root().join("docs/adr"), &["md"]) {
+        let text = std::fs::read_to_string(&adr).unwrap();
+        // The ADR itself does not count as the doc that it cites.
+        let others = corpus.replace(&text, "");
+        found.extend(check::cited_doc_violations(&rel(&adr), &text, &others));
+    }
+    assert!(found.is_empty(), "{}", found.join("\n"));
+}
+
+#[test]
+fn adrs_cite_real_doc_text_sees_a_missing_quote() {
+    let adr = "- Bad: a duplicate. The docs say \"best effort; no\nduplicate here\".";
+    assert_eq!(
+        check::cited_doc_violations("a", adr, "Other text.").len(),
+        1
+    );
+    let corpus = "The opt-in is best effort; no duplicate here, mostly.";
+    assert_eq!(check::cited_doc_violations("a", adr, corpus), NONE);
+}
+
+#[test]
+fn adr_0005_names_each_policy_fn() {
+    let found = check::adr_policy_violations(
+        &read("crates/autumn-jira/src/policy.rs"),
+        &read("docs/adr/0005-verified-policy-core.md"),
+    );
+    assert!(found.is_empty(), "{}", found.join("\n"));
+}
+
+#[test]
+fn adr_0005_names_each_policy_fn_sees_a_gap() {
+    let policy = "pub const fn decide() {}\npub fn jql_quote() {}\nfn private() {}\n\
+                  #[cfg(test)]\nmod tests {\npub fn helper() {}\n}\n";
+    assert_eq!(check::public_fns(policy), ["decide", "jql_quote"]);
+    assert_eq!(
+        check::adr_policy_violations(policy, "`decide` and `jql_quote`"),
+        NONE
+    );
+    assert_eq!(check::adr_policy_violations(policy, "`decide`").len(), 1);
 }
