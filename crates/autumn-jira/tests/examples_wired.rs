@@ -736,8 +736,16 @@ mod self_tests {
                    ```rust,ignore\n// From the other example.\nx();\n```\n";
         let found = wired::snippet_violations(bad, &source);
         assert_eq!(found.len(), 2, "{found:?}");
+        // AC38: the README doc test compiles a `rust` or a `rust,no_run`
+        // block. It does not compile an `ignore` block, so such a block must
+        // name an example.
+        let compiled = "```rust\nlet any = 1;\n```\n```rust,no_run\nlet any = 1;\n```\n";
+        assert_eq!(wired::snippet_violations(compiled, &source), NONE);
         let free = "```rust,ignore\nlet any = 1;\n```\n";
-        assert_eq!(wired::snippet_violations(free, &source), NONE);
+        assert_eq!(
+            wired::snippet_violations(free, &source),
+            ["README: a `rust,ignore` snippet is not compiled and names no example: let any = 1;"]
+        );
         // R2E-tests-guards-9: the order counts, and test code and comments
         // are not the example.
         let two = "fn start() {\n    let a = one();\n    // let c = gone();\n    let b = two();\n}\n\
