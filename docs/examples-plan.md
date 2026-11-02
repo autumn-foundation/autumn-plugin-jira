@@ -218,8 +218,10 @@ Rules for each example (EX8 checks them by text):
   autumn-jira-camel --example camel_route`. `RUN_TIMEOUT` is 30 s.
 - **Check and failure tests:** ex: `camel_route::the_route_creates_and_moves`
   checks the out headers and the Jira state with exact values.
-  `camel_route::unknown_option_fails_at_route_add` wants `InvalidUri` that
-  lists the option names. `camel_route::a_wrong_value_fails_the_check`.
+  `camel_route::unknown_option_fails_at_route_add` wants `InvalidUri` from
+  the component. At the route add, camel-core wraps it in a `RouteError`
+  that keeps the `InvalidUri` text and the option names. The test checks
+  both variants and the text. `camel_route::a_wrong_value_fails_the_check`.
 
 ### 7.5 `ecosystem` (EX5, EX6, EX7)
 

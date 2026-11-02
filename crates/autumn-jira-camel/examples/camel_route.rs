@@ -289,16 +289,35 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn unknown_option_fails_at_route_add() {
+        const BAD: &str = "jira:createIssue?project=OPS&issueType=Task&summary=x";
         let fake = FakeJira::new();
-        let err = start(
-            &fake,
-            "jira:createIssue?project=OPS&issueType=Task&summary=x",
-        )
-        .await
-        .map(|_| ())
-        .expect_err("an unknown option fails at the route add");
+        // EX4: the component gives `InvalidUri` for the unknown option.
+        let component = JiraComponent::new(client_for(&fake).unwrap());
+        let direct =
+            camel_component_api::Component::create_endpoint(&component, BAD, &NoOpComponentContext);
+        assert!(
+            matches!(direct, Err(CamelError::InvalidUri(_))),
+            "{:?}",
+            direct.err()
+        );
+        let err = start(&fake, BAD)
+            .await
+            .map(|_| ())
+            .expect_err("an unknown option fails at the route add");
+        // camel-core wraps the `InvalidUri` in a `RouteError` at the route
+        // add. The wrap keeps the `Display` text of `InvalidUri`.
+        assert!(
+            matches!(
+                err.downcast_ref::<CamelError>(),
+                Some(CamelError::RouteError(_))
+            ),
+            "{err:?}"
+        );
         let text = err.to_string();
-        assert!(text.contains("unknown jira: option 'summary'"), "{text}");
+        assert!(
+            text.contains("Invalid URI: unknown jira: option 'summary'"),
+            "{text}"
+        );
         assert!(
             text.contains("allowHeaderOverrides"),
             "it lists the names: {text}"
