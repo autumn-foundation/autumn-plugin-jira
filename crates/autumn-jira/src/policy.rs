@@ -771,6 +771,17 @@ mod tests {
         assert_eq!(decide(Read, Outcome::ClientError, 1, 5), Stop);
         assert_eq!(decide(Read, Outcome::Redirect, 1, 5), Stop);
         assert_eq!(decide(Read, Outcome::NotSent, 0, 0), Stop);
+        // Each resendable class retries a 429 and a "not sent" (f).
+        for class in [Read, IdempotentWrite, CheckedWrite] {
+            assert_eq!(
+                decide(class, Outcome::RateLimited, 1, 5),
+                Retry,
+                "{class:?}"
+            );
+            assert_eq!(decide(class, Outcome::NotSent, 1, 5), Retry, "{class:?}");
+            assert_eq!(decide(class, Outcome::MaybeSent, 4, 5), Retry, "{class:?}");
+            assert_eq!(decide(class, Outcome::RateLimited, 5, 5), Stop, "{class:?}");
+        }
     }
 
     #[test]
@@ -803,6 +814,15 @@ mod tests {
         assert_eq!(scale_permille(2_000, 1_150), 2_300);
         assert_eq!(scale_permille(u64::MAX, 700), u64::MAX);
         assert_eq!(scale_permille(10, 5_000), 10);
+        // The edge of the multiply branch.
+        let edge = u64::MAX / 1_300;
+        assert_eq!(scale_permille(edge, 1_000), edge);
+        let exact = u128::from(edge) * 1_300 / 1_000;
+        assert_eq!(u128::from(scale_permille(edge, 1_300)), exact);
+        assert_eq!(scale_permille(edge + 1, 1_300), edge + 1);
+        assert_eq!(scale_permille(edge + 1, 700), edge + 1);
+        assert_eq!(scale_permille(1_000, 1_301), 1_000);
+        assert_eq!(scale_permille(1_000, 1_300), 1_300);
     }
 
     #[test]
@@ -842,6 +862,11 @@ mod tests {
         ));
         assert!(!signature_shape_ok(&good.as_bytes()[..70]));
         assert!(!signature_shape_ok(b""));
+        // The right prefix and length, with a hex digit that is not lower case.
+        let upper = format!("sha256={}", "A".repeat(64));
+        assert!(!signature_shape_ok(upper.as_bytes()));
+        let one = format!("sha256={}F", &good[7..70]);
+        assert!(!signature_shape_ok(one.as_bytes()));
         assert_eq!(jql_quote("abc"), "\"abc\"");
         assert_eq!(jql_quote("a\"b"), "\"a\\\"b\"");
         assert_eq!(jql_quote("a\\b"), "\"a\\\\b\"");
@@ -937,6 +962,36 @@ mod tests {
         Some(out)
     }
 
+    /// The rules (e) to (h) of `decide` for one input.
+    fn decide_attempt_rules(
+        class: OpClass,
+        outcome: Outcome,
+        attempt: u32,
+        max: u32,
+    ) -> Result<(), TestCaseError> {
+        let r = decide(class, outcome, attempt, max);
+        // (e).
+        if r == Decision::Retry {
+            prop_assert!(attempt < cap(max));
+        }
+        // (f).
+        if resendable(class) && transient(outcome) {
+            prop_assert_eq!(r == Decision::Retry, attempt < cap(max));
+            prop_assert!(matches!(r, Decision::Retry | Decision::Stop));
+        }
+        // (g).
+        if class == OpClass::MarkedWrite
+            && matches!(outcome, Outcome::RateLimited | Outcome::NotSent)
+        {
+            prop_assert_eq!(r == Decision::Retry, attempt < cap(max));
+            prop_assert!(matches!(r, Decision::Retry | Decision::Stop));
+        }
+        if class == OpClass::UnsafeWrite && outcome == Outcome::NotSent {
+            prop_assert_eq!(r == Decision::Retry, attempt < cap(max));
+        }
+        Ok(())
+    }
+
     proptest! {
         #[test]
         fn spec_as_test_classify_status(status: u16) {
@@ -987,25 +1042,25 @@ mod tests {
         }
 
         #[test]
-        fn spec_as_test_decide_attempt_bound(class in any_class(), outcome in any_outcome(), attempt: u32, max: u32) {
+        fn spec_as_test_decide_attempt_bound_small(class in any_class(), outcome in any_outcome(), attempt in 0_u32..8, max in 0_u32..8) {
+            // Small values reach both sides of `attempt < cap(max)`.
+            decide_attempt_rules(class, outcome, attempt, max)?;
+        }
+
+        #[test]
+        fn spec_as_test_decide_no_resend_after_maybe_sent_small(class in any_class(), outcome in any_outcome(), attempt in 0_u32..8, max in 0_u32..8) {
             let r = decide(class, outcome, attempt, max);
-            // (e).
+            if matches!(class, OpClass::UnsafeWrite | OpClass::MarkedWrite) && maybe_sent(outcome) {
+                prop_assert!(matches!(r, Decision::Unknown | Decision::Confirm));
+            }
             if r == Decision::Retry {
-                prop_assert!(attempt < cap(max));
+                prop_assert!(!(matches!(class, OpClass::UnsafeWrite | OpClass::MarkedWrite) && maybe_sent(outcome)));
             }
-            // (f).
-            if resendable(class) && transient(outcome) {
-                prop_assert_eq!(r == Decision::Retry, attempt < cap(max));
-                prop_assert!(matches!(r, Decision::Retry | Decision::Stop));
-            }
-            // (g).
-            if class == OpClass::MarkedWrite && matches!(outcome, Outcome::RateLimited | Outcome::NotSent) {
-                prop_assert_eq!(r == Decision::Retry, attempt < cap(max));
-                prop_assert!(matches!(r, Decision::Retry | Decision::Stop));
-            }
-            if class == OpClass::UnsafeWrite && outcome == Outcome::NotSent {
-                prop_assert_eq!(r == Decision::Retry, attempt < cap(max));
-            }
+        }
+
+        #[test]
+        fn spec_as_test_decide_attempt_bound(class in any_class(), outcome in any_outcome(), attempt: u32, max: u32) {
+            decide_attempt_rules(class, outcome, attempt, max)?;
         }
 
         #[test]
@@ -1047,6 +1102,29 @@ mod tests {
             if after.is_none() {
                 prop_assert_eq!(r, Some(backoff_ms(base, attempt, cap)));
             }
+        }
+
+        #[test]
+        fn spec_as_test_scale_permille_in_range(value in 0..=u64::MAX / 1_300, permille in 0_u32..=1_300) {
+            // The multiply branch: the uniform `u64` strategy almost never
+            // reaches it.
+            let exact = u128::from(value) * u128::from(permille) / 1_000;
+            prop_assert_eq!(u128::from(scale_permille(value, permille)), exact);
+        }
+
+        #[test]
+        fn spec_as_test_scale_permille_out_of_range(value in u64::MAX / 1_300 + 1.., permille: u32) {
+            prop_assert_eq!(scale_permille(value, permille), value);
+        }
+
+        #[test]
+        fn spec_as_test_jitter_bounds_small(wait in 0_u64..100_000, permille in 0_u32..2_000, floor in 0_u64..50_000, cap in 0_u64..100_000) {
+            // Real waits: the scaled branch of `scale_permille`.
+            let r = apply_jitter(wait, permille, floor, cap);
+            let p = u128::from(permille.clamp(JITTER_MIN_PERMILLE, JITTER_MAX_PERMILLE));
+            let scaled = u128::from(wait) * p / 1_000;
+            let high = u128::from(cap.max(floor));
+            prop_assert_eq!(u128::from(r), scaled.clamp(u128::from(floor), high));
         }
 
         #[test]
@@ -1138,6 +1216,22 @@ mod tests {
         #[test]
         fn spec_as_test_is_lower_hex(b: u8) {
             prop_assert_eq!(is_lower_hex(b), b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+        }
+
+        #[test]
+        fn spec_as_test_signature_shape_mixed_case(hex in "[0-9a-zA-Z]{64}") {
+            // The right prefix and length: only the hex rule decides.
+            let header = format!("sha256={hex}");
+            let expected = hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+            prop_assert_eq!(signature_shape_ok(header.as_bytes()), expected);
+        }
+
+        #[test]
+        fn spec_as_test_signature_shape_one_bad_byte(hex in "[0-9a-f]{64}", at in 0_usize..64, bad in "[g-zA-Z:/`]") {
+            let mut text = hex.into_bytes();
+            text[at] = bad.as_bytes()[0];
+            let header = [b"sha256=".as_slice(), &text].concat();
+            prop_assert!(!signature_shape_ok(&header));
         }
 
         #[test]
