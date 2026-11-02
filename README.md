@@ -15,8 +15,9 @@ In one afternoon, you can:
 The safe path is the default. By default, a create, a comment or a
 transition does not run two times after a lost reply. A create or a comment
 carries a marker, and the client finds the first write by its marker. A
-transition reads the status first. Only an explicit opt-in sends a marked
-write again. Webhooks are at least once, so each handler must be
+transition reads the status first. After a lost reply, it sends again only
+when the issue did not move. Only an explicit opt-in sends a marked write
+again. Webhooks are at least once, so each handler must be
 idempotent.
 
 ## Crates
@@ -482,7 +483,12 @@ A test compares this table with `autumn_jira::writes::WRITES`.
 never sends one. A create or a comment carries a marker. After a 5xx or a
 network error that can have reached Jira, the client does not send a marked
 write again. It looks for the marker. A transition reads the status first.
-When the issue is at the target, the client sends nothing.
+When the issue is at the target, the client sends nothing. After a 5xx or a
+lost reply, the client sends the transition again in one case only. The
+issue is still at the status of the first attempt, and the transition is
+not global and not looped. Jira rejects such a transition after a commit,
+so it cannot run two times. In all other cases, the call gives
+`OutcomeUnknown`.
 
 ```mermaid
 flowchart TD

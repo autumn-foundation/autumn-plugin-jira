@@ -35,7 +35,13 @@ layers multiply the sends and break the activity timeout.
 - Marked comment: a last paragraph `autumn-ref: <26 lower base32>`. The
   lookup reads the newest comments, which are not from the search index.
 - Checked transition: before each attempt, the client reads the status. At
-  the target it returns `AlreadyThere`.
+  the target it returns `AlreadyThere`. The status alone cannot show that a
+  "maybe sent" attempt did not run. So after a 5xx or a "maybe sent"
+  attempt, the client sends again only when two rules hold. The issue is
+  still at the status of the first attempt. The transition is not global
+  and not looped, so Jira rejects it after a commit. Else the call gives
+  `OutcomeUnknown`. A 400 or a 409 after a "maybe sent" attempt makes the
+  client read the status once more. At the target, it returns `Moved`.
 - 429: reads, idempotent, checked and marked writes retry, with
   `Retry-After` as the floor. A plain unsafe write does not retry a 429.
   Assumption A1: a 429 means Jira did not run the write. Atlassian says to
