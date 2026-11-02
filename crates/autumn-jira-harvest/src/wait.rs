@@ -115,7 +115,13 @@ pub enum StatusWait {
 /// 5. At the deadline, one last read. At the target, the wait ends with
 ///    [`WaitSource::Poll`]. Else it ends with [`StatusWait::TimedOut`].
 /// 6. At the end, the wait takes the signals that are already in the
-///    history. They are about a wait that is over.
+///    history. They are about a wait that is over. A strict replay of
+///    harvest 0.8 fails on a history that ends with signals that no code
+///    read, so this drain keeps every history replayable.
+///
+/// The drain has one cost: a workflow that reads [`SIGNAL`] itself after
+/// the wait does not get the signals that came before the end of the
+/// wait. A later wait reads the issue first, so it does not need them.
 ///
 /// # Errors
 ///

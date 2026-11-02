@@ -8,7 +8,12 @@
 //! The tests with no database call use a pool to a closed port: a database
 //! call there gives an error, so an `Ok` proves that no call was made.
 
-#![allow(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::print_stderr,
+    reason = "tests; a skip prints why"
+)]
 
 use std::sync::Arc;
 

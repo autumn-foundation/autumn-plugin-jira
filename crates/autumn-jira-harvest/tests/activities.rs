@@ -762,13 +762,13 @@ async fn reads_and_idempotent_writes() {
     let delete = DeleteIssueInput::new(key_ref(&keys[0]));
     let deleted = delete.run(&client, &ctx).await.unwrap();
     assert_eq!(deleted.outcome, DeleteKind::Deleted);
-    let lost = failure_for(&JiraError::Upstream {
+    let lost_reply = failure_for(&JiraError::Upstream {
         op: Op::DeleteIssue,
         status: 503,
     })
     .into_error_payload();
     let gone = delete
-        .run(&client, &retry_of(&ctx, 2, Some(lost)))
+        .run(&client, &retry_of(&ctx, 2, Some(lost_reply)))
         .await
         .unwrap();
     assert_eq!(gone.outcome, DeleteKind::GoneAfterRetry);
@@ -1023,13 +1023,14 @@ fn block_on<F: std::future::Future>(future: F) -> F::Output {
 
 /// A mock that runs the real activity handler over the fake.
 fn real(
-    info: ActivityInfo,
+    info: &ActivityInfo,
     fake: &FakeJira,
 ) -> impl Fn(Value, u32) -> Result<Value, String> + Send + Sync + 'static {
     let state = state(fake);
+    let handler = info.handler;
     move |input, attempt| {
         let ctx = ActivityContext::new_test_with_state(Arc::clone(&state)).with_attempt(attempt);
-        block_on((info.handler)(&ctx, input))
+        block_on(handler(&ctx, input))
     }
 }
 
@@ -1044,7 +1045,7 @@ async fn no_secret_in_outputs_or_history() {
         sim = sim
             .with_activity_info(&info)
             .with_retry_policy(name, RetryPolicy::fixed(3, Duration::from_millis(100)))
-            .mock_activity_with_attempt(name, real(info, &fake));
+            .mock_activity_with_attempt(name, real(&info, &fake));
     }
     let mut create = create_input();
     create.settle_secs = Some(1);

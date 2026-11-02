@@ -389,11 +389,12 @@ async fn lifecycle(h: &Harness) -> Result<Value, BoxError> {
                 // One read by the transition and one by the wait.
                 let waiting =
                     fake.count(FakeOp::DoTransition) >= 1 && fake.count(FakeOp::GetIssue) >= 2;
-                if waiting && !resolved {
-                    if let Some(key) = lone_key(&fake) {
-                        fake.human_transition(&key, "Done", ANN)?;
-                        resolved = true;
-                    }
+                if waiting
+                    && !resolved
+                    && let Some(key) = lone_key(&fake)
+                {
+                    fake.human_transition(&key, "Done", ANN)?;
+                    resolved = true;
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
@@ -482,9 +483,11 @@ async fn run(url: &str, fake: FakeJira) -> Result<Value, BoxError> {
 
 /// The values that `check` compares.
 fn summarize(first: &Value, counts: &Value, second: &Value, h: &Harness) -> Value {
-    let wait = |w: &Value| match w.get("Reached") {
-        Some(r) => json!({"status": r["status"]["name"], "source": r["source"]}),
-        None => json!({"timed_out": w}),
+    let wait = |w: &Value| {
+        w.get("Reached").map_or_else(
+            || json!({"timed_out": w}),
+            |r| json!({"status": r["status"]["name"], "source": r["source"]}),
+        )
     };
     let counters = h.bridge.counters();
     json!({
@@ -630,7 +633,7 @@ mod tests {
         assert!(err.starts_with("workflow ticket-"), "{err}");
         // A 400 is not retryable: one POST, and no wait for the timeout.
         assert_eq!(fake.count(FakeOp::CreateIssue), 1, "{err}");
-        assert!(fake.issues().is_empty());
+        assert_eq!(fake.issues().len(), 0, "no issue");
     }
 
     #[test]

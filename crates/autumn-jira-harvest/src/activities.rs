@@ -833,6 +833,11 @@ pub struct WatchOutput {
 }
 
 /// Creates an issue at most once for the activity idempotency key (plan 7.2).
+///
+/// # Errors
+///
+/// The failure of the work method, or `jira.config` when the worker
+/// state has no client for `input.client`.
 #[activity(
     start_to_close = "12m",
     retry = RetryPolicy::exponential(5, Duration::from_secs(2))
@@ -845,6 +850,11 @@ pub async fn jira_create_issue(
 }
 
 /// Reads one issue.
+///
+/// # Errors
+///
+/// The failure of the work method, or `jira.config` when the worker
+/// state has no client for `input.client`.
 #[activity(start_to_close = "3m", retry = get_issue_retry())]
 pub async fn jira_get_issue(
     ctx: &ActivityContext,
@@ -854,6 +864,11 @@ pub async fn jira_get_issue(
 }
 
 /// Reads one page of a search.
+///
+/// # Errors
+///
+/// The failure of the work method, or `jira.config` when the worker
+/// state has no client for `input.client`.
 #[activity(
     start_to_close = "3m",
     retry = RetryPolicy::exponential(5, Duration::from_secs(1))
@@ -866,6 +881,11 @@ pub async fn jira_search_page(
 }
 
 /// Edits an issue.
+///
+/// # Errors
+///
+/// The failure of the work method, or `jira.config` when the worker
+/// state has no client for `input.client`.
 #[activity(
     start_to_close = "5m",
     retry = RetryPolicy::exponential(5, Duration::from_secs(1))
@@ -878,6 +898,11 @@ pub async fn jira_edit_issue(
 }
 
 /// Moves an issue to a status, with a state check.
+///
+/// # Errors
+///
+/// The failure of the work method, or `jira.config` when the worker
+/// state has no client for `input.client`.
 #[activity(
     start_to_close = "12m",
     retry = RetryPolicy::exponential(5, Duration::from_secs(2))
@@ -890,6 +915,11 @@ pub async fn jira_transition_to_status(
 }
 
 /// Adds a comment at most once for the activity idempotency key.
+///
+/// # Errors
+///
+/// The failure of the work method, or `jira.config` when the worker
+/// state has no client for `input.client`.
 #[activity(
     start_to_close = "12m",
     retry = RetryPolicy::exponential(5, Duration::from_secs(2))
@@ -902,6 +932,11 @@ pub async fn jira_add_comment(
 }
 
 /// Deletes an issue.
+///
+/// # Errors
+///
+/// The failure of the work method, or `jira.config` when the worker
+/// state has no client for `input.client`.
 #[activity(
     start_to_close = "5m",
     retry = RetryPolicy::exponential(5, Duration::from_secs(1))
@@ -914,6 +949,11 @@ pub async fn jira_delete_issue(
 }
 
 /// Adds a signal route and the label `autumn-tracked` to an issue.
+///
+/// # Errors
+///
+/// The failure of the work method, or `jira.config` when the worker
+/// state has no client for `input.client`.
 #[activity(
     start_to_close = "12m",
     retry = RetryPolicy::exponential(5, Duration::from_secs(1))
