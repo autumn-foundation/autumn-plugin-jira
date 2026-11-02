@@ -70,6 +70,12 @@ pub use runtime::{JiraRuntime, WebhookCounters};
 pub use service::{JiraResultExt, JiraService, autumn_error};
 pub use webhook_config::{webhook_endpoint, webhook_endpoint_toml};
 
+// The README snippets compile and run as doc tests. They use `FakeJira`
+// and the `testing` helpers, so they need the `testing` feature.
+#[cfg(all(doctest, feature = "testing"))]
+#[doc = include_str!("../../../README.md")]
+pub struct ReadmeDoctests;
+
 /// The plugin name. autumn uses it to find a plugin that is added two times.
 pub const PLUGIN_NAME: &str = "autumn-plugin-jira";
 /// The `autumn-web` versions that this plugin supports.
