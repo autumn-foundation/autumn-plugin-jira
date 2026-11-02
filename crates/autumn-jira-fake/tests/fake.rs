@@ -1,5 +1,7 @@
 //! Behaviour tests of `FakeJira` (AC22).
 
+#![allow(clippy::too_many_lines, reason = "each test walks one whole feature")]
+
 use autumn_jira_fake::sign;
 
 #[test]
@@ -684,12 +686,12 @@ fn jql_subset() {
     assert!(error("cf[10010] = 1").contains("does not exist"));
     assert!(error("summary ~ x").contains("does not exist"));
     assert!(error("project = OPS ORDER BY colour").contains("colour"));
-    assert!(!error("project =").is_empty());
-    assert!(!error("project = OPS OR labels = a").is_empty());
-    assert!(!error("project = \"OPS").is_empty());
-    assert!(!error("project in (OPS").is_empty());
-    assert!(!error("project = OPS AND").is_empty());
-    assert!(!error("project = OPS extra").is_empty());
+    assert_ne!(error("project ="), "");
+    assert_ne!(error("project = OPS OR labels = a"), "");
+    assert_ne!(error("project = \"OPS"), "");
+    assert_ne!(error("project in (OPS"), "");
+    assert_ne!(error("project = OPS AND"), "");
+    assert_ne!(error("project = OPS extra"), "");
     assert!(error("project = NOPE").contains("NOPE"));
 
     // Token pages.
@@ -1107,7 +1109,7 @@ async fn faults_table() {
     );
     let reply = send_with(&fake, common::create_request("OPS", "late")).await;
     assert_eq!(reply, Err(TransportError::Timeout));
-    assert!(fake.issues().is_empty());
+    assert_eq!(fake.issues().len(), 0);
     tokio::time::advance(Duration::from_secs(4)).await;
     assert!(fake.issue("OPS-1").is_none());
     tokio::time::advance(Duration::from_secs(1)).await;
@@ -1703,10 +1705,9 @@ async fn fallback_serves_other_hosts() {
     );
     assert_eq!(beta.requests().len(), 4);
     // In the sans-IO core, the other cloud id is not found.
-    let other = format!(
-        "https://api.atlassian.com/ex/jira/22222222-3333-4444-8555-666666666666/rest/api/3/myself"
-    );
-    assert_eq!(call(&acme, "GET", &other, None).status, 404);
+    let other =
+        "https://api.atlassian.com/ex/jira/22222222-3333-4444-8555-666666666666/rest/api/3/myself";
+    assert_eq!(call(&acme, "GET", other, None).status, 404);
     assert_eq!(DEFAULT_CLOUD_ID, "11111111-2222-4333-8444-555555555555");
 }
 

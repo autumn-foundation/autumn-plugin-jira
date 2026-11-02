@@ -157,25 +157,51 @@ impl FakeDelivery {
     /// Returns the delivery id (`X-Atlassian-Webhook-Identifier`).
     #[must_use]
     pub fn id(&self) -> &str {
-        ""
+        self.header(crate::webhook::IDENTIFIER).unwrap_or_default()
     }
 
     /// Returns the first value of a header. The name match ignores case.
     #[must_use]
-    pub fn header(&self, _name: &str) -> Option<&str> {
-        None
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
     }
 
-    /// Returns a copy with a changed body and the old signature.
+    /// Returns a copy with a changed body and the old signature. The body
+    /// is still valid JSON: the `timestamp` goes up by one.
     #[must_use]
     pub fn tampered(&self) -> Self {
-        self.clone()
+        let mut copy = self.clone();
+        match serde_json::from_slice::<serde_json::Value>(&self.body) {
+            Ok(mut body) if body["timestamp"].is_i64() => {
+                let ts = body["timestamp"].as_i64().unwrap_or_default();
+                body["timestamp"] = serde_json::Value::from(ts.saturating_add(1));
+                copy.body = body.to_string().into_bytes();
+            }
+            _ => copy.body.push(b' '),
+        }
+        copy
     }
 
-    /// Returns a copy from another actor, with a new id and a new signature.
+    /// Returns a copy from another actor, with a new id and a new
+    /// signature. It sets `user` and, for a comment event, the comment
+    /// author.
     #[must_use]
-    pub fn with_actor(&self, _account_id: &str) -> Self {
-        self.clone()
+    pub fn with_actor(&self, account_id: &str) -> Self {
+        let mut body: serde_json::Value =
+            serde_json::from_slice(&self.body).unwrap_or(serde_json::Value::Null);
+        let user = crate::webhook::short_user(account_id);
+        if body.get("user").is_some() {
+            body["user"] = user.clone();
+        }
+        if body.get("comment").is_some() {
+            body["comment"]["author"] = user.clone();
+            body["comment"]["updateAuthor"] = user;
+        }
+        let id = format!("{}-as-{account_id}", self.id());
+        crate::webhook::build(&self.secret, &id, body.to_string().into_bytes())
     }
 }
 

@@ -1,6 +1,11 @@
 //! Helpers for the `FakeJira` tests.
 
 #![allow(dead_code, reason = "each test binary uses a part of the helpers")]
+#![allow(
+    clippy::unwrap_used,
+    clippy::needless_pass_by_value,
+    reason = "test helpers: a failure is a test failure"
+)]
 
 use autumn_jira_fake::{DEFAULT_API_TOKEN, DEFAULT_EMAIL, FakeJira};
 use base64::Engine as _;
