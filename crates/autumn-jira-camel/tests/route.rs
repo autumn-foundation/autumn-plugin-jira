@@ -1089,3 +1089,104 @@ async fn camel_redelivery_never_resends_unmarked_writes() {
     assert!(validation(&err).contains(KEY), "{err}");
     stop(camel).await;
 }
+
+// --- R7-api-docs-2: the out header of an earlier step --------------------
+
+/// Starts one route `from` with the `jira:` steps `to`, in order. A
+/// `("set", value)` step sets the `JiraIssueKey` header to `value`. A
+/// `("body", text)` step sets the body to the JSON string `text`.
+async fn start_chain(fake: &FakeJira, from: &str, to: &[(&str, &str)]) -> camel_core::CamelContext {
+    use camel_builder::{RouteBuilder, StepAccumulator};
+    let mut camel = camel_core::CamelContext::builder().build().await.unwrap();
+    camel.register_component(camel_component_direct::DirectComponent::new());
+    camel.register_component(component(fake));
+    let mut route = RouteBuilder::from(from).route_id("route-chain");
+    for (kind, value) in to {
+        route = match *kind {
+            "set" => route.set_header(HEADER_ISSUE_KEY, json!(value)),
+            "body" => route.set_body(Body::Json(json!(value))),
+            _ => route.to(*value),
+        };
+    }
+    camel
+        .add_route_definition(route.build().unwrap())
+        .await
+        .unwrap();
+    camel.start().await.unwrap();
+    camel
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_out_header_of_an_earlier_step_is_not_an_override() {
+    let fake = FakeJira::new();
+    two_issues(&fake).await;
+
+    // getIssue OPS-1, then addComment on OPS-2: the out header OPS-1 of
+    // step 1 does not count as an override header of step 2.
+    let camel = start_chain(
+        &fake,
+        "direct:in",
+        &[
+            ("to", "jira:getIssue?issueKey=OPS-1"),
+            ("body", "Linked"),
+            ("to", "jira:addComment?issueKey=OPS-2"),
+        ],
+    )
+    .await;
+    let ex = send(&camel, "direct:in", json(json!("Linked")))
+        .await
+        .unwrap();
+    assert_eq!(reply(&ex)["issue"], json!("OPS-2"));
+    assert_eq!(header(&ex, HEADER_ISSUE_KEY), Some(json!("OPS-2")));
+    stop(camel).await;
+
+    // Two reads of two issues.
+    let camel = start_chain(
+        &fake,
+        "direct:in",
+        &[
+            ("to", "jira:getIssue?issueKey=OPS-1"),
+            ("to", "jira:getIssue?issueKey=OPS-2"),
+        ],
+    )
+    .await;
+    let ex = send(&camel, "direct:in", Message::default()).await.unwrap();
+    assert_eq!(reply(&ex)["key"], json!("OPS-2"));
+    stop(camel).await;
+
+    // A header that a step between them changes is not the out header of
+    // step 1. It still fails without allowHeaderOverrides.
+    let camel = start_chain(
+        &fake,
+        "direct:in",
+        &[
+            ("to", "jira:getIssue?issueKey=OPS-1"),
+            ("set", "OPS-1000"),
+            ("to", "jira:getIssue?issueKey=OPS-2"),
+        ],
+    )
+    .await;
+    let err = send(&camel, "direct:in", Message::default())
+        .await
+        .unwrap_err();
+    assert!(validation(&err).contains("allowHeaderOverrides"), "{err}");
+    stop(camel).await;
+
+    // With allowHeaderOverrides, the out header of step 1 still gives the
+    // issue of step 2.
+    let camel = start_chain(
+        &fake,
+        "direct:in",
+        &[
+            ("to", "jira:getIssue?issueKey=OPS-1"),
+            (
+                "to",
+                "jira:getIssue?issueKey=OPS-2&allowHeaderOverrides=true",
+            ),
+        ],
+    )
+    .await;
+    let ex = send(&camel, "direct:in", Message::default()).await.unwrap();
+    assert_eq!(reply(&ex)["key"], json!("OPS-1"));
+    stop(camel).await;
+}
