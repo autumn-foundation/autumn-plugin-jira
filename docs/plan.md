@@ -3011,7 +3011,9 @@ without the backslash escape; (M7) the bridge maps a finished run to 503;
 (M8) the wait deadline from `ctx.now()`; (M9) `host_may_send` ignores
 `MaybeSent`; (M10) the route mounted with `nest`. Each mutation must fail a
 named test. `cargo mutants -f crates/autumn-jira/src/policy.rs` with zero
-survivors when the tool installs.
+non-equivalent survivors. An equivalent mutant gives the same value on each
+input, so no test can kill it. The run found 9 equivalent mutants. The list
+is in [ac-evidence.md](ac-evidence.md), section "Mutation tests".
 
 ---
 
