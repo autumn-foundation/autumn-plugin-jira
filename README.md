@@ -314,11 +314,16 @@ worker state. Each activity input holds ids and options, never a secret.
 
 ```rust,ignore
 // From the harvest_workflow example, which CI runs.
+// From an env var or a secret store in production.
+let key = RouteKey::new(Secret::new(format!("route-key-{}", OsEntropy.hex(16))))?;
 let (registry, _dags, _schedules, config) = HarvestBuilder::new()
-    .workflows(vec![jira_ticket_lifecycle_info()])
+    .workflows(vec![
+        jira_ticket_lifecycle_info(),
+        jira_watch_lifecycle_info(),
+    ])
     .activities(autumn_jira_harvest::activities())
     .state(JiraClients::new(client))
-    .state(RouteKey::new(Secret::new(route_key_from_env))?)
+    .state(key)
     .worker(config)
     .try_build()?
     .into_worker_parts();
@@ -375,13 +380,22 @@ marker. Found gives `outcome = "found"`. Not found gives a non-retryable
 
 ```rust,ignore
 // From the camel_route example, which CI runs.
-camel.register_component(JiraComponent::new(client.durable()));
+const CREATE: &str = "jira:createIssue?project=OPS&issueType=Task";
+const MOVE: &str =
+    "jira:transitionToStatus?status=category:indeterminate&allowHeaderOverrides=true";
+camel.register_component(JiraComponent::new(client_for(fake)?));
 let route = RouteBuilder::from("direct:in")
-    .to("jira:createIssue?project=OPS&issueType=Task")
+    .route_id("open-ticket")
+    .to(create)
+    // The create reply is not a transition body.
     .set_body(Body::Empty)
-    .to("jira:transitionToStatus?issueKey=OPS-1&status=category:indeterminate")
+    .to(MOVE)
     .build()?;
 ```
+
+The example gives `CREATE` to `start` as `create`. The move step has no
+`issueKey` option. The `JiraIssueKey` out header of
+the create gives the issue, so the step needs `allowHeaderOverrides=true`.
 
 | Operation | Body in | Reply |
 |---|---|---|
@@ -397,8 +411,10 @@ let route = RouteBuilder::from("direct:in")
 - Out headers: `JiraIssueKey`, `JiraIssueId`, `JiraOutcome` and
   `JiraNextPageToken`.
 - The headers `JiraIssueKey`, `JiraStatus` and `JiraJql` replace the
-  options only with `allowHeaderOverrides=true`. Without the flag, such a
-  header fails the exchange loudly.
+  options only with `allowHeaderOverrides=true`. Use the flag only on a
+  route that no outside caller can send headers to. Without the flag, a
+  header that differs from the option fails the exchange. A header equal
+  to the option passes.
 - Under harvest-camel, the `HarvestIdempotencyKey` header makes
   `createIssue` and `addComment` idempotent. An attempt above 1 does a
   lookup only. For a route that a harvest activity calls, use
@@ -492,10 +508,10 @@ detail holds a token, an `Authorization` value or a body.
 | Example | Crate | Shows | Needs | Run |
 |---|---|---|---|---|
 | [`embedded`](crates/autumn-jira/examples/embedded.rs) | `autumn-jira` | The API token client on `FakeJira`: projects, create, edit, search pages, transition with resolution, comment, idempotent create after a lost reply, delete. | nothing | `cargo run --locked -p autumn-jira --example embedded` |
-| [`autumn_app`](crates/autumn-plugin-jira/examples/autumn_app/main.rs) | `autumn-plugin-jira` | An autumn app with `GET /issues/{key}` and a log sink. `scripts/smoke-autumn-example.sh` boots it in dev and prod and posts a signed webhook. | nothing | `cargo run --locked -p autumn-plugin-jira --features testing --example autumn_app` |
-| [`harvest_workflow`](crates/autumn-jira-harvest/examples/harvest_workflow.rs) | `autumn-jira-harvest` | A Postgres worker: the lifecycle recipe resolves by webhook, and a watched issue resolves by poll. | Postgres | `cargo run --locked -p autumn-jira-harvest --example harvest_workflow` |
+| [`autumn_app`](crates/autumn-plugin-jira/examples/autumn_app/main.rs) | `autumn-plugin-jira` | An autumn app with `GET /issues/{key}` and a log sink. `scripts/smoke-autumn-example.sh` boots it in dev and prod and posts a signed webhook. | the folder of its `autumn.toml` and a webhook secret | `AUTUMN_MANIFEST_DIR=crates/autumn-plugin-jira/examples/autumn_app JIRA_WEBHOOK_SECRET="$(openssl rand -hex 32)" cargo run --locked -p autumn-plugin-jira --features testing --example autumn_app` |
+| [`harvest_workflow`](crates/autumn-jira-harvest/examples/harvest_workflow.rs) | `autumn-jira-harvest` | A Postgres worker: the lifecycle recipe resolves by webhook, and a watched issue resolves by poll. | Postgres | `DATABASE_URL=postgres://jira:jira@localhost/jira_test cargo run --locked -p autumn-jira-harvest --example harvest_workflow` |
 | [`camel_route`](crates/autumn-jira-camel/examples/camel_route.rs) | `autumn-jira-camel` | `direct:in` to `jira:createIssue` to `jira:transitionToStatus`, with the out headers. | nothing | `cargo run --locked -p autumn-jira-camel --example camel_route` |
-| [`ecosystem`](examples/ecosystem) | all | Alert to ticket to resolution with San Mateo, harvest, camel and autumn. A separate workspace. | Postgres | `cargo run --locked --manifest-path examples/ecosystem/Cargo.toml` |
+| [`ecosystem`](examples/ecosystem) | all | Alert to ticket to resolution with San Mateo, harvest, camel and autumn. A separate workspace. | Postgres | `DATABASE_URL=postgres://jira:jira@localhost/jira_test cargo run --locked --manifest-path examples/ecosystem/Cargo.toml` |
 
 Each example checks its own result and exits non-zero when a value is
 wrong. CI runs each one. Each has a failure test.
@@ -512,13 +528,21 @@ cargo llvm-cov --workspace --all-features --json --summary-only --output-path co
 python3 scripts/coverage-gate.py cov.json 85
 verus verus/policy.rs
 # The separate workspace: the root commands do not see it.
-cargo test --locked --manifest-path examples/ecosystem/Cargo.toml
+cargo fmt --manifest-path examples/ecosystem/Cargo.toml --check
+cargo clippy --locked --manifest-path examples/ecosystem/Cargo.toml --all-targets -- -D warnings
+JIRA_TEST_DATABASE_URL=postgres://jira:jira@localhost/jira_test \
+  cargo test --locked --manifest-path examples/ecosystem/Cargo.toml
+cargo +1.89.0 check --locked --manifest-path examples/ecosystem/Cargo.toml --all-targets
+# After a change to a crate of this workspace, update the example lock:
+cargo update --manifest-path examples/ecosystem/Cargo.toml -p autumn-jira \
+  -p autumn-plugin-jira -p autumn-jira-harvest -p autumn-jira-camel -p autumn-jira-fake
 ```
 
 The README snippets compile as doc tests of `autumn-plugin-jira`, with the
 `testing` feature. The harvest and camel snippets are marked `ignore`:
-the plugin crate does not depend on those crates. They are copies of the
-`harvest_workflow` and `camel_route` examples, which CI runs.
+the plugin crate does not depend on those crates. A snippet that says
+"From the ... example" holds only lines of that example. The test
+`readme_snippets_copy_their_examples` checks each line.
 
 No test calls a real Jira. The tests use `FakeJira` or a
 `MemoryTransport`. The Postgres tests need `JIRA_TEST_DATABASE_URL`, and

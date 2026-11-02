@@ -34,7 +34,11 @@ cargo llvm-cov --workspace --all-features --json --summary-only --output-path co
 python3 scripts/coverage-gate.py cov.json 85
 verus verus/policy.rs
 # The separate workspace: the root commands do not see it.
-cargo test --locked --manifest-path examples/ecosystem/Cargo.toml
+cargo fmt --manifest-path examples/ecosystem/Cargo.toml --check
+cargo clippy --locked --manifest-path examples/ecosystem/Cargo.toml --all-targets -- -D warnings
+JIRA_TEST_DATABASE_URL=postgres://jira:jira@localhost/jira_test cargo test --locked --manifest-path examples/ecosystem/Cargo.toml
+DATABASE_URL=postgres://jira:jira@localhost/jira_test cargo run --locked --manifest-path examples/ecosystem/Cargo.toml
+cargo +1.89.0 check --locked --manifest-path examples/ecosystem/Cargo.toml --all-targets
 ```
 
 ## Rules
@@ -59,7 +63,9 @@ cargo test --locked --manifest-path examples/ecosystem/Cargo.toml
 - Do mutation tests on a `git clone` in the scratchpad. Never in the repo.
 - A new example needs `test = true`, a CI step, a README row, a
   `RUN_TIMEOUT`, a `check` function and a failure test. The test
-  `examples_wired` checks these items by text.
+  `examples_wired` checks these items. It reads code, not comments, and
+  the `run:` scripts of CI, not the step names.
 - After a change to a crate in this workspace, update
-  `examples/ecosystem/Cargo.lock`:
-  `cargo update --manifest-path examples/ecosystem/Cargo.toml -p autumn-jira`.
+  `examples/ecosystem/Cargo.lock`. The command is the one that the CI
+  lock check gives:
+  `cargo update --manifest-path examples/ecosystem/Cargo.toml -p autumn-jira -p autumn-plugin-jira -p autumn-jira-harvest -p autumn-jira-camel -p autumn-jira-fake`.
