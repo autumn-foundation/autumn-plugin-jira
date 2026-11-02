@@ -159,11 +159,25 @@ sequenceDiagram
 
 - The sinks run in order, each in its own task, under `handler_timeout_ms`.
   After a `Transient` error or a timeout, the later sinks do not run. A
-  timed-out task runs to its end.
+  timed-out task continues, and it holds one of `max_handler_tasks` slots.
+  The plugin stops it at `abandon_after_ms`.
+- When no slot is free, the route answers 503 at once and starts no task.
+  So a sink that hangs cannot use all the memory.
+- When autumn stops the request at `server.timeouts.request_timeout_ms`,
+  the delivery counts as `timed_out`. The start warns when the sinks can
+  take longer than that timeout.
 - Each sink can get the same delivery again, also when another sink
   fails. Make each sink idempotent.
 - `ignore_actor_account_ids` drops the events of your own service account,
-  so the app does not answer its own writes.
+  so the app does not answer its own writes. A sink that waits for a
+  state still needs those events. Add it with
+  `JiraPlugin::sink_for_all_actors(sink)`. Only such sinks get the events
+  of an ignored actor.
+- One endpoint and one secret serve one Jira site. A delivery does not
+  name its site, so give each site its own endpoint and secret.
+- `max_body_bytes` is also the memory that one unsigned request can use.
+  autumn reads the body before it checks the signature. Put limits on body
+  size, rate and concurrency in your proxy, or set a smaller cap.
 - In the prod profile, autumn needs a webhook secret of 32 bytes or more.
   It refuses the memory replay store unless you set
   `[security.webhooks.replay] allow_memory_in_production = true` (one
@@ -223,7 +237,15 @@ stores the Jira cloud id. Use the provider `jira-basic` (API token) or
 environment = "prod"
 integration = "jira"
 connection_id = "acme"        # optional: for_connection(id) serves other tenants
+# cloud_id = "..."            # optional, atlassian only; needs connection_id
+# site_url = "https://acme.atlassian.net"   # optional; needs connection_id
 ```
+
+`cloud_id` and `site_url` apply to the client of `connection_id` only. A
+client of another connection reads the `cloudId` in its own metadata, or
+it discovers its site with its own token. So the token of one tenant never
+goes to the site of another tenant. `cloud_id` or `site_url` without
+`connection_id` fails the start.
 
 Register `SanMateoPlugin` before `JiraPlugin`. It puts `SanMateo` into the
 app state. In the other order, the start fails with the fix.
@@ -243,23 +265,48 @@ async fn main() {
 ```
 
 `JiraService::for_connection(id)` gives a cached client for each tenant
-connection.
+connection. The cache keeps at most 1024 clients and drops the least
+recently used one. Pass only connection ids that your app checked. When a
+tenant connects to another site, call `JiraService::forget(id)`. The next
+`for_connection(id)` then reads the site again.
 
 Other settings, with their defaults:
 
 | Table | Keys |
 |---|---|
-| `[jira.http]` | `max_attempts = 5`, `base_backoff_ms = 2000`, `max_backoff_ms = 30000`, `max_pages = 1000`, `lookup_attempts = 3`, `lookup_delay_ms = 2000`, `timeout_secs = 30` |
-| `[jira.webhook]` | `endpoint_name = "jira"`, `max_age_secs = 7200`, `max_future_skew_secs = 300`, `handler_timeout_ms = 8000`, `ignore_actor_account_ids = []` |
+| `[jira.http]` | `max_attempts = 5`, `base_backoff_ms = 2000`, `max_backoff_ms = 30000`, `max_pages = 1000`, `lookup_attempts = 3`, `lookup_delay_ms = 2000`, `timeout_secs = 30` (API token mode only; 1 to 60) |
+| `[jira.webhook]` | `endpoint_name = "jira"`, `max_age_secs = 7200`, `max_future_skew_secs = 300` (the most), `handler_timeout_ms = 8000`, `max_handler_tasks = 64`, `abandon_after_ms = 300000`, `ignore_actor_account_ids = []` |
 | `[jira.health]` | `cache_secs = 60`, `timeout_ms = 5000` |
 
-autumn reads `autumn.toml`, then `autumn-<profile>.toml`, then `.env` and
-the `AUTUMN_JIRA__*` env vars, for example `AUTUMN_JIRA__HTTP__MAX_PAGES=200`.
-A later source wins.
+Rules for these keys:
+
+- `max_age_secs` + `max_future_skew_secs` must be less than the
+  `replay_window_secs` of the endpoint. Else the start fails.
+- Keep `max_age_secs` at 5400 or more. Jira sends a delivery again after a
+  503 with the first timestamp, for up to about 90 minutes. A smaller
+  value makes that copy stale, and the start warns.
+- `abandon_after_ms` must be `handler_timeout_ms` or more.
+- `email_env` and `token_env` hold env var names. A value that is not a
+  name fails the start, and the error does not show it. The fix TOML of
+  the boot check never prints a `secret_env` that is not a name.
+- `timeout_secs` is at most 60, the transport timeout that the harvest
+  budgets hold for. In San Mateo mode, the San Mateo transport owns the
+  timeout.
+- `JiraPlugin::client(prebuilt)` keeps the settings of that client. A
+  `[jira.http]` table that is not the default then fails the start.
+
+`JiraPlugin::new()` reads the config with `JiraConfig::load`: `autumn.toml`,
+then `autumn-<profile>.toml`, then `.env` and the `AUTUMN_JIRA__*` env
+vars, for example `AUTUMN_JIRA__HTTP__MAX_PAGES=200`. A later source wins.
+`JiraPlugin::with_config(config)` uses the config as given. It reads no
+file and no `AUTUMN_JIRA__*` env var.
 
 The `jira` health indicator is `HealthOnly`, so `/ready` does not wait for
 Jira. It calls `GET /myself` with one attempt, at most once in
-`cache_secs`. Its details hold no email, account id or token.
+`cache_secs`. Its details hold no email, account id or token. They show
+`handler_tasks`, the handler tasks that run now. In San Mateo mode with no
+`connection_id`, there is no default connection. The indicator then makes
+no call and gives `UNKNOWN` with a reason, so `/actuator/health` stays 200.
 
 ## The client on its own
 
@@ -344,8 +391,12 @@ let (registry, _dags, _schedules, config) = HarvestBuilder::new()
 | `jira_edit_issue` | Edits an issue (idempotent). |
 | `jira_transition_to_status` | Moves to a status with a state check. A retry gives `already_there`. |
 | `jira_add_comment` | Adds a comment at most once for the key. |
-| `jira_delete_issue` | Deletes. A 404 after a "maybe sent" attempt gives `gone_after_retry`. |
+| `jira_delete_issue` | Deletes. A 404 on an attempt after the first gives `gone_after_retry`. |
 | `jira_watch_issue` | Adds a route to an issue that a person made. A second call sends no PUT. |
+
+The `start_to_close` of a read or an edit is 9 minutes. A create, a
+comment, a transition and a watch get 42 minutes. These budgets hold for a
+San Mateo send of four transport calls of 60 s each.
 
 `await_issue_status` waits until an issue reaches a status. Webhooks make
 the wait faster. The wait does not need them: a poll ends it too.
@@ -362,6 +413,22 @@ async fn wait_for_done(ctx: &WorkflowContext, issue: IssueId) -> Result<StatusWa
   a replay is the same.
 - A signal of another issue, or an older signal, is skipped. It does not
   move the deadline. The longest wait is `MAX_WAIT` (29 days).
+- Each read moves the newest time to the `updated` time of the issue. So
+  a signal that is older than a read is skipped too.
+- When a run has an execution timeout, the wait ends at most
+  `LAST_READ_MARGIN` (46 minutes) before it. The workflow can then still
+  act on `TimedOut`.
+- A poll read that fails with a retryable error is a missed poll. The
+  wait goes on.
+- A wait has at most `MAX_POLL_ROUNDS` (3000) poll rounds. After
+  `MAX_SIGNAL_ROUNDS` (1000) signals that do not end it, only the polls
+  and the deadline can end it.
+- The waits of one run run one at a time. A second wait starts when the
+  first wait ends.
+- A webhook can come after the wait, while the workflow does other work.
+  So a workflow that does work after the wait calls
+  `drain_jira_signals(ctx)?` as its last step before it returns. Else a
+  strict replay of the history fails.
 
 `HarvestSignalBridge` is an `EventSink` for the webhook route. It turns a
 status change on a tracked issue into the `jira.event` signal of the run
@@ -370,9 +437,15 @@ the property cannot signal another run. The delivery id is the signal
 idempotency key: a repeated delivery gives one signal. A database error
 gives 503, and Jira sends the delivery again.
 
+The bridge reads the status of the issue on the site of its own client. It
+does not trust the status in the payload. One bridge serves one site. The
+tag binds the run, not the issue, and the wait checks the issue id of each
+signal.
+
 ```rust,ignore
 let bridge = HarvestSignalBridge::new(pool, client, route_key).allow_workflow("jira_ticket_lifecycle");
-let plugin = JiraPlugin::new().sink(bridge);
+// sink_for_all_actors: a status change by an ignored account still signals the run.
+let plugin = JiraPlugin::new().sink_for_all_actors(bridge);
 ```
 
 `failure_for(&JiraError)` gives the harvest error type `jira.<code>`, the
@@ -422,10 +495,20 @@ the create gives the issue, so the step needs `allowHeaderOverrides=true`.
   route that no outside caller can send headers to. Without the flag, a
   header that differs from the option fails the exchange. A header equal
   to the option passes.
+- The `JiraIssueKey` out header of an earlier `jira:` step is not an
+  override. Without the flag, the next step uses its own `issueKey`
+  option. With the flag, the out header gives the issue.
 - Under harvest-camel, the `HarvestIdempotencyKey` header makes
   `createIssue` and `addComment` idempotent. An attempt above 1 does a
   lookup only. For a route that a harvest activity calls, use
   `client.durable()`, so that harvest is the one layer that retries.
+- On such a lookup-only `createIssue`, the search index can lag. When the
+  first lookup finds nothing, the producer waits `settleMs` (default
+  10000, from 0 to 120000) and looks up again.
+- A camel redelivery (`CamelRedelivered` or `CamelRedeliveryCounter`) of a
+  marked write does a lookup only. A redelivery of a write with no
+  `HarvestIdempotencyKey` fails and sends nothing. So a camel `retry(..)`
+  never sends a create or a comment two times.
 
 ## The ecosystem example
 
@@ -488,7 +571,13 @@ lost reply, the client sends the transition again in one case only. The
 issue is still at the status of the first attempt, and the transition is
 not global and not looped. Jira rejects such a transition after a commit,
 so it cannot run two times. In all other cases, the call gives
-`OutcomeUnknown`.
+`OutcomeUnknown`. A retry after `outcome_pending` must be a lookup only,
+for example `find_by_idempotency_key`, never the write again.
+
+The comment lookup reads the newest comments, page by page, up to
+`max_pages`. It matches only a comment by the account of the client with a
+line that is the full marker. `has_comment_marker` needs the full marker
+on the last line of a comment.
 
 ```mermaid
 flowchart TD

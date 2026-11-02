@@ -48,8 +48,9 @@ database. `JIRA_EXAMPLE_TIME_FACTOR=3` gives slow machines more time.
 [9] autumn   GET /incidents/OPS-1 -> OPS-1 Done
 ```
 
-Each line comes from a fact of the run: a count of the fakes, a row of the
-harvest database, the workflow output, or an HTTP reply. No line is a
+Each line comes from a fact of the run. The facts are a count of the
+fakes, a row of the harvest database, the workflow output, or an HTTP
+reply. No line is a
 constant that the run prints when a step passes.
 
 ## Who does what
@@ -106,7 +107,7 @@ sequenceDiagram
   D->>D: check(summary)
 ```
 
-The driver discovers the cloud id before it sends the alert: the first
+The driver discovers the cloud id before it sends the alert. The first
 activity of the run needs the cloud id for the escape hatch path. The
 connector puts it in the workflow input.
 
@@ -132,7 +133,7 @@ runs on that queue in `harvest_workflow_executions`.
 
 ### [2] san-mateo: an expired token, one refresh, the cloud id
 
-The connection `acme` is imported with an expired access token and a
+The driver imports the connection `acme` with an expired access token and a
 refresh token. The discovery goes through `SanMateo::proxy`, so san-mateo
 refreshes the token first. Then it reads `accessible-resources` and stores
 `cloudId` in the connection metadata.
@@ -168,8 +169,8 @@ let lookup = ProxyInput::new(
 
 The fake commits the first create and then replies 503. The client never
 sends a create a second time after a 5xx. The activity looks up the issue by
-its marker label, and the search index lags 2 s, so the lookup finds
-nothing: the attempt fails with the retryable `jira.outcome_pending`.
+its marker label. The search index lags 2 s, so the lookup finds nothing.
+The attempt fails with the retryable `jira.outcome_pending`.
 harvest waits `settle_secs` (3 s). Attempt 2 only looks up, and it finds
 `OPS-1`. The history keeps only the last result of an activity, so a
 harvest activity interceptor (`AttemptLog` in `src/workflow.rs`) logs each
@@ -223,9 +224,10 @@ is B.
 A person moves the issue to Done. The fake signs the delivery, and the
 driver posts it to the app. autumn checks the HMAC and the delivery id.
 The plugin then calls the sink `HarvestSignalBridge`. The bridge reads the
-route property of the issue with a strongly consistent GET, checks the tag
-in constant time and the allowlist, and signals the run. The delivery id is
-the signal idempotency key.
+route property of the issue with a strongly consistent GET. It checks the
+tag in constant time and the allowlist. Then it reads the status of the
+issue on the site of its own client and signals the run. The delivery id
+is the signal idempotency key.
 
 ```rust
 // src/main.rs and src/app.rs
@@ -235,8 +237,8 @@ JiraPlugin::with_config(jira_config()?).sink(bridge)
 ```
 
 Webhooks are at least once. The same delivery again gives 409 and no second
-signal, a tampered copy gives 401, and a copy from the bot gives 200 and
-no sink call (`tests::webhook_negatives`).
+signal. A tampered copy gives 401. A copy from the bot gives 200 and no
+sink call (`tests::webhook_negatives`).
 
 ### [8] harvest: the end of the run
 

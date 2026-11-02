@@ -1,7 +1,9 @@
 # ADR 0006: From Jira webhooks to harvest signals
 
 - Status: Accepted. Amended for design v3 (as built): the end-of-wait
-  drain.
+  drain. Amended after review round 1: the drain function, the read times,
+  the wait bounds, the bridge status read and its limits (plan V83 to
+  V89).
 - Date: 2026-11-02
 
 ## Context
@@ -33,6 +35,16 @@ records the wall clock in history.
   workflow names and resolves the run by workflow id. Then it calls
   `send_signal_idempotent` with the delivery id as the key. The key is kept
   for the life of the run.
+- Status read (plan V88): for a route that passes both checks, the bridge
+  reads the issue status on the site of its own client. The signal holds
+  that status and key, not the payload values. A delivery does not name
+  its site, and two sites can have the same issue id. So a delivery of
+  site B cannot give a wait on site A a false status. One bridge serves
+  one site, with its own endpoint and secret.
+- Register the bridge with `JiraPlugin::sink_for_all_actors` when the app
+  moves issues with an account in `ignore_actor_account_ids` (plan V71).
+  Else a status change by that account signals nothing, and only the poll
+  ends the wait.
 - Errors: no run, a finished run, `Config`, `Cancelled`, `NotFound` give 200
   (counted). `ShardUnavailable`, database and pool errors give 503.
 - `await_issue_status` reads the status once, then races the signal against
@@ -51,6 +63,18 @@ records the wall clock in history.
   result can also leave signals in the history.
 - `poll_every` must be 1 s or more (`MIN_POLL_EVERY`). A zero poll gives a
   hot loop of reads.
+- Late signals (plan V84): a webhook can come after the wait, while the
+  workflow runs other activities. The history then ends with a signal
+  that no code read, and a strict replay fails. So a workflow that works
+  after the wait calls `drain_jira_signals(ctx)?` as its last step before
+  it returns.
+- Read times (plan V86): each read of the wait moves the newest time by
+  `issue.updated`, so a signal older than a read is stale.
+- Bounds (plan V83, V85, V87): a wait has at most `MAX_POLL_ROUNDS` (3000)
+  poll rounds. It takes at most `MAX_SIGNAL_ROUNDS` (1000) signals that do
+  not end it. Its deadline is at most `LAST_READ_MARGIN` (46 min) before
+  the execution deadline of the run. The waits of one run run one at a
+  time. A retryable failure of a poll read is a missed poll.
 
 ## Consequences
 
@@ -58,15 +82,21 @@ records the wall clock in history.
   database call.
 - Good: a lost webhook (cap, `excludeBody`, Jira gave up) delays the wait by
   one poll period at most.
-- Bad: one GET per tracked delivery.
+- Bad: two GETs per tracked delivery: the routes property, then the
+  status of each routed delivery. A forged route makes no extra call.
+- Bad: the route tag binds the run, not the issue (plan V89). A copied
+  route entry on another issue can make signals for the run. The wait
+  checks the issue id of each signal, the bridge reads the status from
+  its site, and `MAX_SIGNAL_ROUNDS` bounds the rounds. A tag with the
+  issue id needs a second PUT after the create. That is an open decision.
 - Bad: `jira_watch_issue` does a read-modify-write of the property. Two
   watchers at the same moment can lose one route.
 - Bad: the bridge resolves runs on one shard. A multi-shard engine needs a
   fan-out lookup.
 - Bad: the drain takes each `jira.event` signal that came before the end of
   the wait. A workflow that reads `jira.event` itself after the wait does
-  not get them. A later wait reads the issue first, so it does not need
-  them.
+  not get them. A later wait reads the issue first, and its read time
+  makes an older signal stale, so it does not need them.
 - Bad: the bridge returns 503 at the first transient route error. The
   routes before it can already have their signal. Jira sends the delivery
   again, and those routes then give `Duplicate`, so the result is correct.

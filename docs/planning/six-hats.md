@@ -86,7 +86,7 @@ gaps in the webhook and routing, and a scope that may not finish.
 | B3 | A negative eventually consistent lookup does not make a re-POST safe. | Accept | No resend in the client; durable hosts do lookup only; resend is an opt-in; a failed lookup is never "not found"; lag in tokio time. ADR 0003. |
 | B4 | The bridge gives 503 for runs that cannot take a signal. | Accept | Error classes; status-change events only. Plan 9.4. |
 | B5 | No reconcile; a lost event stalls the workflow. | Accept | The poll timer and a last read before the timeout branch. Plan 9.3. |
-| B6 | Timeouts do not agree. | Accept | `MAX_WAIT` check (29 days) under the 30-day execution timeout. |
+| B6 | Timeouts do not agree. | Accept | `MAX_WAIT` check (29 days) under the 30-day execution timeout. Review round 1: that check did not enforce the execution timeout of a run. The wait deadline is now at most `LAST_READ_MARGIN` before `ctx.deadline()` (plan V83). |
 | B7 | A missing timestamp turns off the stale check; the window is too wide. | Accept | Missing gives ignored; default 2 h; a future-skew bound in the verified `freshness`. autumn already fails a memory store in prod. |
 | B8 | A project bound around raw JQL can be escaped. | Adapt | No wrapping at all: camel `project` and `jql` are exclusive; raw JQL is the app's text. `jql_balanced` is not needed. |
 | B9 | Self-event filter by actor is wrong in both modes. | Accept | Explicit list with a service account; `has_comment_marker`; `self_filter` in health. No boot warning (noise for apps that do not write). |

@@ -2,6 +2,9 @@
 
 - Status: Accepted. Amended for design v3 (as built): the activity
   budgets, the lookup-failure rule and the delete rule across attempts.
+  Amended after review round 1: the transition resend rule, the camel
+  redelivery rules, the camel settle wait and the san-mateo budgets
+  (plan V54 to V95).
 - Date: 2026-11-02
 
 ## Context
@@ -34,6 +37,10 @@ layers multiply the sends and break the activity timeout.
   marker.
 - Marked comment: a last paragraph `autumn-ref: <26 lower base32>`. The
   lookup reads the newest comments, which are not from the search index.
+  It reads pages newest first, up to `max_pages`. At the cap it gives
+  `PageLimit`, so it fails closed. A match is a comment by the own account
+  with a line that is the full marker. A person can type the marker, but
+  a person is not the author of the client comments (plan V62).
 - Checked transition: before each attempt, the client reads the status. At
   the target it returns `AlreadyThere`. The status alone cannot show that a
   "maybe sent" attempt did not run. So after a 5xx or a "maybe sent"
@@ -42,6 +49,14 @@ layers multiply the sends and break the activity timeout.
   and not looped, so Jira rejects it after a commit. Else the call gives
   `OutcomeUnknown`. A 400 or a 409 after a "maybe sent" attempt makes the
   client read the status once more. At the target, it returns `Moved`.
+- Why this transition rule (review round 1, plan V63): the status check
+  alone sent a transition again in two bad cases. An automation can move
+  the issue on after the first attempt commits. A global or looped
+  transition is valid from each status, so a second send runs it again.
+  The rule reads the `isGlobal` and `looped` flags of the transition list.
+  It needs no changelog read, and it never sends two times in these
+  cases. The cost: a lost reply on a global transition ends with
+  `OutcomeUnknown`, and a person or a later step must check.
 - 429: reads, idempotent, checked and marked writes retry, with
   `Retry-After` as the floor. A plain unsafe write does not retry a 429.
   Assumption A1: a 429 means Jira did not run the write. Atlassian says to
@@ -69,24 +84,46 @@ layers multiply the sends and break the activity timeout.
   `false` only when the request cannot have run in Jira.
   `error::NOT_SENT_NETWORK_CODES` lists the `Network` codes that did not
   leave the process, and the san-mateo map test pins them.
-- Delete across attempts (design v3): a 404 on `jira_delete_issue` after a
-  "maybe sent" or unknown previous attempt gives `gone_after_retry`, not a
-  failure. This is the client delete rule, applied across harvest
-  attempts.
-- Activity budgets (design v3): each `start_to_close` is larger than the
-  durable worst case of its client calls at 60 s for each request. A
-  durable read or idempotent write takes up to 130 s. A marked write takes
-  up to 390 s: a pre-lookup, the write and one lookup. A checked write takes
-  up to 650 s. Each of its two attempts reads the status and the
-  transitions, and then sends.
-  So `jira_get_issue` and `jira_search_page` get 3m, `jira_edit_issue` and
-  `jira_delete_issue` get 5m, and `jira_create_issue`, `jira_add_comment`,
+- Delete across attempts (design v3, plan V70): a 404 on
+  `jira_delete_issue` on any attempt after the first gives
+  `gone_after_retry`, not a failure. The `sent` flag tells only the last
+  send of an attempt. An earlier send of that attempt can have deleted the
+  issue.
+- A failed pre-lookup sent nothing (plan V69). So its failure has
+  `details.sent = false`, and the next attempt can send.
+- Activity budgets (design v3, amended in plan V64): each `start_to_close`
+  is larger than the durable worst case of its client calls. The model
+  takes 60 s for each transport call (`MAX_TRANSPORT_TIMEOUT`). A
+  san-mateo send can make four transport calls
+  (`SAN_MATEO_CALLS_PER_SEND`): a refresh, the send, a refresh after a
+  401, and the send again. Through san-mateo, a durable read or idempotent
+  write takes up to 490 s. A marked write takes up to 1 470 s, and a
+  checked write up to 2 450 s. A direct client needs less: 130 s, 390 s
+  and 650 s.
+  So `jira_get_issue`, `jira_search_page`, `jira_edit_issue` and
+  `jira_delete_issue` get 9m. `jira_create_issue`, `jira_add_comment`,
   `jira_transition_to_status` and `jira_watch_issue` (four idempotent
-  calls, 520 s) get 12m. Design v2 gave 5m to each write, which is too
-  short for a marked or a checked write. A `start_to_close` timeout gives
-  `Unknown` on the next attempt, so a short budget makes more lookups
-  only, not a duplicate. The test `start_to_close_covers_the_client_budget`
-  adds up the calls with the real constants.
+  calls, 1 960 s) get 42m. The first budgets (3m, 5m, 12m) held for a
+  direct client only. A `start_to_close` timeout gives `Unknown` on the
+  next attempt, so a short budget makes more lookups only, not a
+  duplicate. The test `start_to_close_covers_the_client_budget` adds up
+  the calls with the real constants, for direct and san-mateo sends. The
+  plugin caps `[jira.http] timeout_secs` at 60, so the model holds.
+- Unknown sends (plan V54, V59): a transport `Invalid` error is "not
+  sent" only for the texts of a check before the send. A send error after
+  Jira has the request can have run, so it is "maybe sent". On a marked
+  write, a 2xx with an unexpected status also goes to the lookups.
+- A retry after `outcome_pending` is a lookup only, never the write again
+  (plan V60). Any retry layer must follow this rule, not only harvest.
+- Camel redelivery (plan V92): a camel redelivery of a marked write does a
+  lookup only, also on harvest attempt 1. A camel redelivery of a write
+  with no key header fails and sends nothing. So a camel `retry(..)` never
+  sends a create or a comment two times. A redelivery header of an earlier
+  step also makes a later write look up only. That fails closed.
+- Camel settle wait (plan V90): harvest-camel gives a camel attempt no
+  `Retry-After`. So a lookup-only `createIssue` that finds nothing waits
+  `settleMs` (default 10 s) and looks up one more time. The default fits
+  the 30 s timeout of a `direct:` call. A comment lookup does not wait.
 - The client never forwards an `Idempotency-Key` header to Jira.
 
 ## Consequences
@@ -102,9 +139,14 @@ layers multiply the sends and break the activity timeout.
 - Bad: a site without the Labels field on the create screen cannot use
   idempotent create. The error says how to fix it. No silent fallback.
 - Bad: the Jira `Retry-After` hint is lost when the error goes through
-  camel, because harvest-camel maps camel errors without it.
-- Bad: a 12m `start_to_close` lets a stuck write hold a worker slot longer
-  than design v2 did.
+  camel, because harvest-camel maps camel errors without it. The
+  `settleMs` wait of the producer makes up for it on `createIssue`.
+- Bad: a 42m `start_to_close` lets a stuck write hold a worker slot longer
+  than design v2 did. A deadline inside `SanMateoBackend` from the
+  activity deadline is a better fix for later.
+- Bad: a camel redelivery that follows a failed earlier step makes each
+  later write in that exchange look up only. Such a write can fail with
+  `outcome_unknown`, but it never makes a duplicate.
 - Considered and deferred: a key-window probe with `bulkfetch` above a
   high-water mark gives a strong negative without the search index. It
   depends on three facts that no source confirms: keys only go up, keys are

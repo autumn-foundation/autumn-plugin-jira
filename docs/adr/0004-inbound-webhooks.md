@@ -1,6 +1,8 @@
 # ADR 0004: Inbound webhooks: verification, dedup and status codes
 
-- Status: Accepted
+- Status: Accepted. Amended after review round 1 (plan V71 to V80, V88).
+  The amendments are the config bounds, the handler slots, the body-cap
+  memory note, the ignored actors and the one-site rule.
 - Date: 2026-11-02
 
 ## Context
@@ -27,16 +29,28 @@ cap is 1 MiB, and an over-cap body gets 400. A duplicate id gets 409.
   plugin checks the entry at boot and fails with the TOML to paste. The
   helper `webhook_endpoint` builds a correct entry. A body cap below 8 MiB
   logs a warning; the recommended cap is 26 MiB.
+- Config bounds (plan V74): the boot check needs `max_age_secs` +
+  `max_future_skew_secs` < `replay_window_secs`. Else a captured copy can
+  be fresh after autumn forgets its delivery id, and the route accepts it
+  again. `max_future_skew_secs` is at most 300, the verified bound
+  `policy::MAX_FUTURE_SKEW_MS`. A `max_age_secs` below
+  `JIRA_RETRY_HORIZON_SECS` (5400) logs a warning only. Jira sends a
+  delivery again after a 503 with the first timestamp, for up to about
+  90 minutes. A smaller age makes that copy stale, and the route drops it
+  with 200. The app owns that choice, so the start does not fail.
 - After verification the plugin answers 200 for accepted and ignored
   deliveries, and 503 for a handler fault or a timeout (`webhook_status`,
   verified). It never answers a 4xx, because Jira does not retry it.
 - The plugin answers 200 and ignores a delivery for each of these reasons.
   Each reason has a counter in the health details.
   - It has no timestamp.
-  - It is stale: older than `max_age_secs` (default 2 h, at most the replay
-    window).
+  - It is stale: older than `max_age_secs` (default 2 h, with the skew
+    inside the replay window).
   - It is too far in the future (300 s).
-  - Its actor is in `ignore_actor_account_ids`.
+  - Its actor is in `ignore_actor_account_ids`, and no sink of
+    `sink_for_all_actors` exists. Such a sink gets the delivery, and the
+    other sinks do not (plan V71). A sink that waits for a state, for
+    example `HarvestSignalBridge`, needs it.
   - Its event is unknown.
   - Its body does not parse.
 - The plugin keeps autumn's 409 for a duplicate. A 200 is wrong when
@@ -44,7 +58,19 @@ cap is 1 MiB, and an over-cap body gets 400. A duplicate id gets 409.
   again. Jira sends a delivery that got 409 again, up to 5 times. Each copy
   gets 409. The first copy carries the event.
 - Each sink runs in a spawned task under `handler_timeout_ms`. On a timeout
-  the route answers 503 and the task runs to its end.
+  the route answers 503 and the task continues.
+- Handler slots (plan V73): a task that times out holds one of
+  `max_handler_tasks` slots (default 64) until it ends. The plugin stops
+  it at `abandon_after_ms` (default 300 000). With no free slot, the route
+  answers 503 at once and starts no task. Jira then sends the delivery
+  again. So a sink that hangs cannot make tasks without a limit.
+- When autumn stops the request at its request timeout, a drop guard
+  counts the delivery as `timed_out` (plan V79). The start warns when the
+  handlers can take longer than that timeout.
+- One site for each endpoint (plan V88): a delivery does not name its Jira
+  site, and two sites can have the same issue id. So one webhook endpoint
+  and one secret serve one site. Give each site its own endpoint, secret
+  and bridge.
 - Dedup layers: the autumn replay store, then `send_signal_idempotent` per
   workflow run, then idempotent sinks. The docs say "at least once".
 - v1 accepts HMAC webhooks only. A dynamic webhook with a Bearer JWT gets
@@ -67,6 +93,11 @@ cap is 1 MiB, and an over-cap body gets 400. A duplicate id gets 409.
   autumn change can close the gap. The key gets a short life while the
   handler runs. It gets the full window only after a reply that is not a
   5xx.
+- Bad: the body cap is memory that an unsigned request can use (plan
+  V80). autumn reads the body before it checks the HMAC. So with the
+  26 MiB cap, each request at the public path without credentials can make
+  the app hold 26 MiB until the 401. Use proxy limits on body size, rate
+  and concurrency, or a smaller cap.
 - Bad: a duplicate shows as a failed delivery in the Jira webhook log.
 - Bad: a memory replay store is per process and empty after a restart. In
   production autumn requires an explicit opt-in for it, or Redis.
