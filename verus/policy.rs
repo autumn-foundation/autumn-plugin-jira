@@ -392,31 +392,23 @@ pub fn retry_wait_ms(
     }
 }
 
-/// The wait `a * b` fits in a `u64` for `a <= u64::MAX / 1300` and `b <= 1300`.
+/// The product `a * b` fits in a `u64` for `a <= u64::MAX / 1300` and `b <= 1300`.
 proof fn lemma_scale_fits(a: int, b: int)
     requires
-        0 <= a <= u64::MAX / 1_300,
+        0 <= a <= (u64::MAX / 1_300) as int,
         0 <= b <= 1_300,
     ensures
-        0 <= a * b <= u64::MAX,
+        0 <= a * b <= u64::MAX as int,
 {
     assert(a * b <= a * 1_300) by (nonlinear_arith)
-        requires
-            0 <= a,
-            b <= 1_300,
-    {
-    }
+        requires 0 <= a, b <= 1_300;
     assert(0 <= a * b) by (nonlinear_arith)
-        requires
-            0 <= a,
-            0 <= b,
-    {
-    }
+        requires 0 <= a, 0 <= b;
 }
 
 /// Spec: `value * permille / 1000`. A value that can overflow stays as it is.
 pub open spec fn spec_scale(value: int, permille: int) -> int {
-    if value <= u64::MAX / 1_300 && permille <= 1_300 {
+    if value <= (u64::MAX / 1_300) as int && permille <= 1_300 {
         value * permille / 1_000
     } else {
         value

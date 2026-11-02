@@ -25,7 +25,7 @@ macro_rules! string_id {
         pub struct $name(String);
 
         impl $name {
-            #[doc = concat!("Parses a ", $what, " strictly. Rule: ", $rule, ".")]
+            #[doc = concat!("Parses a ", $what, " strictly. Rule: `", $rule, "`.")]
             ///
             /// # Errors
             ///

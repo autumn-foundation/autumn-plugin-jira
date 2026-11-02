@@ -1,5 +1,31 @@
 //! `autumn_jira`: a typed, safe Jira Cloud REST v3 client.
 //!
+//! The crate has strict ids, models, Atlassian Document Format (ADF), a JQL
+//! builder, typed errors with one class table, the webhook types with the
+//! signature check, and the verified retry core in [`policy`].
+//!
+//! The safe path is the default. A value always goes into JQL as one
+//! literal, and an id that goes into a URL path matches a strict rule.
+//! Webhooks are at least once: a sink must be idempotent.
+//!
+//! ```
+//! use autumn_jira::jql::JqlField;
+//! use autumn_jira::{Adf, IdempotencyKey, Jql, ProjectKey};
+//!
+//! # fn main() -> autumn_jira::Result<()> {
+//! let project = ProjectKey::parse("OPS")?;
+//! let jql = Jql::project(&project).and(Jql::field(JqlField::Labels).eq("x\" OR 1=1")?);
+//! assert_eq!(jql.as_str(), r#"project = "OPS" AND labels = "x\" OR 1=1""#);
+//!
+//! let body = Adf::text("Disk full\nOn host db-1");
+//! assert_eq!(body.to_plain_text(), "Disk full\nOn host db-1");
+//!
+//! let key = IdempotencyKey::derive(&["alert", "42"]);
+//! assert!(key.marker_label("autumn-idem-").starts_with("autumn-idem-"));
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! See the crate README and `docs/plan.md`.
 
 pub mod adf;
