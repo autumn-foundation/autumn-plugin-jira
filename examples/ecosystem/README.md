@@ -295,7 +295,7 @@ pub async fn incident(jira: JiraService, Path(key): Path<IssueKey>) -> AutumnRes
 | `tests::bad_webhook_secret_resolves_by_poll` | Each POST gives 401; a poll ends the wait. |
 | `tests::no_webhook_no_poll_times_out` | The timeout branch and its escalation comment. |
 | `tests::a_wrong_value_fails_the_check` | A wrong line gives `check failed:`. |
-| `tests::webhook_negatives` | 409 for the same delivery, 401 for a tampered one, 200 for the bot; one signal. |
+| `tests::webhook_negatives` | 409 for the same delivery, 401 for a tampered one, 200 for the bot. The copy of the bot goes to the bridge (a sink for all actors): the bridge gets 2 deliveries, and `ignored_self` is 0. |
 | `tests::two_tenants_stay_apart` | Two connections on two fake sites, one plugin, no mix. |
 | `tests::is_retryable_copy_matches_harvest_camel` | The pinned copy in `crates/autumn-jira-camel/tests/retry_rule.rs` equals the real `harvest_camel::is_retryable`. |
 | `tests::boot_three_plugins_real_http` | `run()` with `SanMateoPlugin`, `HarvestPlugin` (external mode) and `JiraPlugin` takes one signed POST over real HTTP. |
@@ -308,4 +308,6 @@ pub async fn incident(jira: JiraService, Path(key): Path<IssueKey>) -> AutumnRes
   as `from("kafka:alerts")` in place of `direct:alerts`.
 - The graph has two rustls crypto providers (`ring` and `aws-lc-rs`).
   `main` installs `ring` before any client is built.
-- Stop in this order: the connector, the harvest worker, then camel.
+- Stop in this order: the connector, the harvest worker, then camel. The
+  stop log records a worker stop only when a worker stopped. So a deadline
+  during the worker swap of step [6] shows as a missing stop.
