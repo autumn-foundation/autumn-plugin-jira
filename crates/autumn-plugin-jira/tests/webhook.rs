@@ -227,7 +227,8 @@ async fn transient_is_503_then_redelivery_succeeds() {
     );
 }
 
-/// Sleeps, then sets `done`.
+/// Sleeps, then sets `done`. After `done` is set, it does not sleep, so
+/// the same delivery a second time is fast.
 struct Slow {
     sleep: Duration,
     done: Arc<AtomicBool>,
@@ -236,29 +237,53 @@ struct Slow {
 #[async_trait]
 impl EventSink for Slow {
     async fn deliver(&self, _delivery: Arc<Delivery>) -> Result<(), HandlerError> {
-        tokio::time::sleep(self.sleep).await;
+        if !self.done.load(Ordering::SeqCst) {
+            tokio::time::sleep(self.sleep).await;
+        }
         self.done.store(true, Ordering::SeqCst);
         Ok(())
     }
 }
 
+/// AC29: a handler timeout gives 503. autumn frees the replay keys, so the
+/// same delivery (the same id and body) then gives 200 and runs each sink.
 #[tokio::test(flavor = "multi_thread")]
-async fn timeout_is_503() {
+async fn timeout_is_503_then_redelivery_succeeds() {
     let fake = FakeJira::new();
     let log = log();
     let done = Arc::new(AtomicBool::new(false));
-    let client = app(plugin_with(&fake, |c| c.webhook.handler_timeout_ms = 100)
+    let plugin = plugin_with(&fake, |c| c.webhook.handler_timeout_ms = 100)
         .sink(Slow {
             sleep: Duration::from_millis(400),
             done: Arc::clone(&done),
         })
-        .sink(Scripted::new("after", &log)));
-    deliver(&client, "d-6", &fresh()).await.assert_status(503);
+        .sink(Scripted::new("after", &log));
+    // autumn keeps a health result for 1 s by default. This test reads the
+    // counters two times, so it turns that cache off.
+    let mut config = autumn_config();
+    config.health.cache_ttl_ms = 0;
+    let client = TestApp::new().config(config).plugin(plugin).build();
+    let body = fresh();
+    deliver(&client, "d-6", &body).await.assert_status(503);
     assert!(
         entries(&log).is_empty(),
         "a sink after a timeout does not run"
     );
     assert_eq!(counters(&client).await["timed_out"], 1);
+    // The timed-out task runs to its end. Then Jira sends the delivery again.
+    let start = std::time::Instant::now();
+    while !done.load(Ordering::SeqCst) {
+        assert!(start.elapsed() < Duration::from_secs(10), "the task ends");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    deliver(&client, "d-6", &body).await.assert_status(200);
+    assert_eq!(entries(&log), ["after:d-6"]);
+    let c = counters(&client).await;
+    assert_eq!(
+        (c["timed_out"].as_u64(), c["accepted"].as_u64()),
+        (Some(1), Some(1)),
+        "{c}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
