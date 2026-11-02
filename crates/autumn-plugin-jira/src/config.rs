@@ -911,4 +911,17 @@ mod tests {
         }
         assert!(JiraConfig::default().validate().is_ok());
     }
+
+    /// R2D-integration-4: in `san_mateo` mode the plugin does not use
+    /// `[jira.http] timeout_secs`. A value above the cap does not stop the
+    /// start. In API token mode the cap still applies.
+    #[test]
+    fn the_timeout_cap_applies_in_api_token_mode_only() {
+        let san_mateo = "[jira.san_mateo]\nenvironment = \"e\"\nintegration = \"jira\"\nconnection_id = \"c\"\n[jira.http]\ntimeout_secs = 120\n";
+        let config = JiraConfig::from_toml_str(san_mateo).unwrap();
+        assert_eq!(config.http.timeout_secs, 120);
+        let api = "[jira.api_token]\nsite = \"acme\"\n[jira.http]\ntimeout_secs = 120\n";
+        let e = JiraConfig::from_toml_str(api).unwrap_err().to_string();
+        assert!(e.contains("[jira.http] timeout_secs"), "{e}");
+    }
 }
