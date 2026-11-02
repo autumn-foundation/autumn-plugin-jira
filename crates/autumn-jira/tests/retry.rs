@@ -414,9 +414,9 @@ async fn unsafe_writes_send_once_table() {
             let label = format!("{op:?} {trouble:?}: {err:?}");
             match trouble {
                 Trouble::RateLimit => {
-                    assert!(matches!(err, JiraError::RateLimited { .. }), "{label}")
+                    assert!(matches!(err, JiraError::RateLimited { .. }), "{label}");
                 }
-                _ => assert!(
+                Trouble::Fault(_) => assert!(
                     matches!(err, JiraError::OutcomeUnknown { marker: None, .. }),
                     "{label}"
                 ),

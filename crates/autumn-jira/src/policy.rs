@@ -421,22 +421,85 @@ mod tests {
 
     /// Returns each proof escape in `spec`, outside `//` comments.
     fn proof_escapes(spec: &str) -> Vec<String> {
-        let _ = spec;
-        Vec::new()
+        let code = strip_block_comments(spec);
+        let mut out = Vec::new();
+        for (n, line) in code.lines().enumerate() {
+            let line = line.split("//").next().unwrap_or("");
+            for escape in PROOF_ESCAPES {
+                if line.contains(escape) {
+                    out.push(format!("line {}: {escape}", n + 1));
+                }
+            }
+        }
+        out
     }
 
     /// Returns the name of each `fn` of any visibility in `text`.
     fn all_fns(text: &str) -> Vec<String> {
-        let _ = text;
-        Vec::new()
+        text.lines()
+            .filter_map(|l| {
+                let mut rest = l.trim_start();
+                for prefix in ["pub(crate) ", "pub(super) ", "pub ", "const "] {
+                    rest = rest.strip_prefix(prefix).unwrap_or(rest);
+                }
+                rest.strip_prefix("fn ")
+            })
+            .filter_map(|rest| rest.split(['(', '<']).next())
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// Returns the name of each `pub fn` line of the spec. A name in a
+    /// comment does not count.
+    fn spec_fns(spec: &str) -> Vec<String> {
+        spec.lines()
+            .filter_map(|l| l.trim_start().strip_prefix("pub fn "))
+            .filter_map(|rest| rest.split(['(', '<']).next())
+            .map(str::to_owned)
+            .collect()
     }
 
     /// Returns each coverage problem: a function of `exec` that is not in
     /// exactly one list, a list entry that is not a function, or a proved
     /// function with no `pub fn` line in `spec`.
     fn coverage_violations(exec: &str, spec: &str) -> Vec<String> {
-        let _ = (exec, spec);
-        Vec::new()
+        let fns = all_fns(exec);
+        let in_spec = spec_fns(spec);
+        let proved: Vec<&str> = BODY_MATCHED
+            .iter()
+            .copied()
+            .chain(PROOF_PROPTESTED.iter().map(|(name, _)| *name))
+            .collect();
+        let listed: Vec<&str> = proved.iter().copied().chain(PROPTEST_ONLY).collect();
+        let mut out = Vec::new();
+        for name in &fns {
+            let n = listed.iter().filter(|l| **l == name.as_str()).count();
+            if n != 1 {
+                out.push(format!("{name} is in {n} lists, not in exactly one"));
+            }
+        }
+        for name in &listed {
+            if !fns.iter().any(|f| f == name) {
+                out.push(format!("{name} is listed but is not a function"));
+            }
+        }
+        for name in &proved {
+            if !in_spec.iter().any(|f| f == name) {
+                out.push(format!("{name} has no `pub fn` line in verus/policy.rs"));
+            }
+        }
+        for name in PROPTEST_ONLY {
+            if in_spec.iter().any(|f| f == name) {
+                out.push(format!("{name} is in verus/policy.rs: match its body"));
+            }
+        }
+        let tests = include_str!("policy.rs");
+        for (name, test) in PROOF_PROPTESTED {
+            if !tests.contains(&format!("fn {test}(")) {
+                out.push(format!("{name} has no proptest {test}"));
+            }
+        }
+        out
     }
 
     /// Reads the Verus file. Returns `None` when the file is absent (a
@@ -486,8 +549,37 @@ mod tests {
             .collect()
     }
 
-    /// Returns the body of `pub fn name` with no comments and no white space.
-    /// In the spec, the body starts at a line with only `{` (after `ensures`).
+    /// Removes each `proof { ... }` block: proof code of the Verus body.
+    fn strip_proof_blocks(text: &str) -> String {
+        let mut out = String::new();
+        let mut rest = text;
+        while let Some(at) = rest.find("proof {") {
+            out.push_str(&rest[..at]);
+            let block = &rest[at + "proof ".len()..];
+            let mut depth = 0_i32;
+            let mut end = block.len();
+            for (i, c) in block.char_indices() {
+                match c {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = i + 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            rest = &block[end..];
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// Returns the body of `pub fn name` with no comments, no proof blocks
+    /// and no white space. In the spec, the body starts at a line with only
+    /// `{` (after `ensures`).
     fn body(text: &str, name: &str, spec: bool) -> Option<String> {
         let at = text
             .find(&format!("pub fn {name}("))
@@ -510,7 +602,7 @@ mod tests {
             }
         }
         Some(
-            strip_block_comments(&text[start..end])
+            strip_proof_blocks(&strip_block_comments(&text[start..end]))
                 .lines()
                 .map(|l| l.split("//").next().unwrap_or(""))
                 .collect::<String>()
@@ -518,19 +610,6 @@ mod tests {
                 .filter(|c| !c.is_whitespace())
                 .collect(),
         )
-    }
-
-    /// Returns the name of each `pub fn` and `pub const fn`.
-    fn public_fns(text: &str) -> Vec<String> {
-        text.lines()
-            .filter_map(|l| {
-                let l = l.trim_start();
-                l.strip_prefix("pub const fn ")
-                    .or_else(|| l.strip_prefix("pub fn "))
-            })
-            .filter_map(|rest| rest.split('(').next())
-            .map(str::to_owned)
-            .collect()
     }
 
     #[test]
@@ -551,19 +630,14 @@ mod tests {
 
     #[test]
     fn every_const_fn_is_proved_or_listed() {
+        // Each function is in exactly one of BODY_MATCHED, PROOF_PROPTESTED
+        // and PROPTEST_ONLY. A proved function has a `pub fn` line in the
+        // spec. `each_fn_is_in_exactly_one_list` tests the check itself.
         let Some(spec) = verus_file() else { return };
-        let names = public_fns(exec_code());
-        assert!(names.len() >= 14, "{names:?}");
-        for name in &names {
-            let proved = spec.contains(&format!("pub fn {name}("));
-            assert!(
-                proved || PROPTEST_ONLY.contains(&name.as_str()),
-                "{name} is not in verus/policy.rs and not in PROPTEST_ONLY"
-            );
-        }
-        for name in BODY_MATCHED {
-            assert!(names.iter().any(|n| n == name), "{name}");
-        }
+        assert_eq!(
+            coverage_violations(exec_code(), &spec),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
@@ -579,14 +653,21 @@ mod tests {
             "#[verifier(external_body)]",
             "#[verifier::exec_allows_no_decreases_clause]",
         ] {
-            assert!(!proof_escapes(&with(escape)).is_empty(), "{escape}");
+            assert_ne!(
+                proof_escapes(&with(escape)),
+                Vec::<String>::new(),
+                "{escape}"
+            );
         }
         let body = spec.replacen("{\n", "{\n    assume(false);\n", 1);
-        assert!(!proof_escapes(&body).is_empty());
+        assert_ne!(proof_escapes(&body), Vec::<String>::new());
         let admit = spec.replacen("{\n", "{\n    proof { admit(); }\n", 1);
-        assert!(!proof_escapes(&admit).is_empty());
+        assert_ne!(proof_escapes(&admit), Vec::<String>::new());
         // A word in a comment is no escape.
-        assert!(proof_escapes("// we do not assume(x) here\n").is_empty());
+        assert_eq!(
+            proof_escapes("// we do not assume(x) here\n"),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
@@ -603,15 +684,18 @@ mod tests {
             exec_code()
         );
         let spec_h = format!("{spec}\npub fn h(x: u32) -> (r: u32)\n{{\n    x\n}}\n");
-        assert!(!coverage_violations(&exec, &spec_h).is_empty());
+        assert_ne!(coverage_violations(&exec, &spec_h), Vec::<String>::new());
         // A private helper is seen too.
         let private = format!("{}\nconst fn helper() -> u32 {{\n    1\n}}\n", exec_code());
-        assert!(!coverage_violations(&private, &spec).is_empty());
-        assert!(all_fns("pub(crate) fn a() {}\nfn b() {}\n").len() == 2);
+        assert_ne!(coverage_violations(&private, &spec), Vec::<String>::new());
+        assert_eq!(all_fns("pub(crate) fn a() {}\nfn b() {}\n"), ["a", "b"]);
         // A name in a doc comment of the spec is not a proof.
         let gone = spec.replace("pub fn decide(", "pub fn decided(");
         let noted = format!("{gone}\n/// pub fn decide(\n");
-        assert!(!coverage_violations(exec_code(), &noted).is_empty());
+        assert_ne!(
+            coverage_violations(exec_code(), &noted),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
@@ -632,7 +716,12 @@ mod tests {
             constants("pub const A: u64 = 1;"),
             constants("pub const A: u64 = 2;")
         );
-        assert_eq!(public_fns(same), vec!["g".to_owned()]);
+        assert_eq!(all_fns(same), vec!["g".to_owned()]);
+        // A proof block of the Verus body is not part of the compare.
+        let proof = "pub fn k(x: u64) -> (r: u64)\n    ensures r == x,\n{\n    if x > 0 {\n        proof { lemma(x); }\n        x\n    } else {\n        x\n    }\n}\n";
+        let exec = "pub const fn k(x: u64) -> u64 {\n    if x > 0 {\n        x\n    } else {\n        x\n    }\n}\n";
+        assert_eq!(body(proof, "k", true), body(exec, "k", false));
+        assert_eq!(strip_proof_blocks("a proof { b { c } } d"), "a  d");
     }
 
     #[test]

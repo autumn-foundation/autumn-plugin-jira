@@ -2,11 +2,15 @@
 //!
 //! Keep this file in step with `src/policy.rs`. The test
 //! `policy::verus_bodies_match` compares the function bodies and the
-//! constants. The test `policy::every_const_fn_is_proved_or_listed` makes
-//! sure that each public function of `src/policy.rs` is in this file.
+//! constants. It drops each `proof { ... }` block of a body here. The test
+//! `policy::every_const_fn_is_proved_or_listed` makes sure that each
+//! function of `src/policy.rs` is in exactly one list: body matched, proved
+//! with a proptest, or proptest only.
 //! Run: `verus verus/policy.rs`.
 //!
-//! The proofs use no `assume` and no `admit`.
+//! The proofs use no `assume`, no `admit` and no verifier attribute that
+//! skips a proof. The test `policy::the_spec_has_no_proof_escape` rejects
+//! them.
 
 use vstd::prelude::*;
 
