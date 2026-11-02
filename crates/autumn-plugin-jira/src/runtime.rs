@@ -172,7 +172,9 @@ impl Runtime {
 /// semaphore with more permits than that. On a 32-bit target, a `u32`
 /// value can be more than that limit.
 pub(crate) fn slot_count(max_handler_tasks: u32, cap: usize) -> usize {
-    usize::try_from(max_handler_tasks).unwrap_or(cap)
+    usize::try_from(max_handler_tasks)
+        .unwrap_or(usize::MAX)
+        .min(cap)
 }
 
 impl std::fmt::Debug for Runtime {
