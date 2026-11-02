@@ -18,7 +18,7 @@ use super::{
 use crate::adf::Adf;
 use crate::backend::{ApiRequest, Method};
 use crate::error::{JiraError, MarkerRef, Op, Result, UnknownCause};
-use crate::ids::{FieldId, IdempotencyKey, IssueRef, ProjectKey};
+use crate::ids::{AccountId, FieldId, IdempotencyKey, IssueRef, ProjectKey};
 use crate::jql::{Jql, JqlField};
 use crate::model::{Comment, CommentPage, CreatedIssue, IssueRefs, decode};
 use crate::policy::{self, OpClass};
@@ -30,7 +30,7 @@ pub(crate) const MARKER_PROPERTY: &str = "autumn-jira";
 const KEY_FIELD: &str = "idempotencyKey";
 /// The most hits of one marker lookup.
 const LOOKUP_RESULTS: u32 = 10;
-/// The newest comments that a comment lookup reads.
+/// The comments of one page of a comment lookup.
 const COMMENT_LOOKUP: u32 = 100;
 
 /// Returns the create body with the marker label and the marker property.
@@ -70,6 +70,15 @@ fn labels_fix(error: JiraError, project: &ProjectKey) -> JiraError {
         },
         other => other,
     }
+}
+
+/// Returns `true` when `own` wrote the comment and a line of it is `marker`.
+fn is_marked_by(comment: &Comment, own: &AccountId, marker: &str) -> bool {
+    comment.author.as_ref().is_some_and(|a| &a.account_id == own)
+        && comment
+            .body
+            .as_ref()
+            .is_some_and(|b| b.to_plain_text().lines().any(|l| l.trim() == marker))
 }
 
 /// Orders ids as numbers: a shorter digit string is smaller.
@@ -220,26 +229,53 @@ impl JiraClient {
         })
     }
 
-    /// Finds the comment of an idempotency key in the 100 newest comments.
+    /// Finds the comment of an idempotency key.
+    ///
+    /// A match is a comment by the account of the credentials
+    /// ([`Self::account_id`]) with a line that is the full marker. A person
+    /// can type or quote the marker, but a person is not the author of the
+    /// client comments. The lookup reads the newest comments first, 100 for
+    /// each page, at most `max_pages` pages. Other comments can come
+    /// between two attempts, so the lookup does not stop at one page.
     ///
     /// # Errors
     ///
-    /// The typed errors of the call.
+    /// `PageLimit` when `max_pages` pages do not hold the marker and the
+    /// issue has more comments: "not found" is not known then. The typed
+    /// errors of the calls. A failed call never gives `None`.
     pub async fn find_comment_by_idempotency_key(
         &self,
         issue: impl Into<IssueRef> + Send,
         key: &IdempotencyKey,
     ) -> Result<Option<Comment>> {
         let marker = key.comment_marker();
+        let own = self.account_id().await?;
         let path = format!("{}/comment", issue_path(&issue.into()));
-        let request = ApiRequest::new(Op::ListComments, Method::Get, path)
-            .query("orderBy", "-created")
-            .query("maxResults", COMMENT_LOOKUP.to_string());
-        let page: CommentPage = self.read(&request).await?;
-        Ok(page
-            .comments
-            .into_iter()
-            .find(|c| c.body.as_ref().is_some_and(|b| b.contains_text(&marker))))
+        let max = self.settings.max_pages;
+        let mut start = 0_u64;
+        for _ in 0..max {
+            let request = ApiRequest::new(Op::ListComments, Method::Get, path.clone())
+                .query("orderBy", "-created")
+                .query("startAt", start.to_string())
+                .query("maxResults", COMMENT_LOOKUP.to_string());
+            let page: CommentPage = self.read(&request).await?;
+            let returned = super::count(page.comments.len());
+            if let Some(found) = page
+                .comments
+                .into_iter()
+                .find(|c| is_marked_by(c, &own, &marker))
+            {
+                return Ok(Some(found));
+            }
+            match policy::offset_next(start, returned, page.total) {
+                Some(next) => start = next,
+                None => return Ok(None),
+            }
+        }
+        Err(JiraError::PageLimit {
+            op: Op::ListComments,
+            max,
+        })
     }
 
     /// Moves an issue to a status. Before each attempt, the client reads
