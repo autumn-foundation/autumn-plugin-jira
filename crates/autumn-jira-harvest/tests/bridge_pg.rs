@@ -446,3 +446,86 @@ fn raw_status_change(fake: &FakeJira, key: &IssueKey) -> Vec<u8> {
         .unwrap();
     fake.take_deliveries().pop().expect("a delivery").body
 }
+
+/// An activity context of attempt 1 with the route key in the state.
+fn activity_ctx() -> autumn_harvest::context::ActivityContext {
+    let mut state: std::collections::HashMap<
+        std::any::TypeId,
+        Box<dyn std::any::Any + Send + Sync>,
+    > = std::collections::HashMap::new();
+    state.insert(std::any::TypeId::of::<RouteKey>(), Box::new(route_key()));
+    autumn_harvest::context::ActivityContext::new_test_with_state(Arc::new(state))
+}
+
+/// R2F-fixcheck-a-3: the tag binds the issue. A create binds it to the
+/// marker label of the create, and a watch to the issue id. A person who
+/// copies the route entry and the tracked label to another issue gives no
+/// signal: the tag of the copy does not verify there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_copied_route_does_not_signal() {
+    let Some(url) = database_url() else { return };
+    migrated(&url).await;
+    let pool = pool(&url);
+    let workflow_id = format!("incident:{}", nonce());
+    let started = start_run(&pool, &url, &workflow_id).await;
+    let fake = fake();
+    let route = SignalRoute::new(WORKFLOW, &workflow_id).unwrap();
+    let bridge = make_bridge(pool.clone(), &fake);
+
+    // A: made by the create activity with a route.
+    let mut create = autumn_jira_harvest::CreateIssueInput::new(
+        ProjectKey::parse("OPS").unwrap(),
+        IssueTypeRef::Name("Task".into()),
+        "Disk full",
+    );
+    create.route = Some(route.clone());
+    let made = create.run(&client(&fake), &activity_ctx()).await.unwrap();
+    let _ = fake.take_deliveries();
+    let routes = client(&fake)
+        .get_issue_property(made.key.clone(), ROUTES_PROPERTY)
+        .await
+        .unwrap()
+        .unwrap();
+    // C: a person's issue that the watch activity tracks.
+    let watched = tracked_issue(&fake, vec![]).await;
+    autumn_jira_harvest::WatchIssueInput::new(watched.clone(), route.clone())
+        .run(&client(&fake), &activity_ctx())
+        .await
+        .unwrap();
+    let watch_routes = client(&fake)
+        .get_issue_property(watched.clone(), ROUTES_PROPERTY)
+        .await
+        .unwrap()
+        .unwrap();
+    let _ = fake.take_deliveries();
+
+    // B and D: copies of the entries of A and C, with the tracked label.
+    for copied in [routes, watch_routes] {
+        let copy = tracked_issue(&fake, vec![]).await;
+        client(&fake)
+            .set_issue_property(copy.clone(), ROUTES_PROPERTY, &copied)
+            .await
+            .unwrap();
+        let delivery = status_change(&fake, &copy);
+        assert_eq!(
+            bridge.route(&delivery).await.unwrap(),
+            vec![RouteOutcome::BadTag],
+            "{copied}"
+        );
+    }
+    let mut conn = pool.get().await.unwrap();
+    let signals = autumn_harvest::signal::load_pending_signals(&mut conn, started.handle.exec_id())
+        .await
+        .unwrap();
+    assert!(signals.is_empty(), "a copy gives no signal");
+
+    // The issues of the route still signal the run.
+    for own in [made.key.clone(), watched] {
+        let delivery = status_change(&fake, &own);
+        assert_eq!(
+            bridge.route(&delivery).await.unwrap(),
+            vec![RouteOutcome::Signalled],
+            "{own}"
+        );
+    }
+}
