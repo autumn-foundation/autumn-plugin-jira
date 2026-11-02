@@ -36,6 +36,9 @@ use autumn_jira::{
     StatusTarget,
 };
 use autumn_jira_fake::{DEFAULT_API_TOKEN, DEFAULT_EMAIL, FakeJira, FakeOp, Fault};
+use autumn_jira_harvest::activities::{
+    LONG_WRITE_START_TO_CLOSE, READ_START_TO_CLOSE, WRITE_START_TO_CLOSE,
+};
 use autumn_jira_harvest::{
     AddCommentInput, CONFIG_ERROR, ClientRef, CreateIssueInput, CreateIssueOutput, CreateKind,
     DeleteIssueInput, DeleteKind, ERROR_PREFIX, EditIssueInput, GetIssueInput, JiraClients,
@@ -535,9 +538,6 @@ fn start_to_close_covers_the_client_budget() {
             .into_iter()
             .find(|info| info.name == name)
             .and_then(|info| info.default_start_to_close)
-    };
-    use autumn_jira_harvest::activities::{
-        LONG_WRITE_START_TO_CLOSE, READ_START_TO_CLOSE, WRITE_START_TO_CLOSE,
     };
     assert_eq!(
         by_name("jira_create_issue"),

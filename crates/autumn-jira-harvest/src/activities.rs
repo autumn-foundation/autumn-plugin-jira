@@ -45,18 +45,23 @@ use crate::route::{ROUTES_PROPERTY, RouteKey, SignalRoute, TRACKED_LABEL};
 pub const GET_ISSUE: &str = "jira_get_issue";
 
 /// The longest transport timeout that the `start_to_close` budgets hold
-/// for: 60 seconds for each request. The default of `ReqwestTransport` is
+/// for: 60 seconds for each request.
+///
+/// The default of `ReqwestTransport` is
 /// 60 s. A longer transport timeout can let harvest stop an attempt in the
 /// middle of a call (R9-test-quality-6).
 pub const MAX_TRANSPORT_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// The transport calls of one client send through san-mateo
-/// (`ClientRef::Connection`): a token refresh before the send, the send, a
-/// refresh after a 401, and the send again (R4-harvest-determinism-6).
+/// The transport calls of one client send through san-mateo.
+///
+/// A `ClientRef::Connection` client can make a token refresh before the
+/// send, the send, a refresh after a 401, and the send again
+/// (R4-harvest-determinism-6).
 pub const SAN_MATEO_CALLS_PER_SEND: u32 = 4;
 
-/// The `start_to_close` of a read activity: 9 minutes (plan 7.2, B2). One
-/// durable read through san-mateo can take 490 s: two sends of four
+/// The `start_to_close` of a read activity: 9 minutes (plan 7.2, B2).
+///
+/// One durable read through san-mateo can take 490 s: two sends of four
 /// transport calls of 60 s, and one wait of 10 s.
 pub const READ_START_TO_CLOSE: Duration = Duration::from_secs(540);
 
@@ -65,7 +70,9 @@ pub const READ_START_TO_CLOSE: Duration = Duration::from_secs(540);
 pub const WRITE_START_TO_CLOSE: Duration = Duration::from_secs(540);
 
 /// The `start_to_close` of a marked write, a checked write and the watch:
-/// 42 minutes. Through san-mateo, at four transport calls of 60 s for each
+/// 42 minutes.
+///
+/// Through san-mateo, at four transport calls of 60 s for each
 /// send, one durable marked write can take 1 470 s, one checked write
 /// 2 450 s and the watch 1 960 s (plan 7.2, B2). A direct client needs
 /// less. Harvest retries an attempt that stops in the middle of a write
