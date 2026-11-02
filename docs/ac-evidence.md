@@ -485,9 +485,9 @@ only.
 | AC1 Newtypes | The strict table, the `Deserialize` case and the round trip did not cover `SiteHost`. | fixed | u: `ids::{strict_rules_table, deserialize_is_strict, display_round_trip_proptest, no_panic_proptest}` | 3be8171 (TEST) |
 | AC6 Issue CRUD | The create case did not read back its property. | fixed | suite case `create_get_edit_delete` | 132c242 (TEST) |
 | AC29 Webhook route | No test sent a delivery again after a handler timeout. | fixed: the test is renamed | `plugin/t/webhook.rs::timeout_is_503_then_redelivery_succeeds` | b0f229b (TEST) |
-| AC33 Durable wait | The AC said "60 s apart", but the seed picks when each signal lands. S2 said "three" signals. | fixed in the docs: the harvest 0.8 `Simulation` cannot send a signal at a set time | `harvest/t/wait.rs::ignored_signals_do_not_extend_the_deadline` | this DOCS commit |
+| AC33 Durable wait | The AC said "60 s apart", but the seed picks when each signal lands. S2 said "three" signals. | fixed in the docs: the harvest 0.8 `Simulation` cannot send a signal at a set time | `harvest/t/wait.rs::ignored_signals_do_not_extend_the_deadline` | c2ca824 (DOCS) |
 | AC38 Quality gates | Two README `rust,ignore` snippets were not compiled and not checked. | fixed: the snippets copy the ecosystem example, and the check refuses a free `rust,ignore` block | `core/t/examples_wired.rs::readme_snippets_copy_their_examples` | 7540c1d (RED), 10ca754 (GREEN) |
-| AC38 Quality gates | The plan named a CI job `coverage`. Coverage is a set of steps of the `test` job. | fixed in the docs | none | this DOCS commit |
+| AC38 Quality gates | The plan named a CI job `coverage`. Coverage is a set of steps of the `test` job. | fixed in the docs | none | c2ca824 (DOCS) |
 | EX4 camel_route | The failure test did not check the error variant. | fixed: the component gives `InvalidUri`, and the route add wraps it in `RouteError` | ex: `camel_route::unknown_option_fails_at_route_add` | 1425b4f (TEST) |
 | EX8 Examples wired | `no_example_turns_on_the_dev_only_proxy_flags` did not check `full_migrations_sql`, and no self-test had that rule. | fixed | `core/t/examples_wired.rs::no_example_turns_on_the_dev_only_proxy_flags` | 1a00e8b (TEST) |
 
@@ -497,6 +497,18 @@ Notes on the completeness check:
   reads the counters two times, so it sets `health.cache_ttl_ms = 0`.
 - EX4: the text of examples-plan 7.4 now says that camel-core wraps the
   `InvalidUri` of the component in a `RouteError`. The test checks both.
+
+### Account id after a refresh
+
+The gap fixer named one limit that it left open: `JiraClient` cached the
+account id once and never cleared it. A reconnect can give a connection
+another Atlassian user. The comment marker lookup compares the comment
+author with that id. So a stale id hid the marked comments of the new
+user, and a retry could send a second comment.
+
+| Item | Status | Tests | Commits |
+|---|---|---|---|
+| Stale account id after `refresh_site` (plan V124) | fixed: `refresh_site` clears the cache, and the next marked write reads `GET /myself` again | `core/t/client.rs::refresh_site_reads_the_account_id_again` | dd9e932 (RED), dbc80c7 (GREEN) |
 
 ## Mutation tests
 

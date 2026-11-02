@@ -115,7 +115,8 @@ of this file that now shows the change. The waves of section 17.1 found
 the changes V1 to V53. Review round 1 found V54 to V96, and each of these
 rows names its finding id. Review round 2 found V97 to V116. Review
 round 3, the last round, found V117 to V122. V123 closes an open item of
-round 2 after round 3. The wave and fixer reports give the full text.
+round 2 after round 3, and V124 closes a limit that its fixer named.
+The wave and fixer reports give the full text.
 
 | # | Change | Reason | Section |
 |---|---|---|---|
@@ -242,6 +243,7 @@ round 2 after round 3. The wave and fixer reports give the full text.
 | V121 | The proof escape scan skips an escape word as a longer name only when a letter, a digit or `_` comes just before it in the source, with no white space between them. | The scan removed the white space first, so `pub assume_specification[f]` read as a longer name and passed the guard (R3-tests-docs-guards-2). | 6 |
 | V122 | The AC39 update check skips a shell keyword (`then`, `do`, `else`, `elif`, `if`, `while`, `until`), `!`, a wrapper (`time`, `env`) and `NAME=value` assignments at the start of a segment before it looks for `cargo update`. | `if ...; then cargo update; fi` escaped the one-version check (R3-tests-docs-guards-4). | 13, 16 |
 | V123 | New `JiraBackend::refresh_site` with a default that gives `Ok(None)`. `SanMateoBackend` overrides it: for `atlassian` with no target cloud id it runs the discovery of `discover_cloud_id` and resets the prefix (V120). New `JiraClient::refresh_site` and `JiraService::refresh_default`. | The plugin had no manual refresh for the default client: `JiraService::forget` acts on `for_connection` clients only. A moved tenant waited up to `CLOUD_ID_RECHECK_INTERVAL` (R2G-fixcheck-b-1). | 4.4, 4.5, 8, ADR 0002 |
+| V124 | `JiraClient` keeps the account id in a lock that `refresh_site` clears. `myself` writes the cache. `account_id` reads `GET /myself` when the cache is empty. | A reconnect can give a connection another Atlassian user. The marker lookup compares the comment author with the cached id, so a stale id hid the marked comments of the new user (gap fixer note after round 3). | 4.5, 7.1 |
 
 ---
 
