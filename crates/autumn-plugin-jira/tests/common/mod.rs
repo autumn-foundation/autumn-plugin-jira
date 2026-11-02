@@ -118,12 +118,17 @@ pub fn now_ms() -> i64 {
 }
 
 /// An `jira:issue_updated` body at `timestamp`, by `actor`.
+///
+/// Each body has its own `changelog.id`, as real Jira events do. autumn keys
+/// its replay store on the signature, so two equal bodies give a 409.
 pub fn issue_updated(timestamp: Option<i64>, actor: &str) -> Vec<u8> {
+    static NEXT_CHANGELOG_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let changelog_id = NEXT_CHANGELOG_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut body = json!({
         "webhookEvent": "jira:issue_updated",
         "user": {"accountId": actor},
         "issue": {"id": "10001", "key": "OPS-1", "fields": {"summary": "Disk full"}},
-        "changelog": {"id": "1", "items": [{"field": "status", "fromString": "To Do", "toString": "Done", "from": "10000", "to": "10002"}]},
+        "changelog": {"id": changelog_id.to_string(), "items": [{"field": "status", "fromString": "To Do", "toString": "Done", "from": "10000", "to": "10002"}]},
     });
     if let Some(ts) = timestamp {
         body["timestamp"] = json!(ts);

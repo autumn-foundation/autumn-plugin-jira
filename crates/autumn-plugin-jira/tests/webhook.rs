@@ -93,9 +93,13 @@ async fn deliveries_in_one_millisecond_are_all_accepted() {
     let client = app(plugin(&fake).sink(Scripted::new("a", &log)));
     let ts = now_ms();
     for n in 0..3 {
-        deliver(&client, &format!("ms-{n}"), &issue_updated(Some(ts), "acct-ann"))
-            .await
-            .assert_status(200);
+        deliver(
+            &client,
+            &format!("ms-{n}"),
+            &issue_updated(Some(ts), "acct-ann"),
+        )
+        .await
+        .assert_status(200);
     }
     assert_eq!(entries(&log), ["a:ms-0", "a:ms-1", "a:ms-2"]);
 }
