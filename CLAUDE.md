@@ -43,6 +43,8 @@ cargo +1.97.0 check --locked --manifest-path examples/ecosystem/Cargo.toml --all
 
 ## Rules
 
+- README Rust snippets are doctests. Make them compile; use `no_run`, not `ignore`.
+  `tests/doc_snippets.rs` checks the TOML snippets and the version pins in the docs.
 - Write the test first. See it fail. Then write the code.
 - A change to `policy.rs` needs the same change in `verus/policy.rs`. The
   test `verus_bodies_match` compares the two. Do not accept a clippy

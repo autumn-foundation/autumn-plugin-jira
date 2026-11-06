@@ -389,7 +389,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 worker state. Each activity input holds ids and options, never a secret.
 
 ```rust,ignore
-// From the harvest_workflow example, which CI runs.
+// From `crates/autumn-jira-harvest/examples/harvest_workflow.rs`.
 // From an env var or a secret store in production.
 let key = RouteKey::new(Secret::new(format!("route-key-{}", OsEntropy.hex(16))))?;
 let (registry, _dags, _schedules, config) = HarvestBuilder::new()
@@ -427,7 +427,7 @@ has no lookup before the send, so a busy issue still gets the comment.
 the wait faster. The wait does not need them: a poll ends it too.
 
 ```rust,ignore
-// From the ecosystem example, which CI runs.
+// From `examples/ecosystem/src/workflow.rs`.
 #[workflow]
 pub async fn incident_flow(
     ctx: &WorkflowContext,
@@ -489,7 +489,7 @@ its host by itself. For a San Mateo client, use the site URL of
 `accessible-resources`:
 
 ```rust,ignore
-// From the ecosystem example, which CI runs.
+// From `examples/ecosystem/src/main.rs`, `examples/ecosystem/src/transport.rs`.
 let bridge = HarvestSignalBridge::new(pool.clone(), jira.clone(), key.clone())
     .allow_workflow(INCIDENT_FLOW)
     .site_host(transport::site_host()?);
@@ -501,7 +501,7 @@ The bridge is a sink for all actors. So a status change by an ignored
 account, for example the bot, still signals the run:
 
 ```rust,ignore
-// From the ecosystem example, which CI runs.
+// From `examples/ecosystem/src/app.rs`.
 Ok(JiraPlugin::with_config(jira_config()?).sink_for_all_actors(bridge))
 ```
 
@@ -520,7 +520,7 @@ marker. Found gives `outcome = "found"`. Not found gives a non-retryable
 `autumn-jira-camel` gives the producer `jira:<operation>?<options>`.
 
 ```rust,ignore
-// From the camel_route example, which CI runs.
+// From `crates/autumn-jira-camel/examples/camel_route.rs`.
 const CREATE: &str = "jira:createIssue?project=OPS&issueType=Task";
 const MOVE: &str =
     "jira:transitionToStatus?status=category:indeterminate&allowHeaderOverrides=true";
