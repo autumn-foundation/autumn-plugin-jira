@@ -569,11 +569,11 @@ fn start_to_close_covers_the_client_budget() {
     assert_eq!(by_name("jira_search_page"), Some(READ_START_TO_CLOSE));
     assert_eq!(
         (READ_START_TO_CLOSE, LONG_WRITE_START_TO_CLOSE),
-        (Duration::from_secs(540), Duration::from_secs(2_520))
+        (Duration::from_secs(540), Duration::from_mins(42))
     );
     assert_eq!(
         (COMMENT_LOOKUP_PAGES, COMMENT_START_TO_CLOSE),
-        (3, Duration::from_secs(4_200))
+        (3, Duration::from_mins(70))
     );
 }
 

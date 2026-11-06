@@ -23,13 +23,13 @@ use crate::failure::{ERROR_PREFIX, INVALID_INPUT_ERROR, WORKFLOW_ERROR};
 pub const SIGNAL: &str = "jira.event";
 
 /// The longest wait: 29 days.
-pub const MAX_WAIT: Duration = Duration::from_secs(29 * 24 * 3600);
+pub const MAX_WAIT: Duration = Duration::from_hours(29 * 24);
 
 /// The shortest poll interval: 1 second. A durable timer has whole seconds.
 pub const MIN_POLL_EVERY: Duration = Duration::from_secs(1);
 
 /// The default poll interval: 15 minutes.
-pub const DEFAULT_POLL_EVERY: Duration = Duration::from_secs(15 * 60);
+pub const DEFAULT_POLL_EVERY: Duration = Duration::from_mins(15);
 
 /// The most poll rounds of one wait: `timeout / poll_every`, rounded up.
 ///
@@ -56,7 +56,7 @@ pub const MAX_POLL_ROUNDS: u64 = 3_000;
 /// last read do not wait for a `Retry-After`: a rate-limited read is a
 /// missed poll at once. Harvest can wait up to 15 minutes for each
 /// `Retry-After`, and four such waits do not fit the margin.
-pub const LAST_READ_MARGIN: Duration = Duration::from_secs(46 * 60);
+pub const LAST_READ_MARGIN: Duration = Duration::from_mins(46);
 
 /// The most signal rounds of one wait that do not end it.
 ///
@@ -654,7 +654,7 @@ mod tests {
     #[test]
     fn the_signal_cap_falls_back_to_polls() {
         let minute = Some(Duration::from_secs(60));
-        let day = Some(Duration::from_secs(86_400));
+        let day = Some(Duration::from_hours(24));
         assert_eq!(poll_every(None, 0), None);
         assert_eq!(poll_every(minute, MAX_SIGNAL_ROUNDS), minute);
         assert_eq!(

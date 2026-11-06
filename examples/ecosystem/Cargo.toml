@@ -12,7 +12,7 @@
 name = "ecosystem"
 version = "0.0.0"
 edition = "2024"
-rust-version = "1.89"
+rust-version = "1.97"
 license = "Apache-2.0"
 publish = false
 
@@ -32,15 +32,15 @@ autumn-jira-harvest = { path = "../../crates/autumn-jira-harvest" }
 autumn-jira-camel = { path = "../../crates/autumn-jira-camel" }
 # The ecosystem. Keep one version of each in the lock (CI job `deps`).
 san-mateo = "0.1"
-autumn-plugin-san-mateo = "0.2"
-san-mateo-harvest = "0.2"
+autumn-plugin-san-mateo = "0.3"
+san-mateo-harvest = "0.3"
 san-mateo-camel = "0.1"
-# harvest-camel 0.2 uses camel 0.57 and autumn-harvest 0.8.
-harvest-camel = "0.2.0"
+# harvest-camel 0.3 uses camel 0.57 and autumn-harvest 0.10.
+harvest-camel = "0.3.0"
 # The macros expand to `::autumn_harvest::...`. Do not rename this dependency.
-autumn-harvest = "0.8.0"
-autumn-harvest-plugin = { version = "0.8.0", features = ["connectors"] }
-autumn-web = "0.9"
+autumn-harvest = "0.10.0"
+autumn-harvest-plugin = { version = "0.10.0", features = ["connectors"] }
+autumn-web = "0.10"
 camel-api = "0.57"
 camel-builder = "0.57"
 camel-component-api = "0.57"
@@ -90,3 +90,14 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = false
+
+# harvest-camel 0.3 and the San Mateo 0.3 crates (on autumn-harvest 0.10
+# and autumn-web 0.10) are not on crates.io yet. Remove this patch after
+# the releases. All San Mateo crates come from one git commit, so the lock
+# has one `san-mateo`.
+[patch.crates-io]
+harvest-camel = { git = "https://github.com/autumn-foundation/harvest-camel", branch = "claude/project-thread-8btuvj" }
+san-mateo = { git = "https://github.com/autumn-foundation/san-mateo", branch = "claude/project-thread-8btuvj" }
+san-mateo-camel = { git = "https://github.com/autumn-foundation/san-mateo", branch = "claude/project-thread-8btuvj" }
+autumn-plugin-san-mateo = { git = "https://github.com/autumn-foundation/san-mateo", branch = "claude/project-thread-8btuvj" }
+san-mateo-harvest = { git = "https://github.com/autumn-foundation/san-mateo", branch = "claude/project-thread-8btuvj" }

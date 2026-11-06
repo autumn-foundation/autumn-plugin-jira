@@ -57,7 +57,7 @@ fn name_contract_and_config_section() {
     assert_eq!(p.name(), PLUGIN_NAME);
     assert_eq!(p.route_prefix(), DEFAULT_PREFIX);
     let contract = p.contract().unwrap();
-    assert_eq!(contract.autumn_web.as_deref(), Some("0.9"));
+    assert_eq!(contract.autumn_web.as_deref(), Some("0.10"));
     let app = autumn_web::app().plugin(JiraPlugin::default());
     assert!(app.has_plugin(PLUGIN_NAME));
     assert!(app.has_config_section("jira"));

@@ -3,7 +3,8 @@ name = "autumn-jira-harvest"
 description = "autumn-harvest activities for Jira: safe create, transition, comment; a durable wait for a status; a webhook-to-signal bridge"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
+# autumn-harvest 0.10 needs Rust 1.97.
+rust-version = "1.97"
 license.workspace = true
 repository.workspace = true
 readme = "../../README.md"

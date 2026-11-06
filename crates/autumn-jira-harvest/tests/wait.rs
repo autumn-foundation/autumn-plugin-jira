@@ -1160,7 +1160,7 @@ async fn a_rate_limited_poll_makes_one_attempt() {
     let rate_limited = autumn_harvest::failure::IntoActivityErrorString::into_error_payload(
         autumn_jira_harvest::failure_for(&autumn_jira::JiraError::RateLimited {
             op: autumn_jira::error::Op::GetIssue,
-            retry_after: Some(Duration::from_secs(900)),
+            retry_after: Some(Duration::from_mins(15)),
             reason: None,
         }),
     );

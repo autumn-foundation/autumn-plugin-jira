@@ -3,7 +3,8 @@ name = "autumn-plugin-jira"
 description = "Jira Cloud plugin for autumn-web: a JiraService extractor, a health indicator and a signed webhook route with typed events"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
+# autumn-web 0.10 needs Rust 1.97.
+rust-version = "1.97"
 license.workspace = true
 repository.workspace = true
 readme = "../../README.md"
