@@ -13,19 +13,19 @@ resolver = "3"
 [workspace.package]
 edition = "2024"
 rust-version = "1.89"
-version = "0.1.0"
+version = "0.2.0"
 license = "Apache-2.0"
 repository = "https://github.com/autumn-foundation/autumn-plugin-jira"
 
 [workspace.dependencies]
 # This workspace.
-autumn-jira = { version = "0.1.0", path = "crates/autumn-jira" }
-autumn-jira-fake = { version = "0.1.0", path = "crates/autumn-jira-fake" }
+autumn-jira = { version = "0.2.0", path = "crates/autumn-jira" }
+autumn-jira-fake = { version = "0.2.0", path = "crates/autumn-jira-fake" }
 # The ecosystem. Keep one version of each in the lock (CI job `deps`).
 san-mateo = "0.1"
-autumn-plugin-san-mateo = "0.2"
-autumn-web = { version = "0.9", default-features = false }
-autumn-harvest = "0.8.0"
+autumn-plugin-san-mateo = "0.3"
+autumn-web = { version = "0.10", default-features = false }
+autumn-harvest = "0.10.0"
 camel-api = "0.57"
 camel-component-api = "0.57"
 camel-core = "0.57"
@@ -78,3 +78,10 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = false
+
+# autumn-plugin-san-mateo 0.3 (on autumn-web 0.10) is not on crates.io yet.
+# The patch takes all San Mateo crates from one git commit, so the lock has
+# one `san-mateo`. Remove it after the release.
+[patch.crates-io]
+san-mateo = { git = "https://github.com/autumn-foundation/san-mateo", branch = "claude/project-thread-8btuvj" }
+autumn-plugin-san-mateo = { git = "https://github.com/autumn-foundation/san-mateo", branch = "claude/project-thread-8btuvj" }

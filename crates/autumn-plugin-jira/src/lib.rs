@@ -83,7 +83,7 @@ pub const PLUGIN_NAME: &str = "autumn-plugin-jira";
 ///
 /// It must equal the `autumn-web` requirement in the workspace `Cargo.toml`.
 /// A unit test checks this.
-pub const AUTUMN_WEB_REQUIREMENT: &str = "0.9";
+pub const AUTUMN_WEB_REQUIREMENT: &str = "0.10";
 /// The name of the TOML section.
 pub const SECTION: &str = "jira";
 /// The prefix of the env overrides, for example `AUTUMN_JIRA__HTTP__MAX_PAGES`.

@@ -15,7 +15,7 @@ use autumn_web::actuator::HealthIndicator;
 use autumn_web::app::AppBuilder;
 use autumn_web::plugin::Plugin;
 use autumn_web::plugin_contract::PluginContract;
-use autumn_web::{AppState, AutumnError, ProcessRole};
+use autumn_web::{AppState, AutumnError, Role};
 use tokio::sync::Semaphore;
 
 use crate::config::{JiraConfig, JiraHttpConfig, JiraMode, JiraWebhookConfig};
@@ -265,24 +265,25 @@ impl JiraPlugin {
     /// The errors of the start: config, secrets, conflicts, San Mateo and
     /// the webhook boot check.
     pub fn start(self, state: &AppState) -> Result<JiraRuntime, PluginError> {
-        let role = state.role();
+        let role = state.role().clone();
         self.start_with_role(state, role)
     }
 
     /// Starts the plugin as if the process has `role`. A role that serves no
-    /// HTTP skips the webhook boot check.
+    /// HTTP skips the webhook boot check. A [`autumn_web::ProcessRole`]
+    /// converts to a role.
     ///
     /// # Errors
     /// Same as [`Self::start`].
     pub fn start_with_role(
         self,
         state: &AppState,
-        role: ProcessRole,
+        role: impl Into<Role>,
     ) -> Result<JiraRuntime, PluginError> {
         let cell: Cell = Arc::default();
         let health = Arc::new(JiraHealth::new(Arc::clone(&cell)));
         let runtime = self.start_inner(state, false)?;
-        for warning in self.startup_check(state, &runtime.webhook, role)? {
+        for warning in self.startup_check(state, &runtime.webhook, &role.into())? {
             tracing::warn!("{warning}");
         }
         let _ = cell.set(Arc::clone(&runtime));
@@ -478,7 +479,7 @@ impl JiraPlugin {
         &self,
         state: &AppState,
         settings: &JiraWebhookConfig,
-        role: ProcessRole,
+        role: &Role,
     ) -> Result<Vec<String>, PluginError> {
         if !(self.mounts_route() && role.serves_http()) {
             return Ok(Vec::new());

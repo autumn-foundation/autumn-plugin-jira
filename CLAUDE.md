@@ -1,7 +1,7 @@
 # CLAUDE.md
 
-autumn-plugin-jira: a Jira Cloud client, an autumn-web 0.9 plugin, and
-adapters for autumn-harvest 0.8 and rust-camel 0.57. San Mateo gives the
+autumn-plugin-jira: a Jira Cloud client, an autumn-web 0.10 plugin, and
+adapters for autumn-harvest 0.10 and rust-camel 0.57. San Mateo gives the
 auth. `docs/plan.md` is the design. Follow it. A change to a public
 signature changes `docs/plan.md` in the same commit.
 
@@ -38,7 +38,7 @@ cargo fmt --manifest-path examples/ecosystem/Cargo.toml --check
 cargo clippy --locked --manifest-path examples/ecosystem/Cargo.toml --all-targets -- -D warnings
 JIRA_TEST_DATABASE_URL=postgres://jira:jira@localhost/jira_test cargo test --locked --manifest-path examples/ecosystem/Cargo.toml
 DATABASE_URL=postgres://jira:jira@localhost/jira_test cargo run --locked --manifest-path examples/ecosystem/Cargo.toml
-cargo +1.89.0 check --locked --manifest-path examples/ecosystem/Cargo.toml --all-targets
+cargo +1.97.0 check --locked --manifest-path examples/ecosystem/Cargo.toml --all-targets
 ```
 
 ## Rules

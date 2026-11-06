@@ -2161,12 +2161,12 @@ pub struct IssueSignal { pub delivery_id: WebhookDeliveryId, pub event: String,
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WaitOptions { pub timeout: Duration, pub poll_every: Option<Duration>, pub client: ClientRef }
 impl WaitOptions { pub const fn new(timeout: Duration) -> Self; /* poll_every DEFAULT_POLL_EVERY */ }
-pub const MAX_WAIT: Duration = Duration::from_secs(29 * 24 * 3600);
+pub const MAX_WAIT: Duration = Duration::from_hours(29 * 24);
 pub const MIN_POLL_EVERY: Duration = Duration::from_secs(1);            // V36
-pub const DEFAULT_POLL_EVERY: Duration = Duration::from_secs(15 * 60);
+pub const DEFAULT_POLL_EVERY: Duration = Duration::from_mins(15);
 pub const MAX_POLL_ROUNDS: u64 = 3_000;                                 // V83
 pub const MAX_SIGNAL_ROUNDS: u32 = 1_000;                               // V83
-pub const LAST_READ_MARGIN: Duration = Duration::from_secs(46 * 60);    // V83
+pub const LAST_READ_MARGIN: Duration = Duration::from_mins(46);         // V83
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WaitSource { Initial, Signal, Poll }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

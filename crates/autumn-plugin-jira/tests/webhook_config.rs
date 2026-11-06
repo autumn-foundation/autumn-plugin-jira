@@ -39,7 +39,7 @@ fn plugin() -> JiraPlugin {
 fn autumn_config(endpoint: WebhookEndpointConfig, role: ProcessRole) -> AutumnConfig {
     let mut cfg = AutumnConfig::default();
     cfg.security.webhooks.endpoints.push(endpoint);
-    cfg.role = role;
+    cfg.role = role.into();
     cfg
 }
 

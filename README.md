@@ -37,8 +37,8 @@ flowchart LR
 | Crate | What it gives |
 |---|---|
 | [`autumn-jira`](crates/autumn-jira) | The client: strict ids, issues, transitions, comments, JQL search, ADF, typed errors, webhook types, the verified retry core. API token auth or San Mateo auth. |
-| [`autumn-plugin-jira`](crates/autumn-plugin-jira) | The autumn-web 0.9 plugin: the `[jira]` config, the `JiraService` extractor, the `jira` health indicator, the webhook route. |
-| [`autumn-jira-harvest`](crates/autumn-jira-harvest) | autumn-harvest 0.8 activities, the durable wait `await_issue_status`, and the webhook-to-signal bridge. |
+| [`autumn-plugin-jira`](crates/autumn-plugin-jira) | The autumn-web 0.10 plugin: the `[jira]` config, the `JiraService` extractor, the `jira` health indicator, the webhook route. |
+| [`autumn-jira-harvest`](crates/autumn-jira-harvest) | autumn-harvest 0.10 activities, the durable wait `await_issue_status`, and the webhook-to-signal bridge. |
 | [`autumn-jira-camel`](crates/autumn-jira-camel) | The rust-camel 0.57 `jira:` producer component. |
 | [`autumn-jira-fake`](crates/autumn-jira-fake) | `FakeJira`: a stateful in-memory Jira Cloud with faults, a workflow and signed webhooks. It does not depend on `autumn-jira`. |
 
@@ -51,8 +51,8 @@ Add the plugin:
 
 ```toml
 [dependencies]
-autumn-plugin-jira = "0.1"
-autumn-web = "0.9"
+autumn-plugin-jira = "0.2"
+autumn-web = "0.10"
 ```
 
 Put the config in `autumn.toml`. The `[jira]` section holds the names of
@@ -722,7 +722,7 @@ cargo fmt --manifest-path examples/ecosystem/Cargo.toml --check
 cargo clippy --locked --manifest-path examples/ecosystem/Cargo.toml --all-targets -- -D warnings
 JIRA_TEST_DATABASE_URL=postgres://jira:jira@localhost/jira_test \
   cargo test --locked --manifest-path examples/ecosystem/Cargo.toml
-cargo +1.89.0 check --locked --manifest-path examples/ecosystem/Cargo.toml --all-targets
+cargo +1.97.0 check --locked --manifest-path examples/ecosystem/Cargo.toml --all-targets
 # After a change to a crate of this workspace, update the example lock:
 cargo update --manifest-path examples/ecosystem/Cargo.toml -p autumn-jira \
   -p autumn-plugin-jira -p autumn-jira-harvest -p autumn-jira-camel -p autumn-jira-fake

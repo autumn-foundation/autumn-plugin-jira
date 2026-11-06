@@ -78,7 +78,7 @@ pub const WRITE_START_TO_CLOSE: Duration = Duration::from_secs(540);
 /// needs less. Harvest retries an attempt that stops in the middle of a
 /// write as an attempt with an unknown result. So the budget must cover the
 /// slow path.
-pub const LONG_WRITE_START_TO_CLOSE: Duration = Duration::from_secs(2_520);
+pub const LONG_WRITE_START_TO_CLOSE: Duration = Duration::from_mins(42);
 
 /// The most comment pages that one marker lookup of `jira_add_comment`
 /// reads: 3 pages of 100 comments, the newest first.
@@ -99,7 +99,7 @@ pub const COMMENT_LOOKUP_PAGES: u32 = 3;
 /// [`COMMENT_LOOKUP_PAGES`] pages before the send and after it. Through
 /// san-mateo, at four transport calls of 60 s for each send, that is
 /// 3 920 s.
-pub const COMMENT_START_TO_CLOSE: Duration = Duration::from_secs(4_200);
+pub const COMMENT_START_TO_CLOSE: Duration = Duration::from_mins(70);
 
 /// The retry policy of `jira_get_issue`: 5 attempts, from 1 s.
 #[must_use]
