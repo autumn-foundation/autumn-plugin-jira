@@ -8,10 +8,10 @@ use autumn_harvest::HarvestError;
 use autumn_harvest::context::WorkflowContext;
 use autumn_harvest::failure::WorkflowFailure;
 use autumn_harvest::policy::RetryPolicy;
+use autumn_harvest::time::{SignedDuration, Timestamp};
 use autumn_jira::ids::WebhookDeliveryId;
 use autumn_jira::model::{IssueSummary, StatusSummary};
 use autumn_jira::{IssueId, IssueKey, StatusTarget};
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -287,14 +287,13 @@ async fn wait_loop(
         });
     }
     let mut newest_ms = first.updated.map(|t| t.epoch_ms());
-    let timeout = chrono::Duration::from_std(options.timeout).map_err(|_| invalid_timeout())?;
+    let timeout = SignedDuration::try_from(options.timeout).map_err(|_| invalid_timeout())?;
     let deadline = wait_deadline(ctx.system_now(), timeout, ctx.deadline());
     let mut signal_rounds: u32 = 0;
     let mut polled_last = false;
     loop {
-        let remaining = (deadline - ctx.system_now())
-            .to_std()
-            .unwrap_or(Duration::ZERO);
+        let remaining =
+            Duration::try_from(deadline.duration_since(ctx.system_now())).unwrap_or(Duration::ZERO);
         if remaining.is_zero() {
             break;
         }
@@ -494,21 +493,19 @@ fn is_missed_poll(error: &HarvestError) -> bool {
 
 /// The deadline of a wait that starts at `now`: `now + timeout`, but at
 /// most [`LAST_READ_MARGIN`] before the execution deadline of the run, and
-/// never before `now`.
+/// never before `now`. A sum past the end of the time range stops at the
+/// end.
 fn wait_deadline(
-    now: DateTime<Utc>,
-    timeout: chrono::Duration,
-    run_deadline: Option<DateTime<Utc>>,
-) -> DateTime<Utc> {
-    let wanted = now + timeout;
+    now: Timestamp,
+    timeout: SignedDuration,
+    run_deadline: Option<Timestamp>,
+) -> Timestamp {
+    let wanted = now.checked_add(timeout).unwrap_or(Timestamp::MAX);
     let Some(run_deadline) = run_deadline else {
         return wanted;
     };
-    let margin = chrono::Duration::from_std(LAST_READ_MARGIN).unwrap_or(chrono::Duration::MAX);
-    let latest = run_deadline
-        .checked_sub_signed(margin)
-        .unwrap_or(now)
-        .max(now);
+    let margin = SignedDuration::try_from(LAST_READ_MARGIN).unwrap_or(SignedDuration::MAX);
+    let latest = run_deadline.checked_sub(margin).unwrap_or(now).max(now);
     wanted.min(latest)
 }
 
@@ -550,7 +547,7 @@ async fn read_issue(
     .await
 }
 
-/// The failure of a timeout that does not fit a chrono duration.
+/// The failure of a timeout that does not fit a signed duration.
 fn invalid_timeout() -> WorkflowFailure {
     WorkflowFailure::new(INVALID_INPUT_ERROR, "the wait timeout is too large").non_retryable()
 }
@@ -598,9 +595,9 @@ mod tests {
     /// of the run, with room for the last read.
     #[test]
     fn the_deadline_fits_the_run() {
-        let now = chrono::DateTime::from_timestamp(1_000_000, 0).unwrap();
-        let hour = chrono::Duration::hours(1);
-        let margin = chrono::Duration::from_std(LAST_READ_MARGIN).unwrap();
+        let now = Timestamp::from_second(1_000_000).unwrap();
+        let hour = SignedDuration::from_hours(1);
+        let margin = SignedDuration::try_from(LAST_READ_MARGIN).unwrap();
         // No execution deadline: the full timeout.
         assert_eq!(wait_deadline(now, hour, None), now + hour);
         // A far execution deadline: the full timeout.
@@ -610,7 +607,7 @@ mod tests {
         let near = now + hour * 2;
         assert_eq!(wait_deadline(now, hour * 3, Some(near)), near - margin);
         // A deadline closer than the margin: the wait ends now.
-        let close = now + chrono::Duration::minutes(5);
+        let close = now + SignedDuration::from_mins(5);
         assert_eq!(wait_deadline(now, hour, Some(close)), now);
         // The margin covers every attempt of the last read and its backoff.
         let retry = crate::activities::get_issue_retry();

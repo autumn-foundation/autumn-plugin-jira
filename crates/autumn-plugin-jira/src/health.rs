@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use autumn_jira::JiraClient;
 use autumn_web::actuator::{HealthCheckOutput, HealthIndicator, HealthStatus, IndicatorGroup};
-use autumn_web::reexports::chrono::{SecondsFormat, Utc};
+use autumn_web::reexports::jiff::Timestamp;
 use serde_json::{Value, json};
 use tokio::time::Instant;
 
@@ -133,7 +133,7 @@ impl JiraHealth {
         let limit =
             Duration::from_millis((runtime.health.timeout_ms.saturating_mul(9) / 10).max(1));
         let at = Instant::now();
-        let checked_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+        let checked_at = format!("{:.0}", Timestamp::now());
         let (up, status, error) = match tokio::time::timeout(limit, client.myself()).await {
             Ok(Ok(_)) => (true, Some(200), None),
             Ok(Err(e)) => (false, e.status(), Some(e.code())),

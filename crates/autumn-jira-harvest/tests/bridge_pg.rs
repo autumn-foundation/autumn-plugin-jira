@@ -239,8 +239,8 @@ fn duplicate_delivery_gives_one_signal() {
         );
         bridge.deliver(Arc::new(delivery.clone())).await.unwrap();
         let exec_id = started.handle.exec_id();
-        let mut conn = pool.get().await.unwrap();
-        let signals = autumn_harvest::signal::load_pending_signals(&mut conn, exec_id)
+        let conn = pool.get().await.unwrap();
+        let signals = autumn_harvest::signal::load_pending_signals(&conn, exec_id)
             .await
             .unwrap();
         assert_eq!(signals.len(), 1);
@@ -314,9 +314,9 @@ fn finished_run_is_skipped() {
         );
         bridge.deliver(Arc::new(delivery)).await.unwrap();
         assert_eq!(bridge.counters().finished, 2);
-        let mut conn = pool.get().await.unwrap();
+        let conn = pool.get().await.unwrap();
         let signals =
-            autumn_harvest::signal::load_pending_signals(&mut conn, started.handle.exec_id())
+            autumn_harvest::signal::load_pending_signals(&conn, started.handle.exec_id())
                 .await
                 .unwrap();
         assert!(signals.is_empty());
@@ -455,9 +455,9 @@ fn a_delivery_of_another_site_gives_the_status_of_this_site() {
             bridge.route(&delivery).await.unwrap(),
             vec![RouteOutcome::Signalled]
         );
-        let mut conn = pool.get().await.unwrap();
+        let conn = pool.get().await.unwrap();
         let signals =
-            autumn_harvest::signal::load_pending_signals(&mut conn, started.handle.exec_id())
+            autumn_harvest::signal::load_pending_signals(&conn, started.handle.exec_id())
                 .await
                 .unwrap();
         assert_eq!(signals.len(), 1);
@@ -608,9 +608,9 @@ fn a_copied_route_does_not_signal() {
                 "{copied}"
             );
         }
-        let mut conn = pool.get().await.unwrap();
+        let conn = pool.get().await.unwrap();
         let signals =
-            autumn_harvest::signal::load_pending_signals(&mut conn, started.handle.exec_id())
+            autumn_harvest::signal::load_pending_signals(&conn, started.handle.exec_id())
                 .await
                 .unwrap();
         assert!(signals.is_empty(), "a copy gives no signal");
@@ -655,9 +655,9 @@ fn a_late_delivery_of_this_site_keeps_its_reported_status() {
             bridge.route(&first).await.unwrap(),
             vec![RouteOutcome::Signalled]
         );
-        let mut conn = pool.get().await.unwrap();
+        let conn = pool.get().await.unwrap();
         let signals =
-            autumn_harvest::signal::load_pending_signals(&mut conn, started.handle.exec_id())
+            autumn_harvest::signal::load_pending_signals(&conn, started.handle.exec_id())
                 .await
                 .unwrap();
         assert_eq!(signals.len(), 1);

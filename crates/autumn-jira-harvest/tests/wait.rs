@@ -212,7 +212,7 @@ async fn ignored_signals_do_not_extend_the_deadline() {
                 "seed {}",
                 run.seed()
             );
-            assert_eq!(run.elapsed().num_seconds(), 120, "seed {}", run.seed());
+            assert_eq!(run.elapsed().as_secs(), 120, "seed {}", run.seed());
             // The first read, the poll at 60 s and the last read at 120 s. A
             // signal that lands with the poll timer wins the race, and then
             // that poll does not run.
@@ -264,7 +264,7 @@ async fn already_there_returns_at_once() {
     let reads = reads(outcome.events());
     assert_eq!(reads, vec![GetIssueInput::new(issue_id(ISSUE))]);
     assert_eq!(timers(outcome.events()), Vec::<u64>::new());
-    assert_eq!(outcome.elapsed().num_seconds(), 0);
+    assert_eq!(outcome.elapsed().as_secs(), 0);
     assert_replays(&outcome).await;
 }
 
@@ -283,7 +283,7 @@ async fn signal_ends_the_wait() {
         }
     );
     assert_eq!(reads(outcome.events()).len(), 1);
-    assert_eq!(outcome.elapsed().num_seconds(), 0);
+    assert_eq!(outcome.elapsed().as_secs(), 0);
     assert_replays(&outcome).await;
 }
 
@@ -304,7 +304,7 @@ async fn poll_ends_the_wait_without_webhooks() {
     );
     assert_eq!(reads(outcome.events()).len(), 3);
     assert_eq!(timers(outcome.events()), vec![60, 60]);
-    assert_eq!(outcome.elapsed().num_seconds(), 120);
+    assert_eq!(outcome.elapsed().as_secs(), 120);
     assert_replays(&outcome).await;
 }
 
@@ -323,7 +323,7 @@ async fn the_last_read_at_the_deadline_can_reach_the_target() {
         }
     );
     assert_eq!(timers(run.events()), vec![90]);
-    assert_eq!(run.elapsed().num_seconds(), 90);
+    assert_eq!(run.elapsed().as_secs(), 90);
     assert_replays_with_the_clock_off(run.events().to_vec()).await;
 }
 
@@ -343,7 +343,7 @@ async fn a_late_wait_keeps_its_full_timeout() {
         }
     );
     assert_eq!(timers(run.events()), vec![600, 120]);
-    assert_eq!(run.elapsed().num_seconds(), 720);
+    assert_eq!(run.elapsed().as_secs(), 720);
     assert_replays_with_the_clock_off_as("sleep_then_wait", handler, run.events().to_vec()).await;
 }
 
@@ -373,7 +373,7 @@ async fn other_issue_and_old_timestamp_are_skipped() {
         }
     );
     assert_eq!(reads(outcome.events()).len(), 1);
-    assert_eq!(outcome.elapsed().num_seconds(), 0);
+    assert_eq!(outcome.elapsed().as_secs(), 0);
     assert_replays(&outcome).await;
 }
 
@@ -680,7 +680,7 @@ async fn a_failed_last_read_times_out() {
             last: Some(in_progress())
         }
     );
-    assert_eq!(run.elapsed().num_seconds(), 180);
+    assert_eq!(run.elapsed().as_secs(), 180);
     // The first read, two polls and the last read.
     assert_eq!(reads(run.events()).len(), 4);
     assert_replays_with_the_clock_off(run.events().to_vec()).await;
@@ -1055,9 +1055,9 @@ async fn a_wait_past_the_signal_cap_still_polls() {
     );
     let fallback = autumn_jira_harvest::wait::DEFAULT_POLL_EVERY.as_secs();
     assert!(
-        u64::try_from(run.elapsed().num_seconds()).unwrap() <= fallback,
+        u64::try_from(run.elapsed().as_secs()).unwrap() <= fallback,
         "the wait ended after {} s",
-        run.elapsed().num_seconds()
+        run.elapsed().as_secs()
     );
     assert_replays_with_the_clock_off(run.events().to_vec()).await;
 }
