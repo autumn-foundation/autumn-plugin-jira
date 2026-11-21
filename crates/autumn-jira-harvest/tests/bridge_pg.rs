@@ -315,10 +315,9 @@ fn finished_run_is_skipped() {
         bridge.deliver(Arc::new(delivery)).await.unwrap();
         assert_eq!(bridge.counters().finished, 2);
         let conn = pool.get().await.unwrap();
-        let signals =
-            autumn_harvest::signal::load_pending_signals(&conn, started.handle.exec_id())
-                .await
-                .unwrap();
+        let signals = autumn_harvest::signal::load_pending_signals(&conn, started.handle.exec_id())
+            .await
+            .unwrap();
         assert!(signals.is_empty());
     });
 }
@@ -456,10 +455,9 @@ fn a_delivery_of_another_site_gives_the_status_of_this_site() {
             vec![RouteOutcome::Signalled]
         );
         let conn = pool.get().await.unwrap();
-        let signals =
-            autumn_harvest::signal::load_pending_signals(&conn, started.handle.exec_id())
-                .await
-                .unwrap();
+        let signals = autumn_harvest::signal::load_pending_signals(&conn, started.handle.exec_id())
+            .await
+            .unwrap();
         assert_eq!(signals.len(), 1);
         let payload: IssueSignal = serde_json::from_value(signals[0].payload.clone()).unwrap();
         assert_eq!(payload.issue_id, our_id);
@@ -609,10 +607,9 @@ fn a_copied_route_does_not_signal() {
             );
         }
         let conn = pool.get().await.unwrap();
-        let signals =
-            autumn_harvest::signal::load_pending_signals(&conn, started.handle.exec_id())
-                .await
-                .unwrap();
+        let signals = autumn_harvest::signal::load_pending_signals(&conn, started.handle.exec_id())
+            .await
+            .unwrap();
         assert!(signals.is_empty(), "a copy gives no signal");
 
         // The issues of the route still signal the run.
@@ -656,10 +653,9 @@ fn a_late_delivery_of_this_site_keeps_its_reported_status() {
             vec![RouteOutcome::Signalled]
         );
         let conn = pool.get().await.unwrap();
-        let signals =
-            autumn_harvest::signal::load_pending_signals(&conn, started.handle.exec_id())
-                .await
-                .unwrap();
+        let signals = autumn_harvest::signal::load_pending_signals(&conn, started.handle.exec_id())
+            .await
+            .unwrap();
         assert_eq!(signals.len(), 1);
         let payload: IssueSignal = serde_json::from_value(signals[0].payload.clone()).unwrap();
         assert_eq!(payload.status.unwrap().name, "In Progress");
