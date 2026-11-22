@@ -99,8 +99,8 @@ debug = false
 # yet. Remove this patch after the releases. All San Mateo crates come from
 # one git commit, so the lock has one `san-mateo`.
 [patch.crates-io]
-harvest-camel = { git = "https://github.com/autumn-foundation/harvest-camel", branch = "claude/project-thread-1meeql" }
-san-mateo = { git = "https://github.com/autumn-foundation/san-mateo", branch = "claude/project-thread-1meeql" }
-san-mateo-camel = { git = "https://github.com/autumn-foundation/san-mateo", branch = "claude/project-thread-1meeql" }
-autumn-plugin-san-mateo = { git = "https://github.com/autumn-foundation/san-mateo", branch = "claude/project-thread-1meeql" }
-san-mateo-harvest = { git = "https://github.com/autumn-foundation/san-mateo", branch = "claude/project-thread-1meeql" }
+harvest-camel = { git = "https://github.com/autumn-foundation/harvest-camel", rev = "bfdb04ffc10c1cb562518c140bf256b72f2d5bf6" }
+san-mateo = { git = "https://github.com/autumn-foundation/san-mateo", rev = "4725a3f0d3da36b47f6c666aed703f34d975c875" }
+san-mateo-camel = { git = "https://github.com/autumn-foundation/san-mateo", rev = "4725a3f0d3da36b47f6c666aed703f34d975c875" }
+autumn-plugin-san-mateo = { git = "https://github.com/autumn-foundation/san-mateo", rev = "4725a3f0d3da36b47f6c666aed703f34d975c875" }
+san-mateo-harvest = { git = "https://github.com/autumn-foundation/san-mateo", rev = "4725a3f0d3da36b47f6c666aed703f34d975c875" }

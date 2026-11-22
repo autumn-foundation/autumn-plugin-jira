@@ -430,7 +430,7 @@ dependencies = [
 [[package]]
 name = "autumn-plugin-san-mateo"
 version = "0.4.0"
-source = "git+https://github.com/autumn-foundation/san-mateo?branch=claude%2Fproject-thread-1meeql#54348cd462bf77090c0704a6e5272458fff2cb94"
+source = "git+https://github.com/autumn-foundation/san-mateo?rev=4725a3f0d3da36b47f6c666aed703f34d975c875#4725a3f0d3da36b47f6c666aed703f34d975c875"
 dependencies = [
  "autumn-web",
  "san-mateo",
@@ -4207,7 +4207,7 @@ dependencies = [
 [[package]]
 name = "san-mateo"
 version = "0.1.0"
-source = "git+https://github.com/autumn-foundation/san-mateo?branch=claude%2Fproject-thread-1meeql#54348cd462bf77090c0704a6e5272458fff2cb94"
+source = "git+https://github.com/autumn-foundation/san-mateo?rev=4725a3f0d3da36b47f6c666aed703f34d975c875#4725a3f0d3da36b47f6c666aed703f34d975c875"
 dependencies = [
  "aes-gcm 0.10.3",
  "async-trait",
