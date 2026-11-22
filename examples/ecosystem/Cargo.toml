@@ -32,27 +32,30 @@ autumn-jira-harvest = { path = "../../crates/autumn-jira-harvest" }
 autumn-jira-camel = { path = "../../crates/autumn-jira-camel" }
 # The ecosystem. Keep one version of each in the lock (CI job `deps`).
 san-mateo = "0.1"
-autumn-plugin-san-mateo = "0.3"
-san-mateo-harvest = "0.3"
+autumn-plugin-san-mateo = "0.4"
+san-mateo-harvest = "0.4"
 san-mateo-camel = "0.1"
-# harvest-camel 0.3 uses camel 0.57 and autumn-harvest 0.10.
-harvest-camel = "0.3.0"
+# harvest-camel 0.5 uses camel 0.57 and autumn-harvest 0.11.
+harvest-camel = "0.5.0"
 # The macros expand to `::autumn_harvest::...`. Do not rename this dependency.
-autumn-harvest = "0.10.0"
-autumn-harvest-plugin = { version = "0.10.0", features = ["connectors"] }
-autumn-web = "0.10"
+autumn-harvest = "0.11.0"
+autumn-harvest-plugin = { version = "0.11.0", features = ["connectors"] }
+autumn-web = "0.11"
 camel-api = "0.57"
 camel-builder = "0.57"
 camel-component-api = "0.57"
 camel-component-direct = "0.57"
 camel-core = "0.57"
 # Others.
+# San Mateo credentials hold chrono times. autumn-harvest 0.11 no longer
+# re-exports chrono.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # Spike S3: the graph turns on two rustls crypto providers, `ring` and
 # `aws-lc-rs`. With two, rustls cannot pick one, so `main` and the tests
 # install `ring` once (plan B18, R2).
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 deadpool = "0.13"
-diesel-async = { version = "0.9", features = ["deadpool", "postgres"] }
+diesel-async = { version = "0.10", features = ["deadpool", "postgres"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
@@ -91,13 +94,13 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 debug = false
 
-# harvest-camel 0.3 and the San Mateo 0.3 crates (on autumn-harvest 0.10
-# and autumn-web 0.10) are not on crates.io yet. Remove this patch after
-# the releases. All San Mateo crates come from one git commit, so the lock
-# has one `san-mateo`.
+# harvest-camel 0.5 and the San Mateo crates on autumn-harvest 0.11
+# (autumn-plugin-san-mateo 0.4, san-mateo-harvest 0.4) are not on crates.io
+# yet. Remove this patch after the releases. All San Mateo crates come from
+# one git commit, so the lock has one `san-mateo`.
 [patch.crates-io]
-harvest-camel = { git = "https://github.com/autumn-foundation/harvest-camel", branch = "claude/project-thread-8btuvj" }
-san-mateo = { git = "https://github.com/autumn-foundation/san-mateo", branch = "claude/project-thread-8btuvj" }
-san-mateo-camel = { git = "https://github.com/autumn-foundation/san-mateo", branch = "claude/project-thread-8btuvj" }
-autumn-plugin-san-mateo = { git = "https://github.com/autumn-foundation/san-mateo", branch = "claude/project-thread-8btuvj" }
-san-mateo-harvest = { git = "https://github.com/autumn-foundation/san-mateo", branch = "claude/project-thread-8btuvj" }
+harvest-camel = { git = "https://github.com/autumn-foundation/harvest-camel", rev = "bfdb04ffc10c1cb562518c140bf256b72f2d5bf6" }
+san-mateo = { git = "https://github.com/autumn-foundation/san-mateo", rev = "4725a3f0d3da36b47f6c666aed703f34d975c875" }
+san-mateo-camel = { git = "https://github.com/autumn-foundation/san-mateo", rev = "4725a3f0d3da36b47f6c666aed703f34d975c875" }
+autumn-plugin-san-mateo = { git = "https://github.com/autumn-foundation/san-mateo", rev = "4725a3f0d3da36b47f6c666aed703f34d975c875" }
+san-mateo-harvest = { git = "https://github.com/autumn-foundation/san-mateo", rev = "4725a3f0d3da36b47f6c666aed703f34d975c875" }

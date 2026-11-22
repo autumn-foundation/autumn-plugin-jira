@@ -142,7 +142,7 @@ pub async fn san_mateo(sites: &Sites, client_secret: &str) -> Result<SanMateo, B
     )
     .await?;
     // An expired access token and a refresh token, as after a long pause.
-    let expired = autumn_harvest::chrono::Utc::now() - autumn_harvest::chrono::Duration::hours(1);
+    let expired = chrono::Utc::now() - chrono::Duration::hours(1);
     san.import_connection(
         ENV,
         connection(

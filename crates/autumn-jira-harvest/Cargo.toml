@@ -3,7 +3,7 @@ name = "autumn-jira-harvest"
 description = "autumn-harvest activities for Jira: safe create, transition, comment; a durable wait for a status; a webhook-to-signal bridge"
 version.workspace = true
 edition.workspace = true
-# autumn-harvest 0.10 needs Rust 1.97.
+# autumn-harvest 0.11 needs Rust 1.97.
 rust-version = "1.97"
 license.workspace = true
 repository.workspace = true
@@ -17,7 +17,6 @@ autumn-jira.workspace = true
 autumn-harvest.workspace = true
 san-mateo.workspace = true
 async-trait.workspace = true
-chrono.workspace = true
 deadpool.workspace = true
 diesel-async.workspace = true
 hmac.workspace = true

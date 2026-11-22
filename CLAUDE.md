@@ -1,7 +1,7 @@
 # CLAUDE.md
 
-autumn-plugin-jira: a Jira Cloud client, an autumn-web 0.10 plugin, and
-adapters for autumn-harvest 0.10 and rust-camel 0.57. San Mateo gives the
+autumn-plugin-jira: a Jira Cloud client, an autumn-web 0.11 plugin, and
+adapters for autumn-harvest 0.11 and rust-camel 0.57. San Mateo gives the
 auth. `docs/plan.md` is the design. Follow it. A change to a public
 signature changes `docs/plan.md` in the same commit.
 
