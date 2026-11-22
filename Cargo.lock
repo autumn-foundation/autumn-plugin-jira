@@ -430,7 +430,8 @@ dependencies = [
 [[package]]
 name = "autumn-plugin-san-mateo"
 version = "0.4.0"
-source = "git+https://github.com/autumn-foundation/san-mateo?rev=4725a3f0d3da36b47f6c666aed703f34d975c875#4725a3f0d3da36b47f6c666aed703f34d975c875"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a3af01e4404e6d3b89fb333bca8915873d4566228efb00ae0b77f480d490010"
 dependencies = [
  "autumn-web",
  "san-mateo",
@@ -4207,7 +4208,8 @@ dependencies = [
 [[package]]
 name = "san-mateo"
 version = "0.1.0"
-source = "git+https://github.com/autumn-foundation/san-mateo?rev=4725a3f0d3da36b47f6c666aed703f34d975c875#4725a3f0d3da36b47f6c666aed703f34d975c875"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7eea98b6a714e8b99740a9892fd9bc8f400639c7aa9ab69124b7d20244809531"
 dependencies = [
  "aes-gcm 0.10.3",
  "async-trait",

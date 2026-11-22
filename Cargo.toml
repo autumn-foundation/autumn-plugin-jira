@@ -78,11 +78,3 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = false
-
-# autumn-plugin-san-mateo 0.4 (on autumn-web 0.11) and the San Mateo crates
-# on autumn-harvest 0.11 are not on crates.io yet. Remove this patch after
-# the releases. All San Mateo crates come from one git commit, so the lock
-# has one `san-mateo`.
-[patch.crates-io]
-san-mateo = { git = "https://github.com/autumn-foundation/san-mateo", rev = "4725a3f0d3da36b47f6c666aed703f34d975c875" }
-autumn-plugin-san-mateo = { git = "https://github.com/autumn-foundation/san-mateo", rev = "4725a3f0d3da36b47f6c666aed703f34d975c875" }
