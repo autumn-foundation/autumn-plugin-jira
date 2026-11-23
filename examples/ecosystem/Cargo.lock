@@ -493,7 +493,8 @@ dependencies = [
 [[package]]
 name = "autumn-plugin-san-mateo"
 version = "0.4.0"
-source = "git+https://github.com/autumn-foundation/san-mateo?rev=4725a3f0d3da36b47f6c666aed703f34d975c875#4725a3f0d3da36b47f6c666aed703f34d975c875"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a3af01e4404e6d3b89fb333bca8915873d4566228efb00ae0b77f480d490010"
 dependencies = [
  "autumn-web",
  "san-mateo",
@@ -2560,7 +2561,8 @@ dependencies = [
 [[package]]
 name = "harvest-camel"
 version = "0.5.0"
-source = "git+https://github.com/autumn-foundation/harvest-camel?rev=bfdb04ffc10c1cb562518c140bf256b72f2d5bf6#bfdb04ffc10c1cb562518c140bf256b72f2d5bf6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "caee245885e3075cd62436e65f2fba7877c6d2689ab5d319de19ad02ab69472f"
 dependencies = [
  "async-trait",
  "autumn-harvest",
@@ -4767,7 +4769,8 @@ dependencies = [
 [[package]]
 name = "san-mateo"
 version = "0.1.0"
-source = "git+https://github.com/autumn-foundation/san-mateo?rev=4725a3f0d3da36b47f6c666aed703f34d975c875#4725a3f0d3da36b47f6c666aed703f34d975c875"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7eea98b6a714e8b99740a9892fd9bc8f400639c7aa9ab69124b7d20244809531"
 dependencies = [
  "aes-gcm 0.10.3",
  "async-trait",
@@ -4798,7 +4801,8 @@ dependencies = [
 [[package]]
 name = "san-mateo-camel"
 version = "0.1.0"
-source = "git+https://github.com/autumn-foundation/san-mateo?rev=4725a3f0d3da36b47f6c666aed703f34d975c875#4725a3f0d3da36b47f6c666aed703f34d975c875"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "78ce4fda24f4fe3a7661de498c5c07842a4eb1c2d050a7f5146a87ebaeaeed0f"
 dependencies = [
  "async-trait",
  "camel-api",
@@ -4814,7 +4818,8 @@ dependencies = [
 [[package]]
 name = "san-mateo-harvest"
 version = "0.4.0"
-source = "git+https://github.com/autumn-foundation/san-mateo?rev=4725a3f0d3da36b47f6c666aed703f34d975c875#4725a3f0d3da36b47f6c666aed703f34d975c875"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ac8f6152b2c6cb3feacbc6ca3b5413f4ff7ba3032a39e01c77f3b4baef8ca7b"
 dependencies = [
  "autumn-harvest",
  "san-mateo",
